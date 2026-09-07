@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA0000000000000000000004 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000003 /* Markdown */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		3B41EA61304497FD00F4E5EA /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,10 +28,11 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		3B0EB4DC304F23B900409432 /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
+		3B2DBA4D304B0DCB00C262A1 /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
 		3B41EA4A304497FB00F4E5EA /* MarkdownEditorHy4.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MarkdownEditorHy4.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B41EA60304497FD00F4E5EA /* MarkdownEditorHy4Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MarkdownEditorHy4Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B41EA6A304497FD00F4E5EA /* MarkdownEditorHy4UITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MarkdownEditorHy4UITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		3B41EA833044988500F4E5EA /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -59,6 +64,11 @@
 			path = MarkdownEditorHy4UITests;
 			sourceTree = "<group>";
 		};
+		AA0000000000000000000001 /* MarkdownEditor */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MarkdownEditor;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,6 +76,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA0000000000000000000004 /* Markdown in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -86,9 +97,20 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		3B0EB4DF304F23B900409432 /* Products */ = {
+			isa = PBXGroup;
+			name = Products;
+			sourceTree = "<group>";
+		};
+		3B2DBA50304B0DCB00C262A1 /* Products */ = {
+			isa = PBXGroup;
+			name = Products;
+			sourceTree = "<group>";
+		};
 		3B41EA41304497FB00F4E5EA = {
 			isa = PBXGroup;
 			children = (
+				AA0000000000000000000001 /* MarkdownEditor */,
 				3B41EA4C304497FB00F4E5EA /* MarkdownEditorHy4 */,
 				3B41EA63304497FD00F4E5EA /* MarkdownEditorHy4Tests */,
 				3B41EA6D304497FD00F4E5EA /* MarkdownEditorHy4UITests */,
@@ -103,11 +125,6 @@
 				3B41EA60304497FD00F4E5EA /* MarkdownEditorHy4Tests.xctest */,
 				3B41EA6A304497FD00F4E5EA /* MarkdownEditorHy4UITests.xctest */,
 			);
-			name = Products;
-			sourceTree = "<group>";
-		};
-		3B41EA863044988500F4E5EA /* Products */ = {
-			isa = PBXGroup;
 			name = Products;
 			sourceTree = "<group>";
 		};
@@ -128,9 +145,11 @@
 			);
 			fileSystemSynchronizedGroups = (
 				3B41EA4C304497FB00F4E5EA /* MarkdownEditorHy4 */,
+				AA0000000000000000000001 /* MarkdownEditor */,
 			);
 			name = MarkdownEditorHy4;
 			packageProductDependencies = (
+				AA0000000000000000000003 /* Markdown */,
 			);
 			productName = MarkdownEditorHy4;
 			productReference = 3B41EA4A304497FB00F4E5EA /* MarkdownEditorHy4.app */;
@@ -214,13 +233,20 @@
 			);
 			mainGroup = 3B41EA41304497FB00F4E5EA;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3B41EA4B304497FB00F4E5EA /* Products */;
 			projectDirPath = "";
 			projectReferences = (
 				{
-					ProductGroup = 3B41EA863044988500F4E5EA /* Products */;
-					ProjectRef = 3B41EA833044988500F4E5EA /* MarkdownEditorHy4.xcodeproj */;
+					ProductGroup = 3B2DBA50304B0DCB00C262A1 /* Products */;
+					ProjectRef = 3B2DBA4D304B0DCB00C262A1 /* MarkdownEditorHy4.xcodeproj */;
+				},
+				{
+					ProductGroup = 3B0EB4DF304F23B900409432 /* Products */;
+					ProjectRef = 3B0EB4DC304F23B900409432 /* MarkdownEditorHy4.xcodeproj */;
 				},
 			);
 			projectRoot = "";
@@ -496,6 +522,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.MarkdownEditorHy4Tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTS_MACCATALYST = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -518,6 +545,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.MarkdownEditorHy4Tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTS_MACCATALYST = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -607,6 +635,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/swiftlang/swift-markdown.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.8.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA0000000000000000000003 /* Markdown */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */;
+			productName = Markdown;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 3B41EA42304497FB00F4E5EA /* Project object */;
 }
