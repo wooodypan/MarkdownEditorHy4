@@ -216,10 +216,13 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                sourceLength: range.length,
                                attributes: [.paragraphStyle: style, .font: theme.bodyFont]))
         // 在图片下方弱化显示源码 `![alt](url)`：方便用户对照看真实语法。
-        // 提示字符的 mapping 和 attachment 共享同一段源码，靠去重逻辑保证复制不重复。
+        // 这行字**就是源码本身**（真实映射），光标能停在里面正常编辑；
+        // 图片那一个字符位是额外挂上去的，复制时两者靠去重逻辑只输出一次。
         if theme.showsSourceHints {
             out.append(.decoration("\n", attributes: [.paragraphStyle: style, .font: theme.bodyFont]))
-            out.append(.sourceHint(markdownSource, attributes: theme.markerAttributes))
+            out.append(.sourceHint(markdownSource,
+                                   sourceStart: range.location,
+                                   attributes: theme.markerAttributes))
         }
         return out
     }
@@ -378,9 +381,13 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                        sourceStart: markerRange.location,
                                        sourceLength: markerRange.length,
                                        attributes: theme.bodyAttributes(font: theme.bodyFont)))
-                // 圆点后面弱化显示 `- ` 源码：和有序列表的 `1. ` 视觉对称，又能看到真实语法
+                // 圆点后面弱化显示 `- ` 源码：和有序列表的 `1. ` 视觉对称，又能看到真实语法。
+                // 这 `- ` 就是源码本身（真实映射），所以光标停在它后面输入完全正常。
                 if theme.showsSourceHints {
-                    out.append(.sourceHint(markerText, attributes: theme.markerAttributes))
+                    out.append(.sourceHint(markerText,
+                                           sourceStart: markerRange.location,
+                                           isSyntaxMarker: true,
+                                           attributes: theme.markerAttributes))
                 }
             }
         }

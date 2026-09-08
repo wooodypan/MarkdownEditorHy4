@@ -83,9 +83,11 @@ final class MarkdownDocumentStore {
                    containerWidth: CGFloat) -> MarkdownEditOutcome {
         renderer.containerWidth = containerWidth
 
-        // 1) 渲染范围 → 源码范围
-        let sourceStart = sourceCaret(forRenderedOffset: renderedRange.location)
-        let sourceEnd = sourceCaret(forRenderedOffset: NSMaxRange(renderedRange))
+        // 1) 渲染范围 → 源码范围。
+        //    删除时先做一次「语法标记扩展」：退格删到 `- ` 里就整段删掉（见方法注释）
+        let effectiveRange = text.isEmpty ? expandedSyntaxMarkerRange(renderedRange) : renderedRange
+        let sourceStart = sourceCaret(forRenderedOffset: effectiveRange.location)
+        let sourceEnd = sourceCaret(forRenderedOffset: NSMaxRange(effectiveRange))
         let editRange = NSRange(location: sourceStart, length: max(0, sourceEnd - sourceStart))
 
         // 2) 算出新的整篇源码
@@ -93,7 +95,7 @@ final class MarkdownDocumentStore {
         let replacementLength = (text as NSString).length
 
         // 3) 受影响的块
-        let affected = affectedBlockIndices(forRenderedRange: renderedRange, sourceEditRange: editRange)
+        let affected = affectedBlockIndices(forRenderedRange: effectiveRange, sourceEditRange: editRange)
 
         // 4) 需要重新 parse 的区域（先按旧源码取并集，再按增删量伸缩，最后保证包含编辑点）
         var reparseRange = unionSourceRange(of: affected)
@@ -192,23 +194,75 @@ final class MarkdownDocumentStore {
     func renderedCaret(forSourceOffset offset: Int) -> Int {
         for block in blocks {
             let range = block.sourceRange
-            guard offset >= range.location, offset <= NSMaxRange(range) else { continue }
+            // 注意这里是 `<` 不是 `<=`：块与块的源码首尾相接，边界那个偏移同时属于
+            // 「前一块的末尾」和「后一块的开头」。用 `<=` 会命中前一块，
+            // 光标就落到了前一块的最后一个字符位上（比如列表块开头那个圆点里）。
+            // 用 `<` 让边界归后一块，光标才能落在后一块真正的源码文本上。
+            guard offset >= range.location, offset < NSMaxRange(range) else { continue }
 
             let local = offset - range.location
-            for (index, mapping) in block.charMappings.enumerated() {
-                if mapping.isDecoration { continue }
-                // 插在这个字符之前
-                if mapping.sourceStart >= local {
-                    return block.renderedRange.location + index
-                }
-                // 落在这个字符（或 attachment）内部：插到它后面
-                if local < mapping.sourceStart + mapping.sourceLength {
-                    return block.renderedRange.location + index + 1
-                }
-            }
+            // 第一遍：跳过图片、圆点这类「额外挂上去的视觉元素」，
+            // 光标要落在真正的源码文本上（源码文本就在这些元素旁边）。
+            // 否则光标会停进图片里，用户继续输入就成了「在图片里打字」。
+            if let hit = searchCaret(in: block, local: local, skipAttachmentViews: true) { return hit }
+            // 第二遍：这个块里只有视觉元素（比如分隔线 `---` 整块就一个 attachment），
+            // 那就只能落在它身上。
+            if let hit = searchCaret(in: block, local: local, skipAttachmentViews: false) { return hit }
             return block.renderedRange.location + block.renderedLength
         }
         return renderedLength
+    }
+
+    /// 在一个块里找「源码偏移 local」对应的渲染位置
+    /// - parameter skipAttachmentViews: 是否跳过图片 / 圆点这类视觉元素
+    private func searchCaret(in block: MarkdownBlock, local: Int, skipAttachmentViews: Bool) -> Int? {
+        for (index, mapping) in block.charMappings.enumerated() {
+            if mapping.isDecoration { continue }
+            if skipAttachmentViews, mapping.isAttachmentView { continue }
+            // 插在这个字符之前
+            if mapping.sourceStart >= local {
+                return block.renderedRange.location + index
+            }
+            // 落在这个字符（或 attachment）内部：插到它后面
+            if local < mapping.sourceStart + mapping.sourceLength {
+                return block.renderedRange.location + index + 1
+            }
+        }
+        return nil
+    }
+
+    /// 退格删到「语法标记」（列表的 `- `）里时，把删除范围扩展到整个标记。
+    ///
+    /// 否则 `- ` 只删掉一个字符，会留下 `-一级列表项` 这种既不是列表、
+    /// 行首又带着一个破折号的残片；整段删掉才是用户想要的「降级成段落」。
+    private func expandedSyntaxMarkerRange(_ renderedRange: NSRange) -> NSRange {
+        guard renderedRange.length > 0 else { return renderedRange }
+
+        for block in blocks {
+            guard block.renderedRange.intersects(renderedRange) else { continue }
+            let length = block.renderedContent.length
+            guard length > 0 else { continue }
+
+            let local = min(max(0, renderedRange.location - block.renderedRange.location), length - 1)
+            // 删除起点不在语法标记上 → 原样返回
+            guard block.renderedContent.attribute(.markdownSyntaxMarker, at: local, effectiveRange: nil) != nil else {
+                return renderedRange
+            }
+
+            // 往前往后扩，把一整段连续的标记圈出来
+            var lower = local
+            var upper = local + 1
+            while lower - 1 >= 0,
+                  block.renderedContent.attribute(.markdownSyntaxMarker, at: lower - 1, effectiveRange: nil) != nil {
+                lower -= 1
+            }
+            while upper < length,
+                  block.renderedContent.attribute(.markdownSyntaxMarker, at: upper, effectiveRange: nil) != nil {
+                upper += 1
+            }
+            return NSRange(location: block.renderedRange.location + lower, length: upper - lower)
+        }
+        return renderedRange
     }
 
     // MARK: - 块的构建

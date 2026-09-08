@@ -12,17 +12,38 @@ import Markdown
 ///
 /// 这是整个编辑器最关键的一张小表：**富文本层看到的东西** 和 **复制出去的东西** 靠它解耦。
 ///
+/// ### 本编辑器的核心约定（改动前先读这段）
+/// **展示的一定是源码本身**。图片、列表圆点这类「复杂节点」只是在源码**旁边额外挂一个视觉元素**，
+/// 源码字符一个不少地留在文本流里。所以：
+/// - 源码 `![a](b.png)` 这 17 个字符 → 17 条真实映射，逐字符对得上；
+/// - 图片那一个字符位 → `isAttachmentView = true`，是**额外挂上去**的，
+///   复制时它能吐出整段源码（方便只选中图片复制），但光标不会停在上面。
+///
 /// 三种情况：
 /// 1. `sourceStart >= 0, sourceLength == 1`：普通字符，渲染出的第 i 个字符就是源码第 sourceStart 个字符。
-/// 2. `sourceStart >= 0, sourceLength >  1`：一个占位符吃掉了多字符源码，比如图片 `![a](b.png)` 在渲染里只占 1 个字符位，
-///    但复制时要吐回整段 `![a](b.png)`；无序列表的圆点同理（对应源码里的 `- `）。
+/// 2. `sourceStart >= 0, sourceLength >  1`：一个占位符吃掉了多字符源码（`isAttachmentView` 为 true 的那种）。
 /// 3. `sourceStart < 0`：纯装饰（源码里根本没有对应字符），复制时直接跳过。
 struct CharMapping {
     var sourceStart: Int
     var sourceLength: Int
+    /// 这个字符位是「额外挂上去的视觉元素」而不是真正的文本（图片、列表圆点…）。
+    /// 它对应的源码由**旁边那段源码文本**真实承载，所以：
+    /// - 复制：照样能吐出整段源码（用户只选中图片时也能复制到 `![a](b.png)`）；
+    /// - 光标：`renderedCaret` 会跳过它，光标落在真实文本上，绝不停在图片里。
+    var isAttachmentView: Bool
 
     /// 纯装饰：不对应任何源码字符
-    static let decoration = CharMapping(sourceStart: -1, sourceLength: 0)
+    static let decoration = CharMapping(sourceStart: -1, sourceLength: 0, isAttachmentView: false)
+
+    /// 普通源码字符
+    static func source(start: Int, length: Int) -> CharMapping {
+        CharMapping(sourceStart: start, sourceLength: length, isAttachmentView: false)
+    }
+
+    /// 附件的视觉占位（图片、圆点）：映射指向源码，但不作为光标落点
+    static func attachmentView(start: Int, length: Int) -> CharMapping {
+        CharMapping(sourceStart: start, sourceLength: max(1, length), isAttachmentView: true)
+    }
 
     var isDecoration: Bool { sourceStart < 0 }
 }

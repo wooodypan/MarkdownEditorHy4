@@ -200,6 +200,43 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertEqual(restored, source, firstDifference(source, restored))
     }
 
+    /// 核心验收六（回归）：光标停在图片源码 `![示例图片](sample.png)` 中间打字，
+    /// 字符必须插在光标处，不能跳到右括号后面。
+    ///
+    /// ### 这个 bug 是怎么来的（别再改回去）
+    /// 之前把「源码提示」那行文字标成了 decoration（不占源码位置）。
+    /// 于是光标落在 `![alt](url)` 中间时 `sourceCaret` 找不到对应源码，
+    /// 会一路往前找到图片那个 attachment，返回「整段源码的结束位置」——
+    /// 新字符就全被插到右括号后面了。现在提示文字用的是真实映射，逐字符对得上。
+    func testTypingInsideImageSourceStaysInPlace() {
+        let store = makeStore(sample)
+        let marker = "![示例图片](sample.png)"
+        guard let sourceRange = (sample as NSString).range(of: marker).asValid else {
+            return XCTFail("测试文档里找不到图片语法")
+        }
+
+        // 光标放到「示例图片」和「](sample.png)」之间
+        let insertAtSource = sourceRange.location + "![示例图片".utf16.count
+        let caret = store.renderedCaret(forSourceOffset: insertAtSource)
+        let outcome = store.applyEdit(inRenderedRange: NSRange(location: caret, length: 0),
+                                      replacementText: "X",
+                                      containerWidth: 600)
+
+        // 1) 字符必须插在光标处，而不是整段源码的末尾
+        XCTAssertTrue(store.sourceDocument.contains("![示例图片X](sample.png)"),
+                      "字符应该插在光标处，实际源码：\n\(store.sourceDocument)")
+
+        // 2) 光标也要停在刚输入的字符后面（换算回源码应该是插入点的下一个位置）
+        let caretSource = store.sourceCaret(forRenderedOffset: outcome.caretRenderedOffset)
+        XCTAssertEqual(caretSource, insertAtSource + 1,
+                       "光标应该停在刚输入的字符后面，实际落在源码 \(caretSource)")
+
+        // 3) 「复制 === 源码」这个不变量依然要成立
+        let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
+        XCTAssertEqual(restored, store.sourceDocument,
+                       firstDifference(store.sourceDocument, restored))
+    }
+
     /// 空文档和只有空行的文档不能崩，也不能凭空多出字符
     func testEmptyAndBlankDocuments() {
         for source in ["", "\n", "\n\n\n", "   "] {

@@ -41,7 +41,7 @@ struct RenderedFragment {
         for character in string {
             let width = String(character).utf16.count
             for _ in 0..<width {
-                mappings.append(CharMapping(sourceStart: sourceStart + sourceOffset, sourceLength: width))
+                mappings.append(.source(start: sourceStart + sourceOffset, length: width))
             }
             sourceOffset += width
         }
@@ -63,6 +63,9 @@ struct RenderedFragment {
     }
 
     /// 构造一个 attachment：只占 1 个字符位，但吃掉了源码里 `sourceLength` 个字符（比如整段 `![alt](url)`）。
+    ///
+    /// 标成 `isAttachmentView`：它是**额外挂上去的视觉元素**，不是源码文本本身。
+    /// 真正的源码字符由紧随其后的 `.sourceHint(...)` 承载 —— 这样光标才能停在源码里正常编辑。
     static func attachment(_ attachment: NSTextAttachment,
                            sourceStart: Int,
                            sourceLength: Int,
@@ -72,32 +75,44 @@ struct RenderedFragment {
         attributed.addAttributes(attributes, range: NSRange(location: 0, length: attributed.length))
         return RenderedFragment(
             text: attributed,
-            mappings: [CharMapping(sourceStart: sourceStart, sourceLength: max(1, sourceLength))]
+            mappings: [.attachmentView(start: sourceStart, length: sourceLength)]
         )
     }
 
     /// 构造一段「源码提示」：弱化显示的源文本。
     ///
     /// 用在两个地方：
-    /// - 图片下面那行 `![alt](url)`，把被 attachment 吃掉的源码原样补回来展示
+    /// - 图片下面那行 `![alt](url)`，它是**源码本身**，只是弱化显示
     /// - 无序列表圆点后面的 `- `
     ///
-    /// ### 为什么映射是「装饰」（不占源码位置）
-    /// 这些提示字符展示的那段源码，**已经由前面的 attachment 负责输出了**。给它们也标上源码映射
-    /// 会带来两个麻烦：复制时会重复输出；退格时算出来的删除范围会变成 0 长度（因为提示字符
-    /// 和 attachment 的 sourceStart 相同，`sourceCaret` 在相邻两个位置返回同一个偏移）。
+    /// ### 为什么必须用「真实映射」（修「输入跳到右括号后」这个 bug 的关键，别改回装饰）
+    /// 这些字符**就是源码本身**，灰色只是样式，不是装饰品。
+    /// 之前把它们标成 decoration 的后果：光标落在 `![alt](url)` 中间时，
+    /// `sourceCaret` 找不到对应的源码位置，就一路往前找到图片那个 attachment，
+    /// 返回「整段源码的结束位置」—— 于是新输入的字符全被插到右括号后面，光标跟着跳走。
     ///
-    /// 标成装饰之后：
-    /// - 复制：装饰字符直接跳过，源码由 attachment 输出一次，不重不漏；
-    /// - 退格：光标删掉 attachment 那一个字符位，照样一次性删掉整段 `- ` 或 `![alt](url)`。
+    /// 用真实映射之后：光标停在第几个字符，新字符就插到源码的第几个字符之前，所见即所编辑。
+    ///
+    /// ### 复制为什么不会重复
+    /// 前面的 attachment 也映射同一段源码，`sourceText(forRenderedRange:)` 靠 `lastSourceEnd`
+    /// 去重 —— attachment 先输出整段，hint 的字符因为位置更靠前会被跳过，所以整段只输出一次。
+    ///
+    /// ### 打 `.markdownSyntaxMarker` 标记的作用（`isSyntaxMarker = true` 时）
+    /// 退格删到标记里的任意一个字符时，整段一起删掉，否则 `- ` 删一半会留下没意义的残片。
+    /// **只有「纯语法标记」才该开这个开关**（列表的 `- `）：
+    /// 图片那行 `![alt](url)` 里用户可能只是想退格改个文件名，整段删掉反而坑人。
     static func sourceHint(_ string: String,
+                           sourceStart: Int,
+                           isSyntaxMarker: Bool = false,
                            attributes: [NSAttributedString.Key: Any]) -> RenderedFragment {
-        let count = string.utf16.count
-        guard count > 0 else { return .empty }
-        return RenderedFragment(
-            text: NSMutableAttributedString(string: string, attributes: attributes),
-            mappings: Array(repeating: .decoration, count: count)
-        )
+        var fragment = sourceSliced(string, sourceStart: sourceStart, attributes: attributes)
+        guard fragment.text.length > 0 else { return fragment }
+        if isSyntaxMarker {
+            fragment.text.addAttribute(.markdownSyntaxMarker,
+                                       value: true,
+                                       range: NSRange(location: 0, length: fragment.text.length))
+        }
+        return fragment
     }
 
     // MARK: 组合
@@ -242,4 +257,14 @@ struct RenderedFragment {
         }
         return length
     }
+}
+
+// MARK: - 自定义属性
+
+extension NSAttributedString.Key {
+    /// 标记「这段字符是语法标记的弱化显示」（比如图片下面的 `![alt](url)`、圆点后面的 `- `）。
+    ///
+    /// 退格删到这里面任意一个字符时，整段一起删掉 —— 只删一半会留下没意义的残片
+    /// （`- ` 变成 `-`，既不是列表也不是正常的段落开头）。
+    static let markdownSyntaxMarker = NSAttributedString.Key("com.markdowneditor.syntaxMarker")
 }
