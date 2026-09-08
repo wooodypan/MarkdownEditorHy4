@@ -21,8 +21,8 @@ final class BulletAttachment: NSTextAttachment {
     let diameter: CGFloat
     let color: UIColor
 
-    /// 圆点右边留出的间距（相当于源码里 `- ` 那个空格的宽度）
-    private static let trailingGap: CGFloat = 8
+    /// 圆点右边留出的间距（紧贴 `-[空格]` 的那个位置，让圆点和 `-` 之间有点呼吸感）
+    private static let trailingGap: CGFloat = 2
 
     /// 原因见 `MarkdownBlock` 里 `nonisolated deinit` 的注释：
     /// 隔离 deinit 一旦嵌套就会踩 Swift 6.2 运行时的野指针 free。
@@ -38,40 +38,26 @@ final class BulletAttachment: NSTextAttachment {
         //   中心 = y + 高度/2 = capHeight/2   ==>   y = (capHeight - 高度) / 2
         let y = (font.capHeight - diameter) / 2
         bounds = CGRect(x: 0, y: y, width: diameter + Self.trailingGap, height: diameter)
+
+        // 直接给一张画好的圆点图，让 TextKit 当普通文本元素画出来。
+        // 不用 view provider 的原因见 ImageAttachment 的注释（那种方式在整篇替换后会「圆点消失」）。
+        self.image = Self.circleImage(diameter: diameter, color: color, gap: Self.trailingGap)
     }
 
     required init?(coder: NSCoder) {
         fatalError("BulletAttachment 不支持从 coder 解档")
     }
 
-    override func viewProvider(for parentView: UIView?,
-                               location: any NSTextLocation,
-                               textContainer: NSTextContainer?) -> NSTextAttachmentViewProvider? {
-        BulletAttachmentViewProvider(
-            textAttachment: self,
-            parentView: parentView,
-            textLayoutManager: textContainer?.textLayoutManager,
-            location: location
-        )
-    }
-}
-
-/// 圆点的 view provider：一个透明容器 + 一个圆形小 dot。
-private final class BulletAttachmentViewProvider: NSTextAttachmentViewProvider {
-    override func loadView() {
-        guard let attachment = textAttachment as? BulletAttachment else { return }
-        let diameter = attachment.diameter
-
-        // 外面套一层透明容器，宽度里包含圆点右边的间距
-        let container = UIView()
-        container.backgroundColor = .clear
-
-        let dot = UIView(frame: CGRect(x: 2, y: 0, width: diameter, height: diameter))
-        dot.backgroundColor = attachment.color
-        dot.layer.cornerRadius = diameter / 2
-        container.addSubview(dot)
-
-        self.view = container
+    /// 画一个实心圆点，右边留 `gap` 的空白
+    private static func circleImage(diameter: CGFloat, color: UIColor, gap: CGFloat) -> UIImage {
+        let size = CGSize(width: diameter + gap, height: diameter)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = UIScreen.main.scale     // 按屏幕倍率出图，圆点边缘才不会糊
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            color.setFill()
+            // 圆点靠左，右边那段是间距
+            context.cgContext.fillEllipse(in: CGRect(x: 0, y: 0, width: diameter, height: diameter))
+        }
     }
 }
 
@@ -91,33 +77,26 @@ final class SeparatorAttachment: NSTextAttachment {
         self.lineColor = lineColor
         super.init(data: nil, ofType: nil)
 
+        let lineWidth = max(20, width)
         // 高度 1，垂直位置对齐文字的大写字母中线
         let y = (font.capHeight - 1) / 2
-        bounds = CGRect(x: 0, y: y, width: max(20, width), height: 1)
+        bounds = CGRect(x: 0, y: y, width: lineWidth, height: 1)
+
+        // 和圆点一样走「给 image 让 TextKit 画」这条路，不用 view provider
+        self.image = Self.lineImage(width: lineWidth, color: lineColor)
     }
 
     required init?(coder: NSCoder) {
         fatalError("SeparatorAttachment 不支持从 coder 解档")
     }
 
-    override func viewProvider(for parentView: UIView?,
-                               location: any NSTextLocation,
-                               textContainer: NSTextContainer?) -> NSTextAttachmentViewProvider? {
-        SeparatorAttachmentViewProvider(
-            textAttachment: self,
-            parentView: parentView,
-            textLayoutManager: textContainer?.textLayoutManager,
-            location: location
-        )
-    }
-}
-
-/// 分隔线的 view provider：一条横线
-private final class SeparatorAttachmentViewProvider: NSTextAttachmentViewProvider {
-    override func loadView() {
-        guard let attachment = textAttachment as? SeparatorAttachment else { return }
-        let line = UIView()
-        line.backgroundColor = attachment.lineColor
-        self.view = line
+    /// 画一条 1 点高的横线
+    private static func lineImage(width: CGFloat, color: UIColor) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = UIScreen.main.scale
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: 1), format: format).image { context in
+            color.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: width, height: 1))
+        }
     }
 }

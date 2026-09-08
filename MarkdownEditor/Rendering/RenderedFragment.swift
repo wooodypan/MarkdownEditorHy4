@@ -76,6 +76,30 @@ struct RenderedFragment {
         )
     }
 
+    /// 构造一段「源码提示」：弱化显示的源文本。
+    ///
+    /// 用在两个地方：
+    /// - 图片下面那行 `![alt](url)`，把被 attachment 吃掉的源码原样补回来展示
+    /// - 无序列表圆点后面的 `- `
+    ///
+    /// ### 为什么映射是「装饰」（不占源码位置）
+    /// 这些提示字符展示的那段源码，**已经由前面的 attachment 负责输出了**。给它们也标上源码映射
+    /// 会带来两个麻烦：复制时会重复输出；退格时算出来的删除范围会变成 0 长度（因为提示字符
+    /// 和 attachment 的 sourceStart 相同，`sourceCaret` 在相邻两个位置返回同一个偏移）。
+    ///
+    /// 标成装饰之后：
+    /// - 复制：装饰字符直接跳过，源码由 attachment 输出一次，不重不漏；
+    /// - 退格：光标删掉 attachment 那一个字符位，照样一次性删掉整段 `- ` 或 `![alt](url)`。
+    static func sourceHint(_ string: String,
+                           attributes: [NSAttributedString.Key: Any]) -> RenderedFragment {
+        let count = string.utf16.count
+        guard count > 0 else { return .empty }
+        return RenderedFragment(
+            text: NSMutableAttributedString(string: string, attributes: attributes),
+            mappings: Array(repeating: .decoration, count: count)
+        )
+    }
+
     // MARK: 组合
 
     mutating func append(_ other: RenderedFragment) {

@@ -47,6 +47,8 @@ struct MarkdownTheme {
     var headingSpacing: CGFloat
     /// 图片最大高度（防止一张长图撑爆屏幕）
     var imageMaxHeight: CGFloat
+    /// 是否显示「源码提示」：图片下面那行 `![alt](url)`、圆点后面的 `- `
+    var showsSourceHints: Bool = true
 
     // MARK: 默认样式
 

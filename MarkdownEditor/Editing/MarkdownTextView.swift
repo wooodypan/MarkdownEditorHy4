@@ -47,6 +47,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private(set) var isApplyingModelChange = false
     /// 上一次渲染时用的容器宽度，窗口尺寸变了要整篇重排
     private var renderedWidth: CGFloat = 0
+    /// 有一整篇内容等着写进 textStorage（真正的写入要等到布局阶段）
+    private var pendingFullReplace = false
     /// 输入法组合还没结束，等结束（markedTextRange == nil）再补一次排版
     private var needsReconcileAfterComposition = false
 
@@ -99,13 +101,45 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     func setMarkdown(_ markdown: String) {
         documentStore.load(markdown: markdown, containerWidth: currentContainerWidth)
         renderedWidth = currentContainerWidth
-
-        let attributed = documentStore.attributedDocument
-        isApplyingModelChange = true
-        textStorage.setAttributedString(attributed)
-        isApplyingModelChange = false
-
         lastSyncedString = documentStore.renderedString
+
+        // 真正的 storage 写入推迟到布局阶段做（原因见 applyPendingFullReplace 的注释）。
+        // 这里立刻跑一次 layoutIfNeeded，保证 setMarkdown 返回后内容就已经就位。
+        pendingFullReplace = true
+        setNeedsLayout()
+        layoutIfNeeded()
+        // 兜底：view 还没挂到 window 上（比如 init 刚结束）时 layoutSubviews 不会来，这里补一次
+        if pendingFullReplace { applyPendingFullReplace() }
+    }
+
+    /// 把模型里的渲染结果整篇写进 textStorage。
+    ///
+    /// ### 为什么必须放在 `layoutSubviews` 里做（TextKit 2 的坑，别删）
+    /// 在按钮事件里同步整篇替换，TextKit 2 会把所有 attachment 的 view 从视图树里摘掉，
+    /// 却**不会**为新的 attachment 建 view —— 于是「图片和圆点全部消失，滚一下才回来」。
+    /// 只有放在布局阶段做，TextKit 才会跟着重建 view。
+    ///
+    /// 试过但**都无效**的绕法（别再试一遍了）：
+    /// `invalidateLayout(for:)`、`ensureLayout(for:)`、`textViewportLayoutController.layoutViewport()`、
+    /// 抖动 `textContainer.size`、把 `attributedText` 清空再赋值、拆成「先清空再回填」两步、
+    /// 让「源码没变的块」复用旧的 attachment 实例。
+    private func applyPendingFullReplace() {
+        pendingFullReplace = false
+        isApplyingModelChange = true
+        replaceWholeStorage(with: documentStore.attributedDocument)
+        isApplyingModelChange = false
+    }
+
+    /// 整篇替换 backingStorage 的内容（包在编辑事务里，确保 TextKit 收到「内容变了」的通知）
+    private func replaceWholeStorage(with attributed: NSAttributedString) {
+        let whole = NSRange(location: 0, length: backingStorage.length)
+        if let contentStorage = textLayoutManager?.textContentManager as? NSTextContentStorage {
+            contentStorage.performEditingTransaction {
+                backingStorage.replaceCharacters(in: whole, with: attributed)
+            }
+        } else {
+            backingStorage.replaceCharacters(in: whole, with: attributed)
+        }
     }
 
     /// 当前源码（和「全选复制」出来的内容完全一致）
@@ -122,6 +156,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     override func layoutSubviews() {
         super.layoutSubviews()
 
+        // 有整篇内容等着写入：现在就写（这一步必须在布局阶段做，见 applyPendingFullReplace 的注释）
+        if pendingFullReplace { applyPendingFullReplace() }
+
         // 容器宽度变了（转屏、Catalyst 拉窗口）→ 图片尺寸要跟着变，整篇重排一次
         let width = currentContainerWidth
         guard abs(width - renderedWidth) > 1, !isApplyingModelChange, markedTextRange == nil else { return }
@@ -135,10 +172,11 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         documentStore.load(markdown: documentStore.fullSource, containerWidth: renderedWidth)
 
         isApplyingModelChange = true
-        textStorage.setAttributedString(documentStore.attributedDocument)
+        replaceWholeStorage(with: documentStore.attributedDocument)
         isApplyingModelChange = false
 
         lastSyncedString = documentStore.renderedString
+
         let caret = min(documentStore.renderedCaret(forSourceOffset: sourceCaret), (text as NSString).length)
         selectedRange = NSRange(location: caret, length: 0)
     }

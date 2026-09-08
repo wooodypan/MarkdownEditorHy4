@@ -210,10 +210,18 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         attachment.loadIfNeeded(host: attachmentHost)
 
         let style = theme.blockAttachmentParagraphStyle(indent: indent)
-        return .attachment(attachment,
-                           sourceStart: range.location,
-                           sourceLength: range.length,
-                           attributes: [.paragraphStyle: style, .font: theme.bodyFont])
+        var out = RenderedFragment.empty
+        out.append(.attachment(attachment,
+                               sourceStart: range.location,
+                               sourceLength: range.length,
+                               attributes: [.paragraphStyle: style, .font: theme.bodyFont]))
+        // 在图片下方弱化显示源码 `![alt](url)`：方便用户对照看真实语法。
+        // 提示字符的 mapping 和 attachment 共享同一段源码，靠去重逻辑保证复制不重复。
+        if theme.showsSourceHints {
+            out.append(.decoration("\n", attributes: [.paragraphStyle: style, .font: theme.bodyFont]))
+            out.append(.sourceHint(markdownSource, attributes: theme.markerAttributes))
+        }
+        return out
     }
 
     // MARK: 块级节点
@@ -358,7 +366,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                 out.append(.sourceSliced(markerText, sourceStart: markerRange.location, attributes: theme.listMarkerAttributes))
             } else {
                 // 无序列表：圆点 attachment 占 1 个字符位，但映射到源码里的 `- ` 这段，
-                // 于是「复制还原」和「退格降级」两个行为自动就对了
+                // 于是「复制还原」和「退格降级」两个行为自动就对了。
                 let bullet = BulletAttachment(diameter: theme.bulletDiameter,
                                               color: theme.bulletColor,
                                               font: theme.bodyFont)
@@ -366,6 +374,10 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                        sourceStart: markerRange.location,
                                        sourceLength: markerRange.length,
                                        attributes: theme.bodyAttributes(font: theme.bodyFont)))
+                // 圆点后面弱化显示 `- ` 源码：和有序列表的 `1. ` 视觉对称，又能看到真实语法
+                if theme.showsSourceHints {
+                    out.append(.sourceHint(markerText, attributes: theme.markerAttributes))
+                }
             }
         }
 
