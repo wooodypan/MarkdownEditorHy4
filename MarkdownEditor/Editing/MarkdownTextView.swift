@@ -52,6 +52,23 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 输入法组合还没结束，等结束（markedTextRange == nil）再补一次排版
     private var needsReconcileAfterComposition = false
 
+    // MARK: 代码块装饰（整块背景矩形 + 右上角复制按钮）
+
+    /// 背景层：加在最底层，画在文字下面
+    private let codeBlockBackgroundLayer = CodeBlockBackgroundLayer()
+    /// 控件层：加在最上层，放复制按钮
+    private let codeBlockControlLayer = CodeBlockControlLayer()
+    /// 已经算好的代码块矩形（**文档坐标系**，滚动时只需要整体平移）
+    private var codeBlockFrames: [(info: CodeBlockInfo, frame: CGRect)] = []
+    /// 下一个布局周期要不要重算矩形（文本内容/宽度变了才需要）
+    private var needsCodeBlockRefresh = false
+    /// 上次重算时的「签名」，用来判断内容或宽度有没有变
+    private var lastCodeBlockSignature = ""
+    /// 首帧 TextKit 还没排出 fragment，允许重试几次
+    private var codeBlockRetryCount = 0
+    /// 监听滚动：滚动只改位置，不重算布局
+    private var contentOffsetObservation: NSKeyValueObservation?
+
     // MARK: 初始化
 
     init(markdown: String = "") {
@@ -72,6 +89,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         imageBaseURL = Bundle.main.resourceURL
 
         configureTextView()
+        setupCodeBlockDecorations()
         setMarkdown(markdown)
     }
 
@@ -159,6 +177,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 有整篇内容等着写入：现在就写（这一步必须在布局阶段做，见 applyPendingFullReplace 的注释）
         if pendingFullReplace { applyPendingFullReplace() }
 
+        // 代码块背景矩形跟着布局走（内容或宽度变了会重算，纯滚动只平移）
+        updateCodeBlockDecorationsIfNeeded()
+
         // 容器宽度变了（转屏、Catalyst 拉窗口）→ 图片尺寸要跟着变，整篇重排一次
         let width = currentContainerWidth
         guard abs(width - renderedWidth) > 1, !isApplyingModelChange, markedTextRange == nil else { return }
@@ -176,9 +197,154 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         isApplyingModelChange = false
 
         lastSyncedString = documentStore.renderedString
+        needsCodeBlockRefresh = true
 
         let caret = min(documentStore.renderedCaret(forSourceOffset: sourceCaret), (text as NSString).length)
         selectedRange = NSRange(location: caret, length: 0)
+    }
+
+    // MARK: - 代码块装饰（整块一个矩形背景 + 右上角复制按钮）
+
+    /// 铺好两层容器：背景在**最底层**（被文字压着），复制按钮在**最上层**（能点）
+    private func setupCodeBlockDecorations() {
+        // 背景层要插到 index 0，否则会盖住文字
+        insertSubview(codeBlockBackgroundLayer, at: 0)
+        addSubview(codeBlockControlLayer)
+
+        // 滚动时只做平移，不重算 —— 重算要走 TextKit 布局，滚动中做太贵
+        contentOffsetObservation = observe(\.contentOffset, options: []) { [weak self] _, _ in
+            self?.positionCodeBlockDecorations()
+        }
+    }
+
+    /// 每次布局时决定：是「重算矩形」还是「只平移」。
+    /// 只有文本内容或宽度变了才需要重算，纯滚动走平移分支。
+    private func updateCodeBlockDecorationsIfNeeded() {
+        let signature = "\(textStorage.length)/\(Int(bounds.width))"
+        guard needsCodeBlockRefresh || signature != lastCodeBlockSignature else {
+            positionCodeBlockDecorations()
+            return
+        }
+        lastCodeBlockSignature = signature
+        needsCodeBlockRefresh = false
+        refreshCodeBlockDecorations()
+    }
+
+    private func refreshCodeBlockDecorations() {
+        let (frames, pending) = computeCodeBlockFrames()
+        codeBlockFrames = frames
+
+        // 文本里已经有代码块，但 TextKit 还没排出 fragment（首帧常见）→ 下一帧再算
+        if pending, codeBlockRetryCount < 5 {
+            codeBlockRetryCount += 1
+            needsCodeBlockRefresh = true
+            setNeedsLayout()
+        } else {
+            codeBlockRetryCount = 0
+        }
+        positionCodeBlockDecorations()
+    }
+
+    /// 算出每个代码块在**文档坐标系**下占的矩形。
+    ///
+    /// - returns: `(frames, pending)`。`pending == true` 表示「文本里有代码块，
+    ///            但 TextKit 还没把它排出来」，需要等下一个布局周期重试。
+    private func computeCodeBlockFrames() -> (frames: [(info: CodeBlockInfo, frame: CGRect)], pending: Bool) {
+        guard let layoutManager = textLayoutManager,
+              let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
+              bounds.width > 1 else { return ([], false) }
+
+        // 1) 扫出所有代码块区间（渲染时打的 `.markdownCodeBlock` 标记）
+        var marked: [(NSRange, CodeBlockInfo)] = []
+        let full = NSRange(location: 0, length: textStorage.length)
+        textStorage.enumerateAttribute(.markdownCodeBlock, in: full, options: []) { value, range, _ in
+            guard let info = value as? CodeBlockInfo else { return }
+            marked.append((range, info))
+        }
+        guard !marked.isEmpty else { return ([], false) }
+
+        // 2) 横向范围固定：去掉 textContainerInset 左右内间距后的整行宽度
+        let width = max(0, bounds.width - textContainerInset.left - textContainerInset.right)
+        let x = textContainerInset.left
+        let padding = renderer.theme.codeBlockVerticalPadding
+        let documentStart = contentStorage.documentRange.location
+
+        var frames: [(info: CodeBlockInfo, frame: CGRect)] = []
+        frames.reserveCapacity(marked.count)
+
+        for (range, info) in marked {
+            // NSTextContentStorage 用的是 UTF-16 偏移，和 NSRange.location 同一套坐标
+            guard let startLocation = contentStorage.location(documentStart, offsetBy: range.location),
+                  let endLocation = contentStorage.location(documentStart, offsetBy: NSMaxRange(range)) else { continue }
+
+            // 3) 纵向范围：把这个区间覆盖到的所有 layout fragment 的外接矩形求出来
+            var top: CGFloat?
+            var bottom: CGFloat = 0
+
+            layoutManager.enumerateTextLayoutFragments(from: startLocation, options: [.ensuresLayout]) { fragment in
+                let rect = fragment.layoutFragmentFrame
+                if !rect.isNull, rect.height > 0 {
+                    top = min(top ?? rect.minY, rect.minY)
+                    bottom = max(bottom, rect.maxY)
+                }
+                // 还没走到这个代码块的结尾就继续（offset > 0 表示 endLocation 在后面）
+                return contentStorage.offset(from: fragment.rangeInElement.endLocation, to: endLocation) > 0
+            }
+
+            guard let top else { continue }
+            frames.append((info, CGRect(x: x,
+                                        y: top - padding,
+                                        width: width,
+                                        height: (bottom - top) + padding * 2)))
+        }
+        return (frames, frames.isEmpty)
+    }
+
+    /// 把文档坐标的矩形搬到屏幕上，铺背景 view 和复制按钮
+    private func positionCodeBlockDecorations() {
+        codeBlockBackgroundLayer.frame = bounds
+        codeBlockControlLayer.frame = bounds
+
+        // 代码块数量很少，每次重建比维护复用池省心
+        codeBlockBackgroundLayer.subviews.forEach { $0.removeFromSuperview() }
+        codeBlockControlLayer.subviews.forEach { $0.removeFromSuperview() }
+
+        let theme = renderer.theme
+        let buttonSize = CodeBlockCopyButton.size
+        let margin: CGFloat = 6
+        // 可见范围，上下各留 200pt 余量，滚快一点也不会闪出空白
+        let visible = CGRect(x: 0, y: -200, width: bounds.width, height: bounds.height + 400)
+
+        for (info, documentFrame) in codeBlockFrames {
+            // 文档坐标 → 本层坐标：减掉滚动偏移
+            var frame = documentFrame
+            frame.origin.x -= contentOffset.x
+            frame.origin.y -= contentOffset.y
+
+            guard frame.intersects(visible) else { continue }
+
+            let background = UIView(frame: frame)
+            background.backgroundColor = theme.codeBlockBackground
+            background.layer.cornerRadius = theme.codeBlockCornerRadius
+            background.isUserInteractionEnabled = false
+            codeBlockBackgroundLayer.addSubview(background)
+
+            let button = CodeBlockCopyButton()
+            button.codeBlock = info
+            button.frame = CGRect(x: frame.maxX - margin - buttonSize,
+                                  y: frame.minY + margin,
+                                  width: buttonSize,
+                                  height: buttonSize)
+            button.addTarget(self, action: #selector(copyCodeBlock(_:)), for: .touchUpInside)
+            codeBlockControlLayer.addSubview(button)
+        }
+    }
+
+    /// 点右上角按钮：把该代码块的正文（不含 ``` 围栏）放进系统剪贴板
+    @objc private func copyCodeBlock(_ sender: CodeBlockCopyButton) {
+        guard let info = sender.codeBlock else { return }
+        UIPasteboard.general.string = info.code
+        sender.flashCopied()
     }
 
     // MARK: - 编辑管线
@@ -264,6 +430,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         isApplyingModelChange = false
 
         lastSyncedString = documentStore.renderedString
+        needsCodeBlockRefresh = true
 
         let caret = min(outcome.caretRenderedOffset, (text as NSString).length)
         if selectedRange.location != caret || selectedRange.length != 0 {

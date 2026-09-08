@@ -47,6 +47,12 @@ struct MarkdownTheme {
     var headingSpacing: CGFloat
     /// 图片最大高度（防止一张长图撑爆屏幕）
     var imageMaxHeight: CGFloat
+    /// 代码块矩形背景的圆角
+    var codeBlockCornerRadius: CGFloat
+    /// 代码块矩形比文字上下各多出来的留白
+    var codeBlockVerticalPadding: CGFloat
+    /// 代码文字相对矩形左边的缩进
+    var codeBlockTextInset: CGFloat
     /// 是否显示「源码提示」：图片下面那行 `![alt](url)`、圆点后面的 `- `
     var showsSourceHints: Bool = true
 
@@ -74,7 +80,10 @@ struct MarkdownTheme {
             quoteIndent: 16,
             paragraphSpacing: 6,
             headingSpacing: 14,
-            imageMaxHeight: 420
+            imageMaxHeight: 420,
+            codeBlockCornerRadius: 8,
+            codeBlockVerticalPadding: 6,
+            codeBlockTextInset: 10
         )
     }
 
@@ -110,11 +119,13 @@ struct MarkdownTheme {
          .backgroundColor: inlineCodeBackground]
     }
 
-    /// 代码块
+    /// 代码块正文。
+    ///
+    /// 注意这里**没有** backgroundColor —— 整块的背景是由 `MarkdownTextView` 画的一个
+    /// 圆角矩形（`codeBlockBackground`），逐字符加背景会变成一条条的色带，块与块之间还断开。
     var codeBlockAttributes: [NSAttributedString.Key: Any] {
         [.font: codeFont,
-         .foregroundColor: textColor,
-         .backgroundColor: codeBlockBackground]
+         .foregroundColor: textColor]
     }
 
     /// 链接正文
@@ -149,12 +160,12 @@ struct MarkdownTheme {
         return style
     }
 
-    /// 代码块段落（左右各留一点内边距，靠 headIndent 实现）
+    /// 代码块段落：文字相对背景矩形往里缩一点，右边也留出对称的间距
     func codeParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
-        style.headIndent = indent + 8
-        style.firstLineHeadIndent = indent + 8
-        style.tailIndent = -8
+        style.headIndent = indent + codeBlockTextInset
+        style.firstLineHeadIndent = indent + codeBlockTextInset
+        style.tailIndent = -codeBlockTextInset
         style.paragraphSpacingBefore = paragraphSpacing
         style.paragraphSpacing = paragraphSpacing
         return style
