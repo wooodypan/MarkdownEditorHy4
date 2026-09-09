@@ -455,6 +455,97 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         return out
     }
 
+    // MARK: 折叠（顶层块左侧的展开 / 折叠按钮）
+
+    /// 生成一个「折叠 / 展开」小三角。
+    ///
+    /// 它是**纯装饰**：源码里没有对应字符，复制时跳过（见 `decorationAttachment`）。
+    ///
+    /// - parameter paragraphStyle: 按钮要继承的段落样式。**必须传**，原因见 `prependFoldDisclosure`。
+    private func foldDisclosureFragment(blockID: UUID,
+                                        isCollapsed: Bool,
+                                        paragraphStyle: NSParagraphStyle?) -> RenderedFragment {
+        let attachment = FoldDisclosureAttachment(blockID: blockID,
+                                                  isCollapsed: isCollapsed,
+                                                  side: theme.foldButtonSide,
+                                                  trailingGap: theme.foldButtonGap,
+                                                  color: theme.foldButtonColor,
+                                                  font: theme.bodyFont)
+        var attributes: [NSAttributedString.Key: Any] = [.font: theme.bodyFont]
+        if let paragraphStyle { attributes[.paragraphStyle] = paragraphStyle }
+        return .decorationAttachment(attachment, attributes: attributes)
+    }
+
+    /// 把「折叠 / 展开」按钮插到一个块的第一行行首。
+    ///
+    /// ### 为什么必须继承段落样式（这里踩过坑，别删）
+    /// TextKit 拿**段落里第一个字符**的 `paragraphStyle` 当整段的样式。按钮插到最前面
+    /// 就成了那个「第一个字符」，如果它自己不带样式，列表的悬挂缩进、引用块的缩进
+    /// 会整段被抹平。所以这里把插入点原来那个字符的段落样式抄过来。
+    ///
+    /// - parameter blockID:    所属块（点按钮时靠它反查要折叠哪一块）
+    /// - parameter isCollapsed: 当前折叠状态（决定三角朝向）
+    func prependFoldDisclosure(to fragment: inout RenderedFragment,
+                               blockID: UUID,
+                               isCollapsed: Bool) {
+        guard fragment.text.length > 0 else { return }
+
+        let index = firstNonWhitespaceIndex(in: fragment.text)
+        let style = fragment.text.attribute(.paragraphStyle,
+                                            at: min(index, fragment.text.length - 1),
+                                            effectiveRange: nil) as? NSParagraphStyle
+
+        let button = foldDisclosureFragment(blockID: blockID,
+                                            isCollapsed: isCollapsed,
+                                            paragraphStyle: style)
+        fragment.text.insert(button.text, at: index)
+        fragment.mappings.insert(button.mappings[0], at: index)
+    }
+
+    /// 折叠状态下整块的内容：**小三角 + 一个「⋯」占位符**（两三个字符位代替整块）。
+    ///
+    /// ### 折叠了源码还在吗？在
+    /// 折叠只是视图状态，`MarkdownBlock.sourceText` 一个字没动。
+    /// 占位符映射到「整块源码」（`.attachmentView(start: 0, length: 整块长度)`），
+    /// 所以复制时它这一个字符位会吐出整块源码 ——
+    /// **「全选复制 === 源文件」在折叠状态下依然成立**（有测试守着）。
+    func collapsedContent(blockID: UUID,
+                          sourceText: String) -> (text: NSAttributedString, mappings: [CharMapping]) {
+        let style = theme.paragraphStyle(indent: 0)
+        var fragment = RenderedFragment.empty
+
+        fragment.append(foldDisclosureFragment(blockID: blockID,
+                                               isCollapsed: true,
+                                               paragraphStyle: style))
+
+        let placeholder = CollapsedBlockAttachment(width: theme.collapsedPlaceholderWidth,
+                                                   color: theme.collapsedPlaceholderColor,
+                                                   font: theme.bodyFont)
+        fragment.append(.attachment(placeholder,
+                                    sourceStart: 0,
+                                    sourceLength: sourceText.utf16Length,
+                                    attributes: [.font: theme.bodyFont, .paragraphStyle: style]))
+        return (fragment.text, fragment.mappings)
+    }
+
+    /// 第一个「不是换行 / 空格 / 制表符」的字符位置。
+    ///
+    /// 块源码开头偶尔会带着上一块留下的空行（`buildBlocks` 会让第一个块吃掉区域开头的空白），
+    /// 按钮不能插到空行那一行去，否则屏幕上会出现一个孤零零的三角。
+    private func firstNonWhitespaceIndex(in text: NSAttributedString) -> Int {
+        let ns = text.string as NSString
+        var index = 0
+        while index < ns.length {
+            let character = ns.character(at: index)
+            if character == 0x0A || character == 0x0D || character == 0x20 || character == 0x09 {
+                index += 1
+            } else {
+                break
+            }
+        }
+        return index
+    }
+
     // MARK: - 小工具
 
     /// 当前字体（栈顶）

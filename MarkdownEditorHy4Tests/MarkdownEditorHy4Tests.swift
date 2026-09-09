@@ -237,6 +237,103 @@ final class MarkdownEditorHy4Tests: XCTestCase {
                        firstDifference(store.sourceDocument, restored))
     }
 
+    // MARK: - 折叠 / 展开
+
+    /// 每个顶层块的第一个字符位上都挂着一个折叠按钮，而且它是纯装饰（不占源码位置）
+    func testEveryTopLevelBlockHasFoldDisclosure() {
+        let store = makeStore(sample)
+
+        var checked = 0
+        for block in store.blocks {
+            // 纯空白块不配拥有折叠按钮（它本来就看不见）
+            if block.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+
+            // 块源码开头偶尔带着上一块留下的换行，按钮会跳过这些空白，所以往后找几位
+            guard let attachment = (0..<min(4, block.renderedLength))
+                .compactMap({ block.renderedContent.attribute(.attachment, at: $0, effectiveRange: nil) })
+                .compactMap({ $0 as? FoldDisclosureAttachment })
+                .first else {
+                return XCTFail("块「\(block.kindDescription)」开头没有折叠按钮")
+            }
+
+            XCTAssertFalse(attachment.isCollapsed, "初始状态应该是展开的")
+            XCTAssertEqual(attachment.blockID, block.id, "按钮必须记住自己属于哪个块，否则点了不知道折叠谁")
+            XCTAssertTrue(block.mapping(at: 0)?.isDecoration == true,
+                          "折叠按钮不能占源码位置，否则复制出来的文本会多一个字符")
+            checked += 1
+        }
+        XCTAssertGreaterThan(checked, 5, "示例文档应该有 5 个以上的顶层块")
+    }
+
+    /// 折叠之后「全选复制 === 源码」必须依然成立：折叠只是视图状态，源码一个字没少
+    func testCollapsedBlockStillCopiesFullSource() {
+        let source = sample
+        let store = makeStore(source)
+
+        guard let index = store.blocks.firstIndex(where: { $0.kindDescription.contains("List") }) else {
+            return XCTFail("示例文档里找不到列表块")
+        }
+
+        let lengthBefore = store.renderedLength
+        XCTAssertNotNil(store.toggleCollapse(blockAt: index), "折叠应该成功")
+        XCTAssertTrue(store.blocks[index].isCollapsed, "折叠状态没写回块")
+        XCTAssertLessThan(store.renderedLength, lengthBefore, "折叠后渲染长度应该变短")
+
+        // 1) 源码一个字都不能变
+        XCTAssertEqual(store.sourceDocument, source, "折叠不能改动源码")
+
+        // 2) 折叠着全选复制，拿到的依然是完整源码（靠占位符那一个字符位吐出整块内容）
+        let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
+        XCTAssertEqual(restored, source, firstDifference(source, restored))
+
+        // 3) 每个块的映射表长度还是要和渲染长度对得上
+        for block in store.blocks {
+            XCTAssertEqual(block.charMappings.count, block.renderedLength,
+                           "块「\(block.kindDescription)」的映射表长度和渲染长度对不上")
+        }
+    }
+
+    /// 折叠 → 展开，应该回到原样（渲染长度、源码、复制结果都不变）
+    func testCollapseExpandRoundTrip() {
+        let source = sample
+        let store = makeStore(source)
+        let lengthBefore = store.renderedLength
+
+        store.toggleCollapse(blockAt: 2)
+        store.toggleCollapse(blockAt: 2)
+
+        XCTAssertFalse(store.blocks[2].isCollapsed, "折回来应该是展开状态")
+        XCTAssertEqual(store.renderedLength, lengthBefore, "折叠再展开应该回到原来的长度")
+        XCTAssertEqual(store.sourceDocument, source, "来回切一次不能改动源码")
+
+        let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
+        XCTAssertEqual(restored, source, firstDifference(source, restored))
+    }
+
+    /// 在折叠的块里编辑一个字，折叠状态不能丢（否则「折叠一段 → 敲个字 → 它自己展开了」很烦人）
+    func testCollapseStateSurvivesEditingInsideBlock() {
+        let store = makeStore(sample)
+
+        guard let index = store.blocks.firstIndex(where: { $0.kindDescription.contains("Paragraph") }) else {
+            return XCTFail("示例文档里找不到段落块")
+        }
+        store.toggleCollapse(blockAt: index)
+
+        // 在块首敲一个字：块的源码起点没变，折叠状态应该靠「起点相同」这条规则继承下来
+        let caret = store.renderedCaret(forSourceOffset: store.blocks[index].sourceRange.location)
+        store.applyEdit(inRenderedRange: NSRange(location: caret, length: 0),
+                        replacementText: "X",
+                        containerWidth: 600)
+
+        XCTAssertTrue(store.blocks.contains { $0.isCollapsed },
+                      "在块内部编辑不应该把折叠状态弄丢，实际状态：\(store.blocks.map(\.isCollapsed))")
+
+        // 顺便确认这个不变量依然成立
+        let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
+        XCTAssertEqual(restored, store.sourceDocument,
+                       firstDifference(store.sourceDocument, restored))
+    }
+
     /// 空文档和只有空行的文档不能崩，也不能凭空多出字符
     func testEmptyAndBlankDocuments() {
         for source in ["", "\n", "\n\n\n", "   "] {

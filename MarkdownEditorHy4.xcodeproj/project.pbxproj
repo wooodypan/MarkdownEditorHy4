@@ -29,6 +29,7 @@
 
 /* Begin PBXFileReference section */
 		3B0EB4DC304F23B900409432 /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
+		3B0EB5E23051BA0F00409432 /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
 		3B2DBA4D304B0DCB00C262A1 /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
 		3B41EA4A304497FB00F4E5EA /* MarkdownEditorHy4.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MarkdownEditorHy4.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B41EA60304497FD00F4E5EA /* MarkdownEditorHy4Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MarkdownEditorHy4Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -98,6 +99,11 @@
 
 /* Begin PBXGroup section */
 		3B0EB4DF304F23B900409432 /* Products */ = {
+			isa = PBXGroup;
+			name = Products;
+			sourceTree = "<group>";
+		};
+		3B0EB5E53051BA0F00409432 /* Products */ = {
 			isa = PBXGroup;
 			name = Products;
 			sourceTree = "<group>";
@@ -240,6 +246,10 @@
 			productRefGroup = 3B41EA4B304497FB00F4E5EA /* Products */;
 			projectDirPath = "";
 			projectReferences = (
+				{
+					ProductGroup = 3B0EB5E53051BA0F00409432 /* Products */;
+					ProjectRef = 3B0EB5E23051BA0F00409432 /* MarkdownEditorHy4.xcodeproj */;
+				},
 				{
 					ProductGroup = 3B2DBA50304B0DCB00C262A1 /* Products */;
 					ProjectRef = 3B2DBA4D304B0DCB00C262A1 /* MarkdownEditorHy4.xcodeproj */;

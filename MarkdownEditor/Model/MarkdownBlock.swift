@@ -77,6 +77,17 @@ final class MarkdownBlock {
     /// 调试用：这个块是什么语法类型
     var kindDescription: String
 
+    /// 这一块是不是被折叠了（只显示第一行左侧的三角和一个「⋯」占位符）。
+    ///
+    /// ### 这是**视图状态**，不是源码的一部分
+    /// 折叠不会往源码里加任何字符，`sourceText` 一个字都没变，
+    /// 所以「全选复制 === 源文件」在折叠状态下仍然成立
+    /// （靠 `CollapsedBlockAttachment` 那一个字符位吐出整块源码）。
+    ///
+    /// 块在编辑后会被重新创建（`buildBlocks` 生成新实例），折叠状态由
+    /// `MarkdownDocumentStore` 按「源码起点 / 源码文本」匹配着继承下去。
+    var isCollapsed: Bool = false
+
     /// ### 为什么这里要显式写 `nonisolated deinit`（很重要，别删）
     ///
     /// app target 开了 `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`，

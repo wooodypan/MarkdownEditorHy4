@@ -120,6 +120,15 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         smartQuotesType = .no
         smartInsertDeleteType = .no
         autocapitalizationType = .none
+
+        // 块首那个折叠小三角是 attachment，它自己收不到点击事件，
+        // 得靠一个手势来做命中测试（见 handleTapOnFoldButton）。
+        // `cancelsTouchesInView = false` 是关键：不取消触摸，textView 才能照常处理点击
+        // （把光标移到点击处），否则点一下三角，光标就不跟着走了。
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTapOnFoldButton(_:)))
+        tap.cancelsTouchesInView = false
+        tap.delaysTouchesEnded = false
+        addGestureRecognizer(tap)
     }
 
     // MARK: 对外接口
@@ -354,6 +363,73 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         guard let info = sender.codeBlock else { return }
         UIPasteboard.general.string = info.code
         sender.flashCopied()
+    }
+
+    // MARK: - 折叠 / 展开（顶层块左侧的小三角）
+
+    /// 点到了块首的小三角 → 折叠 / 展开那一块。
+    ///
+    /// attachment 只负责画，自己不接收事件，所以这里自己做命中测试：
+    /// **点击坐标 → 字符索引 → 这一位上是不是 `FoldDisclosureAttachment`**。
+    /// 用 `characterRange(at:)` 换算最省事，它是 UITextInput 协议自带的，
+    /// attachment 占的那一个字符位也算一个正常字符位置。
+    @objc private func handleTapOnFoldButton(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended else { return }
+
+        let point = gesture.location(in: self)
+        guard let range = characterRange(at: point) else { return }
+        let location = offset(from: beginningOfDocument, to: range.start)
+        guard location >= 0, location < backingStorage.length else { return }
+
+        if let attachment = backingStorage.attribute(.attachment,
+                                                     at: location,
+                                                     effectiveRange: nil) as? FoldDisclosureAttachment {
+            toggleCollapse(blockID: attachment.blockID)
+        }
+    }
+
+    /// 折叠 / 展开某一块：只替换这一块的渲染内容，其它块一个字符都不动。
+    ///
+    /// - parameter blockID: 要切换的块（从被点到的 attachment 上拿来的）
+    func toggleCollapse(blockID: UUID) {
+        guard let index = documentStore.blocks.firstIndex(where: { $0.id == blockID }),
+              let outcome = documentStore.toggleCollapse(blockAt: index) else { return }
+
+        // 先记下光标停在源码的哪个位置：替换会打乱渲染坐标，但源码位置不会变
+        let caretSource = documentStore.sourceCaret(forRenderedOffset: selectedRange.location)
+
+        // 旧范围要按当前 storage 长度收一下，防止越界
+        let storageLength = (text as NSString).length
+        let start = min(outcome.replacedRange.location, storageLength)
+        let target = NSRange(location: start,
+                             length: min(outcome.replacedRange.length, storageLength - start))
+
+        isApplyingModelChange = true
+        if let contentStorage = textLayoutManager?.textContentManager as? NSTextContentStorage {
+            contentStorage.performEditingTransaction {
+                backingStorage.replaceCharacters(in: target, with: outcome.newContent)
+            }
+        } else {
+            backingStorage.replaceCharacters(in: target, with: outcome.newContent)
+        }
+        isApplyingModelChange = false
+
+        // 折叠写的这一段会被系统当成一次「文本编辑」记进撤销栈，
+        // 但栈里更早的那些记录是针对**折叠前**的渲染文本的，撤销它们会把文本改到
+        // 和模型对不上的状态（reconcile 会把差异当成用户输入，直接污染源码）。
+        // 所以折叠之后统一清掉撤销栈 —— 代价是丢掉之前的撤销记录，换来一致性。
+        //
+        // 这里不能用 `disableUndoRegistration` / `enableUndoRegistration` 包住上面的替换：
+        // 在「不是系统发起的编辑」这个时机调用它，UIKit 的 _UITextUndoManager 会直接抛
+        // `NSInternalInconsistencyException`（实测崩溃，别再改回去）。
+        undoManager?.removeAllActions()
+
+        lastSyncedString = documentStore.renderedString
+        needsCodeBlockRefresh = true
+
+        // 光标原本在被折叠的块里的话，那个位置已经被折叠掉了，挪到块首去
+        let caret = min(documentStore.renderedCaret(forSourceOffset: caretSource), (text as NSString).length)
+        selectedRange = NSRange(location: caret, length: 0)
     }
 
     // MARK: - 引用块装饰（左侧绿条）

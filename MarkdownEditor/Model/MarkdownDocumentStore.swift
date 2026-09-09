@@ -107,11 +107,14 @@ final class MarkdownDocumentStore {
         // 5) 记下旧渲染范围，等下要按它做局部替换
         let oldRenderedRange = unionRenderedRange(of: affected)
 
-        // 6) 重新 parse + 渲染这一小段，换掉旧块
+        // 6) 重新 parse + 渲染这一小段，换掉旧块。
+        //    旧块先留一份：新块是全新实例，折叠状态要靠它俩比对才能继承下来
+        let oldBlocks = Array(blocks[affected])
         let newBlocks = buildBlocks(region: reparseRange, of: newSource)
         blocks.removeSubrange(affected)
         blocks.insert(contentsOf: newBlocks, at: affected.lowerBound)
         fullSource = newSource
+        inheritCollapseStates(from: oldBlocks, to: newBlocks)
         recomputeRanges()
 
         // 7) 拼出要替换进去的新内容
@@ -306,13 +309,97 @@ final class MarkdownDocumentStore {
 
     private func makeBlock(source blockSource: String, absoluteStart: Int, ast: BlockMarkup) -> MarkdownBlock {
         let (text, mappings) = renderer.render(blockSource: blockSource)
-        return MarkdownBlock(
+        let block = MarkdownBlock(
             sourceText: blockSource,
             sourceRange: NSRange(location: absoluteStart, length: blockSource.utf16Length),
             renderedContent: text,
             charMappings: mappings,
             kindDescription: MarkdownBlock.describe(ast)
         )
+        // 第一行左侧加一个「折叠 / 展开」小三角。
+        // 空白块跳过：它本来就看不见，加个孤零零的三角反而碍眼。
+        if !isBlank(blockSource) {
+            var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: text),
+                                            mappings: mappings)
+            renderer.prependFoldDisclosure(to: &fragment, blockID: block.id, isCollapsed: false)
+            block.renderedContent = fragment.text
+            block.charMappings = fragment.mappings
+        }
+        return block
+    }
+
+    // MARK: - 折叠（展开 / 折叠某一块）
+
+    /// 切换某个块的折叠状态。
+    ///
+    /// - returns: 局部替换需要的东西：**旧**渲染范围的旧坐标 + 该块的新渲染内容。
+    ///            UI 层拿到后把 textStorage 里那一段换掉即可，不用整篇重排。
+    ///            返回 nil 表示下标越界（调用方忽略就行）。
+    func toggleCollapse(blockAt index: Int) -> (replacedRange: NSRange, newContent: NSAttributedString)? {
+        guard blocks.indices.contains(index) else { return nil }
+
+        let block = blocks[index]
+        let oldRange = block.renderedRange
+        block.isCollapsed.toggle()
+        rerender(block)
+        // 这一块长度变了，后面所有块的渲染起点都得重算
+        recomputeRanges()
+        return (oldRange, block.renderedContent)
+    }
+
+    /// 按**当前的** `isCollapsed` 重新渲染一个块（源码没变，只是展开/折叠切换了）。
+    private func rerender(_ block: MarkdownBlock) {
+        if block.isCollapsed {
+            let (text, mappings) = renderer.collapsedContent(blockID: block.id,
+                                                             sourceText: block.sourceText)
+            block.renderedContent = text
+            block.charMappings = mappings
+            return
+        }
+
+        let (text, mappings) = renderer.render(blockSource: block.sourceText)
+        guard !isBlank(block.sourceText) else {
+            block.renderedContent = text
+            block.charMappings = mappings
+            return
+        }
+        var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: text),
+                                        mappings: mappings)
+        renderer.prependFoldDisclosure(to: &fragment, blockID: block.id, isCollapsed: false)
+        block.renderedContent = fragment.text
+        block.charMappings = fragment.mappings
+    }
+
+    /// 把旧块的折叠状态传给新块。
+    ///
+    /// ### 为什么要这么绕
+    /// 编辑之后 `buildBlocks` 会**重新创建**受影响的块，旧实例连同它的 `isCollapsed`
+    /// 一起被丢掉。不继承的话就会出现「折叠一段 → 在里面敲一个字 → 它自己展开了」，
+    /// 很烦人。
+    ///
+    /// ### 匹配规则（两条就够用）
+    /// 1. **源码起点相同**：编辑发生在这个块内部时起点不会变 —— 最常见的情况。
+    /// 2. **源码文本完全相同**：编辑发生在它前面，块整体位移了，起点变了但内容没变。
+    ///    文本太短不参与匹配（`- a` 这种短块太容易和别处重复，误折叠更烦）。
+    private func inheritCollapseStates(from oldBlocks: [MarkdownBlock], to newBlocks: [MarkdownBlock]) {
+        let collapsed = oldBlocks.filter { $0.isCollapsed }
+        guard !collapsed.isEmpty else { return }
+
+        for newBlock in newBlocks {
+            let matched = collapsed.contains { old in
+                old.sourceRange.location == newBlock.sourceRange.location
+                || (old.sourceText == newBlock.sourceText && old.sourceText.count >= 4)
+            }
+            guard matched else { continue }
+
+            newBlock.isCollapsed = true
+            rerender(newBlock)
+        }
+    }
+
+    /// 这个块的源码是不是只有空白（空块不配拥有折叠按钮）
+    private func isBlank(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// 整块都是空行/空白时，原样渲染（1 个字符对 1 个源码字符，天然保证复制还原）

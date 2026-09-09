@@ -57,6 +57,16 @@ struct MarkdownTheme {
     var quoteBarColor: UIColor
     /// 引用块左侧绿条的宽度（相当于 CSS 里的 border-left-width）
     var quoteBarWidth: CGFloat
+    /// 折叠按钮（小三角）的边长
+    var foldButtonSide: CGFloat
+    /// 折叠按钮和正文之间的间距
+    var foldButtonGap: CGFloat
+    /// 折叠按钮的颜色
+    var foldButtonColor: UIColor
+    /// 折叠后占位符「⋯」的宽度
+    var collapsedPlaceholderWidth: CGFloat
+    /// 折叠后占位符「⋯」的颜色
+    var collapsedPlaceholderColor: UIColor
     /// 是否显示「源码提示」：图片下面那行 `![alt](url)`、圆点后面的 `- `
     var showsSourceHints: Bool = true
 
@@ -90,6 +100,11 @@ struct MarkdownTheme {
             codeBlockTextInset: 10,
             quoteBarColor: UIColor(red: 0.27, green: 0.68, blue: 0.49, alpha: 1.00),
             quoteBarWidth: 3,
+            foldButtonSide: 9,
+            foldButtonGap: 6,
+            foldButtonColor: .tertiaryLabel,
+            collapsedPlaceholderWidth: 20,
+            collapsedPlaceholderColor: .tertiaryLabel
         )
     }
 
