@@ -69,6 +69,15 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 监听滚动：滚动只改位置，不重算布局
     private var contentOffsetObservation: NSKeyValueObservation?
 
+    // MARK: - 引用块装饰（左侧绿条）——
+    //
+    // 绿条现在是**每行一个 NSTextAttachment**，由 renderer 在 visitBlockQuote 阶段插入，
+    // 跟随该行 layout，不需要任何 fragment 测量。详见 QuoteBarAttachment 的注释。
+    // 早期版本尝试在 UI 层盖 UIView 算 fragment 位置画整段竖条，但 TextKit 2 的
+    // layoutFragmentFrame 对 viewport 外的 fragment 永远是估算值（state=3 LayoutAvailable
+    // 但 usage bounds 是估算的），用 setContentOffset / invalidateLayout / 离屏 layout
+    // 都拿不到真实坐标，差 360+ 像素。改用 attachment 方案后零测量、零成本。
+
     // MARK: 初始化
 
     init(markdown: String = "") {
@@ -346,6 +355,18 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         UIPasteboard.general.string = info.code
         sender.flashCopied()
     }
+
+    // MARK: - 引用块装饰（左侧绿条）
+    //
+    // 绿条现在是**每行一个 NSTextAttachment**，由 renderer 在 visitBlockQuote 阶段插入，
+    // 跟随该行 layout，不需要任何 fragment 测量。详见 QuoteBarAttachment.swift 的注释。
+    //
+    // 早期版本（commit 撤回过）尝试在 UI 层盖 UIView 算 fragment 位置画整段竖条：
+    // TextKit 2 的 `NSTextLayoutFragment.layoutFragmentFrame` 对 viewport 外的 fragment
+    // **永远是估算值**（state=3 LayoutAvailable 但 usage bounds 是估算的），用
+    // `setContentOffset` / `invalidateLayout` / `ensureLayout` / 离屏 NSLayoutManager
+    // 全部拿不到真实坐标，差 360+ 像素。改用 attachment 方案后零测量、零成本，
+    // 绿条永远贴在正确的行首。
 
     // MARK: - 编辑管线
 

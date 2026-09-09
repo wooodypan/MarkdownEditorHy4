@@ -275,7 +275,52 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                              in: localRange(of: blockQuote),
                              orphanAttributes: orphanAttributes)
         out.addAttributesIfAbsent([.paragraphStyle: quoteStyle])
+
+        // 引用块的「左侧绿条」：每行一个绿条 attachment，贴在行首 `>` 之前。
+        // 这样绿条跟着该行 layout 走，零测量成本；行间留 6pt 段距不影响识别。
+        insertQuoteBars(into: &out,
+                        lineHeight: theme.bodyFont.lineHeight,
+                        color: theme.quoteBarColor,
+                        width: theme.quoteBarWidth)
+
         return out
+    }
+
+    /// 在引用块每行 `>` 字符之前插入一条绿条 attachment。
+    ///
+    /// reconciled 之后 textStorage 已经是「完整字符串 + 正确段落样式」，每行 `>` 都在位。
+    /// 我们反向遍历每个 `>` 字符位置，在它前面塞一个绿条 attachment：
+    ///   - attachment 跟随该行 layout（无需任何 fragment 测量）
+    ///   - attachment 是装饰性，isAttachmentView=true，复制时跳过
+    ///   - 退格选区如果选中绿条 attachment，整段一起删（`.markdownSyntaxMarker` 标记）
+    ///
+    /// 行间会留 ~6pt 段距缝隙（`paragraphSpacing` 不在 line height 内），
+    /// 视觉上像断开的虚线绿条，足够识别「这是引用块」。
+    private func insertQuoteBars(into out: inout RenderedFragment,
+                                 lineHeight: CGFloat,
+                                 color: UIColor,
+                                 width: CGFloat) {
+        // 找出所有 `>` 字符的位置
+        let nsString = out.text.string as NSString
+        var barPositions: [Int] = []
+        var idx = 0
+        while idx < nsString.length {
+            if nsString.character(at: idx) == 0x3E /* > */ {
+                barPositions.append(idx)
+            }
+            idx += 1
+        }
+        guard !barPositions.isEmpty else { return }
+
+        // 反向插入（从末尾开始插，否则前面的偏移会被后面搞乱）
+        let barFragment = RenderedFragment.decorationAttachment(
+            QuoteBarAttachment(width: width, height: lineHeight, color: color),
+            attributes: [:]
+        )
+        for pos in barPositions.reversed() {
+            out.text.insert(barFragment.text, at: pos)
+            out.mappings.insert(barFragment.mappings[0], at: pos)
+        }
     }
 
     func visitCodeBlock(_ codeBlock: CodeBlock) -> RenderedFragment {

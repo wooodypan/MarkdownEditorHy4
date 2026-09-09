@@ -53,6 +53,10 @@ struct MarkdownTheme {
     var codeBlockVerticalPadding: CGFloat
     /// 代码文字相对矩形左边的缩进
     var codeBlockTextInset: CGFloat
+    /// 引用块左侧绿条的颜色
+    var quoteBarColor: UIColor
+    /// 引用块左侧绿条的宽度（相当于 CSS 里的 border-left-width）
+    var quoteBarWidth: CGFloat
     /// 是否显示「源码提示」：图片下面那行 `![alt](url)`、圆点后面的 `- `
     var showsSourceHints: Bool = true
 
@@ -83,7 +87,9 @@ struct MarkdownTheme {
             imageMaxHeight: 420,
             codeBlockCornerRadius: 8,
             codeBlockVerticalPadding: 6,
-            codeBlockTextInset: 10
+            codeBlockTextInset: 10,
+            quoteBarColor: UIColor(red: 0.27, green: 0.68, blue: 0.49, alpha: 1.00),
+            quoteBarWidth: 3,
         )
     }
 

@@ -79,6 +79,22 @@ struct RenderedFragment {
         )
     }
 
+    /// 构造一个「纯装饰性」attachment：只占 1 个字符位，不消耗任何源码位置。
+    ///
+    /// 与 `attachment(...)` 的区别：复制粘贴时**不**输出任何源码字符，因为绿条这种东西
+    /// 在 markdown 源里根本没有对应物。`sourceStart = -1` 标记「跳过」。
+    /// `markdownSyntaxMarker = true` 标记是「行内结构标记」，退格时如果选中这一段，整段一起删。
+    static func decorationAttachment(_ attachment: NSTextAttachment,
+                                     attributes: [NSAttributedString.Key: Any]) -> RenderedFragment {
+        let attributed = NSMutableAttributedString(attachment: attachment)
+        attributed.addAttributes(attributes, range: NSRange(location: 0, length: attributed.length))
+        attributed.addAttribute(.markdownSyntaxMarker, value: true, range: NSRange(location: 0, length: 1))
+        return RenderedFragment(
+            text: attributed,
+            mappings: [.attachmentView(start: -1, length: 0)]
+        )
+    }
+
     /// 构造一段「源码提示」：弱化显示的源文本。
     ///
     /// 用在两个地方：
