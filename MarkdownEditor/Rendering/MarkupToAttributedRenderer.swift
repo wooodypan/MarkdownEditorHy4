@@ -126,19 +126,23 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         return .sourceSliced(text.string, sourceStart: -1, attributes: bodyAttributes)
     }
 
+    /// 段落里的软换行（`1\n这是…` 中间那个换行）。
+    ///
+    /// ### 拿不到范围时必须返回空，不能返回 `.decoration("\n")`（这里踩过坑，别改回去）
+    /// cmark 经常不给软换行标 `range`。如果这时自己输出一个 `\n`，
+    /// **补漏步骤（`reconciled`）并不知道这个源码字符已经被消费了**，
+    /// 它会把源码里那个 `\n` 再补一遍 —— 于是用户按一次回车，屏幕上多出两个换行
+    /// （「显示换了 2 行，复制出来却只有 1 行」就是这个现象）。
+    /// 返回空，让补漏步骤用源码原文补，才是正好一个。
     func visitSoftBreak(_ softBreak: SoftBreak) -> RenderedFragment {
-        // cmark 经常不给软换行标注范围，拿不到就当装饰（源码里那个 \n 会由补漏步骤补上）
-        if let range = localRange(of: softBreak) {
-            return .sourceSliced(sourceText(in: range), sourceStart: range.location, attributes: bodyAttributes)
-        }
-        return .decoration("\n", attributes: bodyAttributes)
+        guard let range = localRange(of: softBreak) else { return .empty }
+        return .sourceSliced(sourceText(in: range), sourceStart: range.location, attributes: bodyAttributes)
     }
 
+    /// 硬换行（行尾两个空格或反斜杠）。道理同软换行：拿不到范围就交给补漏步骤。
     func visitLineBreak(_ lineBreak: LineBreak) -> RenderedFragment {
-        if let range = localRange(of: lineBreak) {
-            return .sourceSliced(sourceText(in: range), sourceStart: range.location, attributes: bodyAttributes)
-        }
-        return .decoration("\n", attributes: bodyAttributes)
+        guard let range = localRange(of: lineBreak) else { return .empty }
+        return .sourceSliced(sourceText(in: range), sourceStart: range.location, attributes: bodyAttributes)
     }
 
     func visitInlineCode(_ inlineCode: InlineCode) -> RenderedFragment {

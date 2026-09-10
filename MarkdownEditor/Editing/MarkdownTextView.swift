@@ -563,9 +563,28 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             suffix += 1
         }
 
-        let changedRange = NSRange(location: prefix, length: max(0, previous.length - prefix - suffix))
+        var changedRange = NSRange(location: prefix, length: max(0, previous.length - prefix - suffix))
         let replacement = current.substring(with: NSRange(location: prefix,
                                                           length: max(0, current.length - prefix - suffix)))
+
+        // 用光标位置校正插入点 —— 纯字符串 diff 遇到「插入重复字符」会算错位置。
+        //
+        // ### 踩过的坑（按回车多跳两行，别删）
+        // 光标停在 `# 标题一⏎|⏎这是` 按回车，文本从 `# 标题一⏎⏎` 变成 `# 标题一⏎⏎⏎`。
+        // 公共前缀算法一路匹配到 offset 7（三个换行长得一模一样），于是认为插入发生在
+        // **最后一个换行之后** —— 源码确实只多了一个换行看起来没问题，
+        // 但光标被算到了正文开头，用户看到的就是「按一下回车跳了三行」。
+        //
+        // 光标不会说谎：变化之后它一定停在刚插入的内容后面，
+        // 所以「光标位置 − 插入长度」就是真正的插入点。
+        // 只有光标处的内容确实等于 diff 出来的替换内容时才采信，防止异常场景改坏。
+        let inserted = (replacement as NSString).length
+        let inferred = selectedRange.location - inserted
+        if inferred >= 0,
+           inferred + inserted <= current.length,
+           current.substring(with: NSRange(location: inferred, length: inserted)) == replacement {
+            changedRange.location = inferred
+        }
 
         applyEdit(renderedRange: changedRange, replacementText: replacement, alreadyAppliedToTextStorage: true)
     }

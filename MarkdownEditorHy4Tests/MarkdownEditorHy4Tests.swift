@@ -414,6 +414,73 @@ final class MarkdownEditorHy4Tests: XCTestCase {
                        "单行块不该再有折叠按钮")
     }
 
+    // MARK: - 按回车
+
+    /// 按一次回车，编辑器里只能多一行。
+    ///
+    /// ### 这个 bug 长什么样
+    /// 在段落中间（或引用块里）按回车，源码里产生的是**软换行**（SoftBreak）。
+    /// cmark 不给软换行标 `range`，renderer 的兜底分支自己输出了一个 `\n`，
+    /// 而补漏步骤（`reconciled`）不知道这个源码字符已经被消费，又把源码里那个
+    /// `\n` 补了一遍 —— 于是**一次回车换来两个换行**：屏幕上换了 2 行，
+    /// 复制到别处却只有 1 行（因为多出来的那个是装饰字符，复制时被跳过）。
+    ///
+    /// ### 断言为什么写成「差值不变」
+    /// 渲染文本本来就比源码多几个**装饰换行**（图片单独占一行等），这个差值是恒定的。
+    /// 按一次回车，源码 +1 行，渲染也应该只 +1 行 —— 也就是差值必须保持不变。
+    func testEnterInsertsExactlyOneLineBreak() {
+        // 覆盖：标题末尾 / 段落中间（软换行）/ 段落末尾 / 引用块里（软换行）/ 文档末尾
+        let spots = ["# 标题一", "**粗体**", "https://swift.org)。", "> 引用第一行", "混排。"]
+        var checked = 0
+
+        for spot in spots {
+            let textView = makeEditor(sample)
+            guard let sourceRange = textView.documentStore.sourceDocument.range(of: spot) else {
+                return XCTFail("示例文档里找不到定位用的「\(spot)」")
+            }
+            let target = textView.documentStore.sourceDocument.distance(from: textView.documentStore.sourceDocument.startIndex,
+                                                                        to: sourceRange.upperBound)
+
+            let before = lineBreakBalance(of: textView)
+            textView.selectedRange = NSRange(location: textView.documentStore.renderedCaret(forSourceOffset: target),
+                                             length: 0)
+            textView.insertText("\n")
+            let after = lineBreakBalance(of: textView)
+
+            XCTAssertEqual(after.source, before.source + 1,
+                           "在「\(spot)」后按回车，源码应该只多 1 个换行，实际 \(before.source) → \(after.source)")
+            XCTAssertEqual(after.rendered, before.rendered + 1,
+                           "在「\(spot)」后按回车，编辑器里应该只多 1 行，实际 \(before.rendered) → \(after.rendered)")
+            XCTAssertEqual(after.gap, before.gap,
+                           "在「\(spot)」后按回车，渲染与源码的换行差不应该变（说明有装饰换行被重复输出了）")
+
+            // 光标必须停在新换行的后面，否则再敲一个字就插到错误位置了
+            let caretSource = textView.documentStore.sourceCaret(forRenderedOffset: textView.selectedRange.location)
+            XCTAssertEqual(caretSource, target + 1,
+                           "在「\(spot)」后按回车，光标应该落在新换行的后面")
+            checked += 1
+        }
+        XCTAssertEqual(checked, spots.count)
+    }
+
+    /// 渲染文本比源码多出来的换行数（装饰换行的数量，应当是恒定的）
+    private func lineBreakBalance(of textView: MarkdownTextView) -> (source: Int, rendered: Int, gap: Int) {
+        let source = textView.documentStore.sourceDocument.filter { $0 == "\n" }.count
+        let rendered = (textView.text ?? "").filter { $0 == "\n" }.count
+        return (source, rendered, rendered - source)
+    }
+
+    /// 造一个挂在窗口上的编辑器（需要真实布局才能跑完整条编辑管线）
+    private func makeEditor(_ markdown: String) -> MarkdownTextView {
+        let textView = MarkdownTextView(markdown: markdown)
+        textView.frame = CGRect(x: 0, y: 0, width: 700, height: 900)
+        let window = UIWindow(frame: textView.frame)
+        window.addSubview(textView)
+        window.makeKeyAndVisible()
+        textView.layoutIfNeeded()
+        return textView
+    }
+
     /// 空文档和只有空行的文档不能崩，也不能凭空多出字符
     func testEmptyAndBlankDocuments() {
         for source in ["", "\n", "\n\n\n", "   "] {
