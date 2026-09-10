@@ -239,30 +239,49 @@ final class MarkdownEditorHy4Tests: XCTestCase {
 
     // MARK: - 折叠 / 展开
 
-    /// 每个顶层块的第一个字符位上都挂着一个折叠按钮，而且它是纯装饰（不占源码位置）
-    func testEveryTopLevelBlockHasFoldDisclosure() {
+    /// 只有**多行的块**才挂折叠按钮；单行块（标题、单行段落）不该有
+    func testOnlyMultiLineBlocksHaveFoldDisclosure() {
         let store = makeStore(sample)
 
-        var checked = 0
+        var multiLine = 0
         for block in store.blocks {
-            // 纯空白块不配拥有折叠按钮（它本来就看不见）
-            if block.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+            // 块的源码自带结尾换行，先 trim 掉再数行数（否则 `# 标题一\n\n` 会被算成 3 行）
+            let trimmed = block.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isMultiLine = trimmed.contains("\n")
 
             // 块源码开头偶尔带着上一块留下的换行，按钮会跳过这些空白，所以往后找几位
-            guard let attachment = (0..<min(4, block.renderedLength))
-                .compactMap({ block.renderedContent.attribute(.attachment, at: $0, effectiveRange: nil) })
-                .compactMap({ $0 as? FoldDisclosureAttachment })
-                .first else {
-                return XCTFail("块「\(block.kindDescription)」开头没有折叠按钮")
-            }
+            let attachment = (0..<min(4, block.renderedLength))
+                .compactMap { block.renderedContent.attribute(.attachment, at: $0, effectiveRange: nil) }
+                .compactMap { $0 as? FoldDisclosureAttachment }
+                .first
 
-            XCTAssertFalse(attachment.isCollapsed, "初始状态应该是展开的")
-            XCTAssertEqual(attachment.blockID, block.id, "按钮必须记住自己属于哪个块，否则点了不知道折叠谁")
-            XCTAssertTrue(block.mapping(at: 0)?.isDecoration == true,
-                          "折叠按钮不能占源码位置，否则复制出来的文本会多一个字符")
-            checked += 1
+            XCTAssertEqual(attachment != nil, isMultiLine,
+                           "块「\(block.kindDescription)」\(isMultiLine ? "有多行" : "只有一行")，折叠按钮的存在情况不对")
+
+            if let attachment {
+                XCTAssertFalse(attachment.isCollapsed, "初始状态应该是展开的")
+                XCTAssertEqual(attachment.blockID, block.id,
+                               "按钮必须记住自己属于哪个块，否则点了不知道折叠谁")
+                XCTAssertTrue(block.mapping(at: 0)?.isDecoration == true,
+                              "折叠按钮不能占源码位置，否则复制出来的文本会多一个字符")
+                multiLine += 1
+            }
         }
-        XCTAssertGreaterThan(checked, 5, "示例文档应该有 5 个以上的顶层块")
+        XCTAssertGreaterThan(multiLine, 2, "示例文档里应该有多行块（列表 / 引用 / 代码块）")
+    }
+
+    /// 折叠之后块尾要留着换行，否则下一个块会直接贴在「⋯」后面（一行挤两块）
+    func testCollapsedBlockEndsWithLineBreak() {
+        let store = makeStore(sample)
+
+        guard let index = store.blocks.firstIndex(where: { $0.kindDescription.contains("List") }) else {
+            return XCTFail("示例文档里找不到列表块")
+        }
+        store.toggleCollapse(blockAt: index)
+
+        let rendered = store.blocks[index].renderedContent.string as NSString
+        XCTAssertTrue(rendered.hasSuffix("\n"),
+                      "折叠块的渲染内容必须以换行结尾，否则下一块会接在后面，实际是：\(rendered)")
     }
 
     /// 折叠之后「全选复制 === 源码」必须依然成立：折叠只是视图状态，源码一个字没少
@@ -299,10 +318,15 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         let store = makeStore(source)
         let lengthBefore = store.renderedLength
 
-        store.toggleCollapse(blockAt: 2)
-        store.toggleCollapse(blockAt: 2)
+        // 只有多行的块能折叠，挑列表块
+        guard let index = store.blocks.firstIndex(where: { $0.kindDescription.contains("List") }) else {
+            return XCTFail("示例文档里找不到列表块")
+        }
 
-        XCTAssertFalse(store.blocks[2].isCollapsed, "折回来应该是展开状态")
+        store.toggleCollapse(blockAt: index)
+        store.toggleCollapse(blockAt: index)
+
+        XCTAssertFalse(store.blocks[index].isCollapsed, "折回来应该是展开状态")
         XCTAssertEqual(store.renderedLength, lengthBefore, "折叠再展开应该回到原来的长度")
         XCTAssertEqual(store.sourceDocument, source, "来回切一次不能改动源码")
 
@@ -312,26 +336,46 @@ final class MarkdownEditorHy4Tests: XCTestCase {
 
     /// 在折叠的块里编辑一个字，折叠状态不能丢（否则「折叠一段 → 敲个字 → 它自己展开了」很烦人）
     func testCollapseStateSurvivesEditingInsideBlock() {
-        let store = makeStore(sample)
+        let store = makeStore("- 列表项一\n- 列表项二\n\n尾部段落。\n")
 
-        guard let index = store.blocks.firstIndex(where: { $0.kindDescription.contains("Paragraph") }) else {
-            return XCTFail("示例文档里找不到段落块")
-        }
-        store.toggleCollapse(blockAt: index)
+        // 第一块是两行的列表，能折叠
+        XCTAssertTrue(store.blocks[0].sourceText.contains("\n"), "列表块应该是多行的")
+        store.toggleCollapse(blockAt: 0)
+        XCTAssertTrue(store.blocks[0].isCollapsed, "列表块应该被折叠了")
 
-        // 在块首敲一个字：块的源码起点没变，折叠状态应该靠「起点相同」这条规则继承下来
-        let caret = store.renderedCaret(forSourceOffset: store.blocks[index].sourceRange.location)
+        // 在块尾敲一个字：块的源码起点和内容都没变，折叠状态应该继承下来。
+        // （注意别在块首插字符 —— `X- 列表项一` 会被 markdown 解析成段落 + 新列表，
+        //   原来的块被拆开，这个测试就测不到继承逻辑了）
+        let caret = NSMaxRange(store.blocks[0].renderedRange)
         store.applyEdit(inRenderedRange: NSRange(location: caret, length: 0),
                         replacementText: "X",
                         containerWidth: 600)
 
-        XCTAssertTrue(store.blocks.contains { $0.isCollapsed },
+        XCTAssertTrue(store.blocks[0].isCollapsed,
                       "在块内部编辑不应该把折叠状态弄丢，实际状态：\(store.blocks.map(\.isCollapsed))")
 
         // 顺便确认这个不变量依然成立
         let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
         XCTAssertEqual(restored, store.sourceDocument,
                        firstDifference(store.sourceDocument, restored))
+    }
+
+    /// 块被编辑成单行之后，必须自动展开 —— 没有按钮的话用户就再也点不回来了
+    func testSingleLineBlockIsNeverCollapsed() {
+        let store = makeStore("- 列表项一\n- 列表项二\n")
+
+        store.toggleCollapse(blockAt: 0)
+        XCTAssertTrue(store.blocks[0].isCollapsed, "多行列表应该能折叠")
+
+        // 把整块替换成一行（相当于全选这个折叠块，重新输入一行字）
+        store.applyEdit(inRenderedRange: store.blocks[0].renderedRange,
+                        replacementText: "只有一行。\n",
+                        containerWidth: 600)
+
+        XCTAssertFalse(store.blocks[0].isCollapsed,
+                       "变成单行之后必须自动展开，否则没有按钮就点不回来了")
+        XCTAssertFalse(store.blocks[0].renderedContent.string.contains("\u{FFFC}"),
+                       "单行块不该再有折叠按钮")
     }
 
     /// 空文档和只有空行的文档不能崩，也不能凭空多出字符

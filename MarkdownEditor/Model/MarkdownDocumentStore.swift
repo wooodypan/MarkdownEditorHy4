@@ -316,9 +316,9 @@ final class MarkdownDocumentStore {
             charMappings: mappings,
             kindDescription: MarkdownBlock.describe(ast)
         )
-        // 第一行左侧加一个「折叠 / 展开」小三角。
-        // 空白块跳过：它本来就看不见，加个孤零零的三角反而碍眼。
-        if !isBlank(blockSource) {
+        // 第一行左侧加一个「折叠 / 展开」小三角 —— 但只有**多行的块**才加，
+        // 单行块（标题、单行段落、分隔线）折起来没意义，每行挂个三角也太吵。
+        if canCollapse(blockSource) {
             var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: text),
                                             mappings: mappings)
             renderer.prependFoldDisclosure(to: &fragment, blockID: block.id, isCollapsed: false)
@@ -349,6 +349,10 @@ final class MarkdownDocumentStore {
 
     /// 按**当前的** `isCollapsed` 重新渲染一个块（源码没变，只是展开/折叠切换了）。
     private func rerender(_ block: MarkdownBlock) {
+        // 编辑可能把一个多行块改成单行块（比如把列表项删到只剩一个）。
+        // 单行块没有折叠按钮，要是让它继续折叠着，用户就再也点不回来了 —— 强制展开。
+        if !canCollapse(block.sourceText) { block.isCollapsed = false }
+
         if block.isCollapsed {
             let (text, mappings) = renderer.collapsedContent(blockID: block.id,
                                                              sourceText: block.sourceText)
@@ -358,7 +362,7 @@ final class MarkdownDocumentStore {
         }
 
         let (text, mappings) = renderer.render(blockSource: block.sourceText)
-        guard !isBlank(block.sourceText) else {
+        guard canCollapse(block.sourceText) else {
             block.renderedContent = text
             block.charMappings = mappings
             return
@@ -400,6 +404,22 @@ final class MarkdownDocumentStore {
     /// 这个块的源码是不是只有空白（空块不配拥有折叠按钮）
     private func isBlank(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 这个块配不配拥有折叠按钮：**源码超过一行**的块才有。
+    ///
+    /// ### 为什么按「源码行数」判断，而不是「渲染后占几行」
+    /// 渲染占几行要等 TextKit 排完版才知道，而块是在渲染阶段组装的，那时候还没有布局结果；
+    /// 拿容器宽度去估算又很不靠谱（中英文混排、图片、缩进都会影响）。
+    /// 按源码行数判断既简单又可预测：列表、引用、代码块、多行段落有按钮，
+    /// 标题和单行段落没有 —— 后者折起来本来就没什么意义。
+    ///
+    /// 注意尾部要 trim：每个块的源码都自带结尾的换行和空行（切块约定），
+    /// 不 trim 的话 `# 标题一\n\n` 会被算成 3 行，那就没有单行块了。
+    private func canCollapse(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return trimmed.contains("\n")
     }
 
     /// 整块都是空行/空白时，原样渲染（1 个字符对 1 个源码字符，天然保证复制还原）
@@ -462,13 +482,16 @@ final class MarkdownDocumentStore {
             return (blocks.count - 1)..<blocks.count
         }
 
-        // 尾部换行被改动了 → 把下一块也拉进来一起重排
+        // 尾部换行被改动了 → 把下一块也拉进来一起重排。
+        // `min(..., blocks.count)` 不能省：命中最后一块时 upper + 1 会越界，
+        // 后面 `blocks.removeSubrange(affected)` 直接 Array index out of range 崩掉
+        // （在文档末尾附近编辑就会触发，实测踩过）。
         var end = upper
         for index in lower..<upper {
             guard index < blocks.count - 1 else { break }
             let tail = trailingWhitespaceRange(of: blocks[index])
             if rangesTouch(tail, sourceEditRange) {
-                end = upper + 1
+                end = min(upper + 1, blocks.count)
                 break
             }
         }

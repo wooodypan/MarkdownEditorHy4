@@ -525,7 +525,34 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                     sourceStart: 0,
                                     sourceLength: sourceText.utf16Length,
                                     attributes: [.font: theme.bodyFont, .paragraphStyle: style]))
+
+        // 把块尾的换行补回来 —— 不补的话下一个块会直接贴在「⋯」后面，一行挤两块。
+        // 这些换行是**装饰**：源码里那个换行已经由占位符（映射了整块源码）代表了，
+        // 这里再映射一次会导致复制的时候多吐出一个空行。
+        let breaks = trailingLineBreaks(of: sourceText)
+        if breaks > 0 {
+            fragment.append(.decoration(String(repeating: "\n", count: breaks),
+                                        attributes: [.font: theme.bodyFont, .paragraphStyle: style]))
+        }
         return (fragment.text, fragment.mappings)
+    }
+
+    /// 源码结尾有几个连续的换行（最多数 2 个，再多也没必要留那么宽的空档）。
+    ///
+    /// markdown 里块与块之间通常是一个空行（`\n\n`），补回来视觉上才和展开时差不多。
+    private func trailingLineBreaks(of text: String) -> Int {
+        var count = 0
+        for character in text.reversed() {
+            if character == "\n" {
+                count += 1
+                if count >= 2 { break }
+            } else if character == " " || character == "\t" {
+                continue        // 行尾空格不算数
+            } else {
+                break
+            }
+        }
+        return count
     }
 
     /// 第一个「不是换行 / 空格 / 制表符」的字符位置。
