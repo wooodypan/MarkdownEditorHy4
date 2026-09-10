@@ -57,12 +57,15 @@ struct MarkdownTheme {
     var quoteBarColor: UIColor
     /// 引用块左侧绿条的宽度（相当于 CSS 里的 border-left-width）
     var quoteBarWidth: CGFloat
-    /// 折叠按钮（小三角）的边长
+    /// 折叠按钮（小三角）的边长，同时也是点击热区大小
     var foldButtonSide: CGFloat
     /// 折叠按钮和正文之间的间距
     var foldButtonGap: CGFloat
-    /// 折叠按钮的颜色
-    var foldButtonColor: UIColor
+    /// 正文左边专门留给折叠三角的「装订线」宽度。
+    ///
+    /// 三角浮在这条带子里，不占正文的字符位，多行文字的左边缘才对得齐。
+    /// 这个值会额外加到 `UITextView.textContainerInset.left` 上。
+    var foldGutterWidth: CGFloat
     /// 折叠后占位符「⋯」的宽度
     var collapsedPlaceholderWidth: CGFloat
     /// 折叠后占位符「⋯」的颜色
@@ -100,9 +103,9 @@ struct MarkdownTheme {
             codeBlockTextInset: 10,
             quoteBarColor: UIColor(red: 0.27, green: 0.68, blue: 0.49, alpha: 1.00),
             quoteBarWidth: 3,
-            foldButtonSide: 9,
-            foldButtonGap: 6,
-            foldButtonColor: .tertiaryLabel,
+            foldButtonSide: 20,
+            foldButtonGap: 2,
+            foldGutterWidth: 22,
             collapsedPlaceholderWidth: 20,
             collapsedPlaceholderColor: .tertiaryLabel
         )

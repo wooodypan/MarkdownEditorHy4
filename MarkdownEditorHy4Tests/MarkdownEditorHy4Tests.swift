@@ -239,7 +239,7 @@ final class MarkdownEditorHy4Tests: XCTestCase {
 
     // MARK: - 折叠 / 展开
 
-    /// 只有**多行的块**才挂折叠按钮；单行块（标题、单行段落）不该有
+    /// 只有**多行的块**才挂折叠锚点；单行块（标题、单行段落）不该有
     func testOnlyMultiLineBlocksHaveFoldDisclosure() {
         let store = makeStore(sample)
 
@@ -249,25 +249,61 @@ final class MarkdownEditorHy4Tests: XCTestCase {
             let trimmed = block.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
             let isMultiLine = trimmed.contains("\n")
 
-            // 块源码开头偶尔带着上一块留下的换行，按钮会跳过这些空白，所以往后找几位
-            let attachment = (0..<min(4, block.renderedLength))
-                .compactMap { block.renderedContent.attribute(.attachment, at: $0, effectiveRange: nil) }
-                .compactMap { $0 as? FoldDisclosureAttachment }
+            // 找块里的折叠锚点（打在第一个非空白字符上的那个标记）
+            let anchor = (0..<block.renderedLength)
+                .compactMap { block.renderedContent.attribute(.markdownFoldAnchor,
+                                                              at: $0,
+                                                              effectiveRange: nil) }
+                .compactMap { $0 as? FoldAnchorInfo }
                 .first
 
-            XCTAssertEqual(attachment != nil, isMultiLine,
-                           "块「\(block.kindDescription)」\(isMultiLine ? "有多行" : "只有一行")，折叠按钮的存在情况不对")
+            XCTAssertEqual(anchor != nil, isMultiLine,
+                           "块「\(block.kindDescription)」\(isMultiLine ? "有多行" : "只有一行")，折叠锚点的存在情况不对")
 
-            if let attachment {
-                XCTAssertFalse(attachment.isCollapsed, "初始状态应该是展开的")
-                XCTAssertEqual(attachment.blockID, block.id,
-                               "按钮必须记住自己属于哪个块，否则点了不知道折叠谁")
-                XCTAssertTrue(block.mapping(at: 0)?.isDecoration == true,
-                              "折叠按钮不能占源码位置，否则复制出来的文本会多一个字符")
+            if let anchor {
+                XCTAssertFalse(anchor.isCollapsed, "初始状态应该是展开的")
+                XCTAssertEqual(anchor.blockID, block.id,
+                               "锚点必须记住自己属于哪个块，否则点了不知道折叠谁")
                 multiLine += 1
             }
         }
         XCTAssertGreaterThan(multiLine, 2, "示例文档里应该有多行块（列表 / 引用 / 代码块）")
+    }
+
+    /// 折叠三角**不能占字符位**（用户报的就是这个：块首插一个 attachment 画三角，
+    /// 第一行被推歪，第二行起还按原缩进排，多行左边缘就对不齐了）。
+    ///
+    /// 现在三角画在正文左边的装订线里，文本流里一个多余字符都没有 ——
+    /// 这条测试守的是「打锚点这个动作不改变文本结构」。
+    func testFoldDisclosureDoesNotOccupyCharacterPosition() {
+        let store = makeStore(sample)
+        let renderer = MarkupToAttributedRenderer(theme: .default, containerWidth: 600)
+
+        var checked = 0
+        for block in store.blocks {
+            let trimmed = block.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.contains("\n") else { continue }
+
+            // 不加锚点地渲染同一段源码，长度必须和加过锚点的完全一样
+            let (plain, _) = renderer.render(blockSource: block.sourceText)
+
+            XCTAssertEqual(block.renderedContent.length, plain.length,
+                           "块「\(block.kindDescription)」打锚点之后多出了字符 —— 三角会占字符位，多行就对不齐了")
+            XCTAssertEqual(block.renderedContent.string, plain.string,
+                           "块「\(block.kindDescription)」打锚点之后正文被改动了")
+
+            // 展开状态的块里不该出现折叠占位符
+            for index in 0..<block.renderedLength {
+                if let attachment = block.renderedContent.attribute(.attachment,
+                                                                    at: index,
+                                                                    effectiveRange: nil) {
+                    XCTAssertFalse(attachment is CollapsedBlockAttachment,
+                                   "展开状态的块里不该有折叠占位符")
+                }
+            }
+            checked += 1
+        }
+        XCTAssertGreaterThan(checked, 2, "示例文档里应该有多行块")
     }
 
     /// 折叠之后块尾要留着换行，否则下一个块会直接贴在「⋯」后面（一行挤两块）

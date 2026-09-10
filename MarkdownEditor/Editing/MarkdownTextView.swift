@@ -66,6 +66,13 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private var lastCodeBlockSignature = ""
     /// 首帧 TextKit 还没排出 fragment，允许重试几次
     private var codeBlockRetryCount = 0
+
+    // MARK: 折叠三角（顶层块左侧，浮在正文左边的装订线里）
+
+    /// 三角所在的控件层，加在最上层，只让按钮吃点击
+    private let foldControlLayer = FoldControlLayer()
+    /// 滚动停下之后补一次重画的定时任务（TextKit 排版比滚动事件慢半拍，见 positionFoldButtons）
+    private var foldRedrawWork: DispatchWorkItem?
     /// 监听滚动：滚动只改位置，不重算布局
     private var contentOffsetObservation: NSKeyValueObservation?
 
@@ -99,6 +106,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
         configureTextView()
         setupCodeBlockDecorations()
+        setupFoldDecorations()
         setMarkdown(markdown)
     }
 
@@ -112,7 +120,13 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         textColor = renderer.theme.textColor
         backgroundColor = .systemBackground
         alwaysBounceVertical = true
-        textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 32, right: 16)
+        // 左边多留一条「装订线」给折叠三角。三角浮在这条带子里，不占正文字符位，
+        // 多行文字的左边缘才对得齐（它要是插在文本流里，第一行会被推歪）。
+        let baseInset: CGFloat = 16
+        textContainerInset = UIEdgeInsets(top: baseInset,
+                                          left: baseInset + renderer.theme.foldGutterWidth,
+                                          bottom: 32,
+                                          right: baseInset)
 
         // 下面几项很关键：markdown 编辑器必须拿到「用户原始输入的字符」，
         // 否则系统会把引号变成弯引号、粘贴时自动补空格，源码就和用户输入对不上了
@@ -120,15 +134,6 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         smartQuotesType = .no
         smartInsertDeleteType = .no
         autocapitalizationType = .none
-
-        // 块首那个折叠小三角是 attachment，它自己收不到点击事件，
-        // 得靠一个手势来做命中测试（见 handleTapOnFoldButton）。
-        // `cancelsTouchesInView = false` 是关键：不取消触摸，textView 才能照常处理点击
-        // （把光标移到点击处），否则点一下三角，光标就不跟着走了。
-        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTapOnFoldButton(_:)))
-        tap.cancelsTouchesInView = false
-        tap.delaysTouchesEnded = false
-        addGestureRecognizer(tap)
     }
 
     // MARK: 对外接口
@@ -197,6 +202,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
         // 代码块背景矩形跟着布局走（内容或宽度变了会重算，纯滚动只平移）
         updateCodeBlockDecorationsIfNeeded()
+        // 折叠三角同理，只是它每次都按 fragment 的当前位置重摆
+        positionFoldButtons()
 
         // 容器宽度变了（转屏、Catalyst 拉窗口）→ 图片尺寸要跟着变，整篇重排一次
         let width = currentContainerWidth
@@ -232,6 +239,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 滚动时只做平移，不重算 —— 重算要走 TextKit 布局，滚动中做太贵
         contentOffsetObservation = observe(\.contentOffset, options: []) { [weak self] _, _ in
             self?.positionCodeBlockDecorations()
+            self?.positionFoldButtons()
+            // TextKit 排版比滚动事件慢半拍：滚动过程中刚进 viewport 的 fragment
+            // 可能还是估算值（三角被跳过）。停一下再补一次，三角就不会「滚过去才冒出来」。
+            self?.scheduleFoldRedraw()
         }
     }
 
@@ -367,25 +378,108 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     // MARK: - 折叠 / 展开（顶层块左侧的小三角）
 
-    /// 点到了块首的小三角 → 折叠 / 展开那一块。
+    /// 铺好三角所在的控件层（最上层，只有按钮吃点击）
+    private func setupFoldDecorations() {
+        addSubview(foldControlLayer)
+    }
+
+    /// 滚动停下之后再补一次重画（每次滚动都取消上一个任务，只留最后一个）。
     ///
-    /// attachment 只负责画，自己不接收事件，所以这里自己做命中测试：
-    /// **点击坐标 → 字符索引 → 这一位上是不是 `FoldDisclosureAttachment`**。
-    /// 用 `characterRange(at:)` 换算最省事，它是 UITextInput 协议自带的，
-    /// attachment 占的那一个字符位也算一个正常字符位置。
-    @objc private func handleTapOnFoldButton(_ gesture: UITapGestureRecognizer) {
-        guard gesture.state == .ended else { return }
-
-        let point = gesture.location(in: self)
-        guard let range = characterRange(at: point) else { return }
-        let location = offset(from: beginningOfDocument, to: range.start)
-        guard location >= 0, location < backingStorage.length else { return }
-
-        if let attachment = backingStorage.attribute(.attachment,
-                                                     at: location,
-                                                     effectiveRange: nil) as? FoldDisclosureAttachment {
-            toggleCollapse(blockID: attachment.blockID)
+    /// 没有这个兜底的话，快速滚动停下时三角可能还停在「fragment 是估算值 → 跳过」那一步，
+    /// 要等用户再动一下才冒出来。
+    private func scheduleFoldRedraw() {
+        foldRedrawWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.positionFoldButtons()
         }
+        foldRedrawWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    /// 把每个可折叠块的三角摆到它第一行的左边（装订线里）。
+    ///
+    /// ### 位置的三个关键点
+    /// 1. **只画已经「完整排版好」的 fragment**。没排到的 fragment 的
+    ///    `layoutFragmentFrame` 是估算值（`state` 还停在 `estimatedUsageBounds`），
+    ///    差几百像素，画上去一定错位。这里用 `state == .layoutAvailable` 过滤 ——
+    ///    被跳过的都在屏幕外，等滚进来排好版自然就画出来了。
+    /// 2. **对齐第一行，不是整段**。一个 fragment 常常包着整个段落（好几行），
+    ///    直接按 `layoutFragmentFrame` 居中会让三角掉到段落中间。
+    ///    用 `textLineFragments.first.typographicBounds` 取首行的矩形。
+    /// 3. **层和子 view 的坐标系要统一**。控件层的 `frame = bounds`（跟着 viewport 走），
+    ///    所以子 view 用 viewport 坐标 = 文档坐标 − contentOffset，和代码块复制按钮一致。
+    private func positionFoldButtons() {
+        guard let layoutManager = textLayoutManager,
+              let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
+              bounds.width > 1 else {
+            foldControlLayer.subviews.forEach { $0.removeFromSuperview() }
+            return
+        }
+
+        foldControlLayer.frame = bounds
+
+        // 扫出所有折叠锚点（渲染时打在块第一个字符上的 `.markdownFoldAnchor`）
+        var anchors: [(range: NSRange, info: FoldAnchorInfo)] = []
+        let full = NSRange(location: 0, length: textStorage.length)
+        textStorage.enumerateAttribute(.markdownFoldAnchor, in: full, options: []) { value, range, _ in
+            guard let info = value as? FoldAnchorInfo else { return }
+            anchors.append((range, info))
+        }
+
+        // 全重建：块数量不多，比维护复用池省心
+        foldControlLayer.subviews.forEach { $0.removeFromSuperview() }
+        guard !anchors.isEmpty else { return }
+
+        let theme = renderer.theme
+        let side = theme.foldButtonSide
+        // 三角贴着正文左边缘往左让出一个间距，正好落在装订线里
+        let x = textContainerInset.left - side - theme.foldButtonGap
+        let documentStart = contentStorage.documentRange.location
+        // 可见范围（viewport 坐标），上下各留 200pt 余量，滚快一点也不闪空
+        let visible = CGRect(x: 0, y: -200, width: bounds.width, height: bounds.height + 400)
+
+        for anchor in anchors {
+            guard let location = contentStorage.location(documentStart,
+                                                         offsetBy: anchor.range.location),
+                  let fragment = layoutManager.textLayoutFragment(for: location) else { continue }
+
+            // 只要「完整排版好」的 fragment。
+            // `state` 是个 enum 不是 OptionSet：none(0) < estimatedUsageBounds(1)
+            // < calculatedUsageBounds(2) < layoutAvailable(3)。
+            // 没排到 layoutAvailable 的话 `textLineFragments` 是空的、
+            // `layoutFragmentFrame` 也只是估算的，画出来会错位 —— 直接跳过，
+            // 反正那都在屏幕外，滚进来变成 layoutAvailable 之后自然就画出来了。
+            guard fragment.state == .layoutAvailable else { continue }
+
+            // 首行矩形：typographicBounds 是相对 fragment 自己的坐标，要加上 fragment 的原点
+            let lineRect = fragment.textLineFragments.first?.typographicBounds
+                ?? CGRect(origin: .zero, size: fragment.layoutFragmentFrame.size)
+            var line = CGRect(x: fragment.layoutFragmentFrame.minX + lineRect.minX,
+                              y: fragment.layoutFragmentFrame.minY + lineRect.minY,
+                              width: lineRect.width,
+                              height: lineRect.height)
+            // 文档坐标 → viewport 坐标
+            line.origin.y -= contentOffset.y
+            guard line.intersects(visible) else { continue }
+
+            let button = FoldDisclosureButton()
+            button.anchor = anchor.info
+            button.apply(isCollapsed: anchor.info.isCollapsed)
+            button.frame = CGRect(x: x,
+                                  y: line.midY - side / 2,
+                                  width: side,
+                                  height: side)
+            button.addTarget(self, action: #selector(foldButtonTapped(_:)), for: .touchUpInside)
+            foldControlLayer.addSubview(button)
+        }
+    }
+
+    /// 点三角 → 折叠 / 展开它那一块
+    @objc private func foldButtonTapped(_ sender: FoldDisclosureButton) {
+        guard let blockID = sender.anchor?.blockID else { return }
+        toggleCollapse(blockID: blockID)
+        // 换完内容立刻重摆一次，不用等下个布局周期
+        positionFoldButtons()
     }
 
     /// 折叠 / 展开某一块：只替换这一块的渲染内容，其它块一个字符都不动。

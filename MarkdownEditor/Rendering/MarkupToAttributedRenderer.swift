@@ -457,52 +457,30 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
 
     // MARK: 折叠（顶层块左侧的展开 / 折叠按钮）
 
-    /// 生成一个「折叠 / 展开」小三角。
+    /// 给一个块的**第一个字符**打上「折叠锚点」标记。
     ///
-    /// 它是**纯装饰**：源码里没有对应字符，复制时跳过（见 `decorationAttachment`）。
+    /// 注意这里**不插入任何字符**：三角由 UI 层画在正文左边的装订线里
+    /// （详见 `FoldAnchorInfo` 的注释）。占字符位的旧做法会把第一行往右推，
+    /// 导致多行文字左边缘对不齐。
     ///
-    /// - parameter paragraphStyle: 按钮要继承的段落样式。**必须传**，原因见 `prependFoldDisclosure`。
-    private func foldDisclosureFragment(blockID: UUID,
-                                        isCollapsed: Bool,
-                                        paragraphStyle: NSParagraphStyle?) -> RenderedFragment {
-        let attachment = FoldDisclosureAttachment(blockID: blockID,
-                                                  isCollapsed: isCollapsed,
-                                                  side: theme.foldButtonSide,
-                                                  trailingGap: theme.foldButtonGap,
-                                                  color: theme.foldButtonColor,
-                                                  font: theme.bodyFont)
-        var attributes: [NSAttributedString.Key: Any] = [.font: theme.bodyFont]
-        if let paragraphStyle { attributes[.paragraphStyle] = paragraphStyle }
-        return .decorationAttachment(attachment, attributes: attributes)
-    }
-
-    /// 把「折叠 / 展开」按钮插到一个块的第一行行首。
-    ///
-    /// ### 为什么必须继承段落样式（这里踩过坑，别删）
-    /// TextKit 拿**段落里第一个字符**的 `paragraphStyle` 当整段的样式。按钮插到最前面
-    /// 就成了那个「第一个字符」，如果它自己不带样式，列表的悬挂缩进、引用块的缩进
-    /// 会整段被抹平。所以这里把插入点原来那个字符的段落样式抄过来。
-    ///
-    /// - parameter blockID:    所属块（点按钮时靠它反查要折叠哪一块）
+    /// - parameter blockID:    所属块（点三角时靠它反查要折叠哪一块）
     /// - parameter isCollapsed: 当前折叠状态（决定三角朝向）
-    func prependFoldDisclosure(to fragment: inout RenderedFragment,
-                               blockID: UUID,
-                               isCollapsed: Bool) {
+    func markFoldAnchor(on fragment: inout RenderedFragment,
+                        blockID: UUID,
+                        isCollapsed: Bool) {
         guard fragment.text.length > 0 else { return }
 
         let index = firstNonWhitespaceIndex(in: fragment.text)
-        let style = fragment.text.attribute(.paragraphStyle,
-                                            at: min(index, fragment.text.length - 1),
-                                            effectiveRange: nil) as? NSParagraphStyle
-
-        let button = foldDisclosureFragment(blockID: blockID,
-                                            isCollapsed: isCollapsed,
-                                            paragraphStyle: style)
-        fragment.text.insert(button.text, at: index)
-        fragment.mappings.insert(button.mappings[0], at: index)
+        let info = FoldAnchorInfo(blockID: blockID, isCollapsed: isCollapsed)
+        fragment.text.addAttribute(.markdownFoldAnchor,
+                                   value: info,
+                                   range: NSRange(location: index, length: 1))
     }
 
-    /// 折叠状态下整块的内容：**小三角 + 一个「⋯」占位符**（两三个字符位代替整块）。
+    /// 折叠状态下整块的内容：**一个「⋯」占位符**（一个字符位代替整块）。
+    ///
+    /// 三角不在文本里 —— 和展开态一样，只在占位符上打个锚点标记，
+    /// UI 层照样在装订线里画 ▶。
     ///
     /// ### 折叠了源码还在吗？在
     /// 折叠只是视图状态，`MarkdownBlock.sourceText` 一个字没动。
@@ -513,10 +491,6 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                           sourceText: String) -> (text: NSAttributedString, mappings: [CharMapping]) {
         let style = theme.paragraphStyle(indent: 0)
         var fragment = RenderedFragment.empty
-
-        fragment.append(foldDisclosureFragment(blockID: blockID,
-                                               isCollapsed: true,
-                                               paragraphStyle: style))
 
         let placeholder = CollapsedBlockAttachment(width: theme.collapsedPlaceholderWidth,
                                                    color: theme.collapsedPlaceholderColor,
@@ -534,6 +508,9 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             fragment.append(.decoration(String(repeating: "\n", count: breaks),
                                         attributes: [.font: theme.bodyFont, .paragraphStyle: style]))
         }
+
+        // 锚点打在占位符上（它就是这个块的第一个字符），UI 层据此画 ▶
+        markFoldAnchor(on: &fragment, blockID: blockID, isCollapsed: true)
         return (fragment.text, fragment.mappings)
     }
 

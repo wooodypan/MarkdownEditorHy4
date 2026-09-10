@@ -316,12 +316,13 @@ final class MarkdownDocumentStore {
             charMappings: mappings,
             kindDescription: MarkdownBlock.describe(ast)
         )
-        // 第一行左侧加一个「折叠 / 展开」小三角 —— 但只有**多行的块**才加，
-        // 单行块（标题、单行段落、分隔线）折起来没意义，每行挂个三角也太吵。
+        // 给块首打一个「折叠锚点」—— UI 层据此在左边装订线里画小三角。
+        // 但只有**多行的块**才打，单行块（标题、单行段落、分隔线）折起来没意义，
+        // 每行挂个三角也太吵。
         if canCollapse(blockSource) {
             var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: text),
                                             mappings: mappings)
-            renderer.prependFoldDisclosure(to: &fragment, blockID: block.id, isCollapsed: false)
+            renderer.markFoldAnchor(on: &fragment, blockID: block.id, isCollapsed: false)
             block.renderedContent = fragment.text
             block.charMappings = fragment.mappings
         }
@@ -369,7 +370,7 @@ final class MarkdownDocumentStore {
         }
         var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: text),
                                         mappings: mappings)
-        renderer.prependFoldDisclosure(to: &fragment, blockID: block.id, isCollapsed: false)
+        renderer.markFoldAnchor(on: &fragment, blockID: block.id, isCollapsed: false)
         block.renderedContent = fragment.text
         block.charMappings = fragment.mappings
     }
