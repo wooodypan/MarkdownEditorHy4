@@ -72,6 +72,13 @@ struct MarkdownTheme {
     var collapsedPlaceholderColor: UIColor
     /// 是否显示「源码提示」：图片下面那行 `![alt](url)`、圆点后面的 `- `
     var showsSourceHints: Bool = true
+    /// 代码块的 **``` 围栏行**（第一行 ```lang 和最后一行 ```）要不要跟着正文一起铺淡灰背景。
+    ///
+    /// - `false`（默认）：只有代码正文有背景，围栏行留白，看起来是「一段被高亮的代码」；
+    /// - `true`：首尾围栏也罩进背景，整块糊成一个灰方块。
+    ///
+    /// 想切换效果只改这一个值即可，详见 `MarkdownTextView.computeCodeBlockFrames`。
+    var showsCodeBlockFenceBackground: Bool = false
 
     // MARK: 默认样式
 

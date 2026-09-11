@@ -604,6 +604,35 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         }
     }
 
+    /// 开关打开（`showsCodeBlockFenceBackground = true`）时，围栏行要重新被背景罩住。
+    /// 和上一个测试正好相反，两条一起才说明这个 bool 真的管用、而不是写死了一种效果。
+    func testFenceBackgroundEnabledCoversFenceLines() throws {
+        let tv = try makeCodeBlockTestCaseEditor()
+        tv.renderer.theme.showsCodeBlockFenceBackground = true
+        let (frames, _) = tv.computeCodeBlockFrames()
+        let ranges = codeBlockRanges(in: tv)
+        XCTAssertEqual(frames.count, 2)
+
+        for (entry, range) in zip(frames, ranges) {
+            let lines = codeBlockLines(of: range, in: tv)
+            guard let openPos = tv.position(from: tv.beginningOfDocument, offset: lines[0].location),
+                  let closePos = tv.position(from: tv.beginningOfDocument,
+                                             offset: lines[lines.count - 1].location) else { continue }
+            let openCaret = tv.caretRect(for: openPos)
+            let closeCaret = tv.caretRect(for: closePos)
+
+            XCTAssertLessThanOrEqual(entry.frame.minY, openCaret.minY + 1,
+                "开关打开后背景顶(\(entry.frame.minY))应该压到开围栏行(\(openCaret.minY))上面")
+            XCTAssertGreaterThanOrEqual(entry.frame.maxY, closeCaret.maxY - 1,
+                "开关打开后背景底(\(entry.frame.maxY))应该盖住闭围栏行(\(closeCaret.maxY))")
+        }
+    }
+
+    /// 主题里这个开关的默认值必须是 false（用户明确要求围栏行默认不带背景）
+    func testFenceBackgroundDefaultsToOff() {
+        XCTAssertFalse(MarkdownTheme.default.showsCodeBlockFenceBackground)
+    }
+
     /// 空代码块（开围栏紧接着闭围栏，中间没有正文）不该铺出任何背景
     func testEmptyCodeBlockHasNoBackground() throws {
         let tv = makeEditor("""

@@ -320,9 +320,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
                   let endLocation = contentStorage.location(documentStart, offsetBy: NSMaxRange(range)) else { continue }
 
             // 3) 纵向范围：把这个区间覆盖到的所有 layout fragment 的外接矩形求出来。
-            //    **首尾的 ``` 围栏行不算在内**——它们只是语法标记，铺灰底会让整块看起来
-            //    糊成一坨，用户要的是「只有代码正文有背景」。
-            let fenceRanges = fenceLineRanges(in: range)
+            //    围栏行（首行 ```lang、末行 ```）要不要一起铺背景由主题开关决定：
+            //    默认 false，只罩代码正文；改成 true 就是整块一个灰方块。
+            let fenceRanges = renderer.theme.showsCodeBlockFenceBackground ? [] : fenceLineRanges(in: range)
 
             var top: CGFloat?
             var bottom: CGFloat = 0
@@ -367,9 +367,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         return (frames, missingLayout)
     }
 
-    /// 一个代码块里**不该铺背景**的行：第一行的 ```lang 和最后一行的 ```。
+    /// 一个代码块里**可能不该铺背景**的行：第一行的 ```lang 和最后一行的 ```。
     ///
-    /// 背景只罩代码正文，围栏行留白——视觉上更像"一段被高亮的代码"，而不是一整块灰方块。
+    /// 主题里 `showsCodeBlockFenceBackground == false` 时（默认），这两行会从背景矩形里
+    /// 抠掉——背景只罩代码正文，围栏行留白，视觉上更像"一段被高亮的代码"。
     ///
     /// - returns: 这些行在**整篇文本**里的 NSRange（含行尾换行，和 fragment 的覆盖范围对齐）。
     ///           行数不足 3 行（空代码块，开围栏紧接着闭围栏）时全部返回，此时没有正文可画。

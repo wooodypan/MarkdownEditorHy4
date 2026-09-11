@@ -25,7 +25,9 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
 
     // MARK: 配置
 
-    let theme: MarkdownTheme
+    /// 样式表。用 `var` 是因为运行时可能要单独调某一项（比如代码块围栏行是否铺背景），
+    /// 换主题也不用重建 renderer
+    var theme: MarkdownTheme
     /// 容器宽度，图片和分隔线要按它算尺寸
     var containerWidth: CGFloat
     /// 相对路径图片的基准目录
