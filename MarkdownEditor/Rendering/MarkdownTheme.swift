@@ -80,6 +80,13 @@ struct MarkdownTheme {
     /// 想切换效果只改这一个值即可，详见 `MarkdownTextView.computeCodeBlockFrames`。
     var showsCodeBlockFenceBackground: Bool = false
 
+    /// 表格的样式（表头底色、边框、单元格内边距…）
+    ///
+    /// ### 为什么叫 `TableStyle` 而不是 `Table`
+    /// `Markdown` 模块里已经有一个 `Table`（swift-markdown 的表格 AST 节点），
+    /// 同名会让代码里到处要写 `Markdown.Table`，容易看错。
+    var table = TableStyle()
+
     // MARK: 默认样式
 
     static var `default`: MarkdownTheme {
@@ -169,6 +176,14 @@ struct MarkdownTheme {
         [.font: bodyFont, .foregroundColor: markerColor]
     }
 
+    /// 表格下方那几行**表格源码**的样式：等宽字体 + 浅灰。
+    ///
+    /// 表格本体已经画成一张图了，源码留在这里只是为了「所见即所编辑」
+    /// （光标能停进去改），所以颜色压到很淡，不抢视觉焦点。
+    var tableSourceAttributes: [NSAttributedString.Key: Any] {
+        [.font: codeFont, .foregroundColor: table.sourceTextColor]
+    }
+
     // MARK: 段落样式
 
     /// 普通段落
@@ -210,6 +225,35 @@ struct MarkdownTheme {
         style.paragraphSpacingBefore = paragraphSpacing
         style.paragraphSpacing = paragraphSpacing + 4
         return style
+    }
+}
+
+// MARK: - 表格样式
+
+extension MarkdownTheme {
+    /// 表格的绘制参数。
+    ///
+    /// 表格是**自绘成一张图片**再当 attachment 塞进文本流的（原因见 `MarkdownTableView`），
+    /// 所以颜色、边距这些只能在绘制时读，套不到 UIKit 的 view 层级上去。
+    struct TableStyle {
+        /// 表头行的底色
+        var headerBackground: UIColor = .secondarySystemBackground
+        /// 表格线和外框的颜色
+        var borderColor: UIColor = .separator
+        /// 表格线宽度（1 就是一条细线）
+        var borderWidth: CGFloat = 1
+        /// 单元格文字到左右边框的距离
+        var cellPaddingHorizontal: CGFloat = 12
+        /// 单元格文字到上下边框的距离
+        var cellPaddingVertical: CGFloat = 8
+        /// 一列最窄多少（内容再短也不再压缩）
+        var minColumnWidth: CGFloat = 64
+        /// 一列最宽多少（防止某一列内容特别长，把别的列挤没了）
+        var maxColumnWidth: CGFloat = 280
+        /// 表格外框圆角
+        var cornerRadius: CGFloat = 8
+        /// 表格源码文字的颜色（浅灰）
+        var sourceTextColor: UIColor = .tertiaryLabel
     }
 }
 

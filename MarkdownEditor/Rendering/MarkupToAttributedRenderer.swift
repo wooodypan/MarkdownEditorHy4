@@ -360,6 +360,47 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         return out
     }
 
+    // MARK: 表格
+
+    /// 表格：上方画一张自绘表格图，下方保留**弱化显示**的源码文字（`| a | b |` 那几行）。
+    ///
+    /// ### 结构和 `visitImage` 是镜像的
+    /// - 表格图是一个 attachment，**额外挂上去的**（`isAttachmentView`），只占 1 个字符位；
+    /// - 下面的源码是**源码本身**（真实映射，浅灰只是样式），光标能停进去改；
+    /// - 两者映射同一段源码，复制时靠 `lastSourceEnd` 去重，整段只输出一次。
+    ///
+    /// 所以「全选复制 === 源文件」不需要为表格新增任何逻辑。
+    func visitTable(_ table: Table) -> RenderedFragment {
+        guard let range = localRange(of: table) else {
+            // 拿不到范围（手工构造的 AST）：退化成按普通块渲染，源码由补漏步骤兜底
+            return defaultVisit(table)
+        }
+
+        let markdownSource = sourceText(in: range)
+        let data = MarkdownTableData(table)
+        let maxWidth = max(120, containerWidth - indent - 16)
+        let attachment = MarkdownTableAttachment(markdownSource: markdownSource,
+                                                 data: data,
+                                                 theme: theme,
+                                                 maxWidth: maxWidth)
+
+        let style = theme.blockAttachmentParagraphStyle(indent: indent)
+        var out = RenderedFragment.empty
+        out.append(.attachment(attachment,
+                               sourceStart: range.location,
+                               sourceLength: range.length,
+                               attributes: [.paragraphStyle: style, .font: theme.bodyFont]))
+        // 表格下面弱化显示源码：等宽 + 浅灰，方便对照真实语法改内容。
+        // 段落样式不能省：源码有好几行，没有它的话缩进（列表里的表格）和行距都不对
+        var sourceAttributes = theme.tableSourceAttributes
+        sourceAttributes[.paragraphStyle] = theme.paragraphStyle(indent: indent)
+        out.append(.decoration("\n", attributes: sourceAttributes))
+        out.append(.sourceHint(markdownSource,
+                               sourceStart: range.location,
+                               attributes: sourceAttributes))
+        return out
+    }
+
     func visitThematicBreak(_ thematicBreak: ThematicBreak) -> RenderedFragment {
         guard let range = localRange(of: thematicBreak) else { return .empty }
 

@@ -519,6 +519,116 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         }
     }
 
+    // MARK: - 表格（上方自绘表格图 + 下方弱化源码）
+
+    /// 一个带三种对齐方式的表格
+    private var tableSample: String {
+        """
+        | 姓名 | 年龄 | 城市 |
+        | :--- | :--: | ---: |
+        | 张三 | 18 | 上海 |
+        | 李四 | 20 | 武汉 |
+        """
+    }
+
+    /// 表格图是「额外挂上去的视觉元素」，全选复制出来必须还是源码，一个字符都不能多
+    func testTableRoundTripKeepsSource() {
+        let sources = [
+            tableSample,
+            "# 标题\n\n" + tableSample + "\n\n正文段落\n",
+            // 列数不齐（GFM 允许数据行比表头短）
+            "| a | b |\n| --- | --- |\n| 1 |\n",
+            // 单元格是空的
+            "|  |  |\n| --- | --- |\n|  |  |\n",
+        ]
+        for source in sources {
+            let store = makeStore(source)
+            let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
+            XCTAssertEqual(restored, source, firstDifference(source, restored))
+        }
+    }
+
+    /// 表格下面的源码要弱化显示（浅灰等宽）—— 用户要的就是「源码压成浅灰」
+    func testTableSourceIsDimmed() {
+        let store = makeStore(tableSample)
+        let block = store.blocks[0]
+        let dimmedColor = MarkdownTheme.default.table.sourceTextColor
+
+        var checked = 0
+        for (offset, mapping) in block.charMappings.enumerated() where !mapping.isAttachmentView {
+            guard let color = block.renderedContent.attribute(.foregroundColor,
+                                                             at: offset,
+                                                             effectiveRange: nil) as? UIColor else {
+                XCTFail("第 \(offset) 个字符没有前景色")
+                continue
+            }
+            XCTAssertEqual(color, dimmedColor, "第 \(offset) 个字符不是弱化的浅灰色")
+            checked += 1
+        }
+        XCTAssertGreaterThan(checked, 10, "应该检查到一批源码字符，实际只检查了 \(checked) 个")
+    }
+
+    /// 表格图必须排在源码前面，尺寸撑满容器、高度按内容算，并且真的画出了图片
+    func testTableAttachmentSitsAboveSource() throws {
+        let store = makeStore(tableSample)
+        let content = store.blocks[0].renderedContent
+
+        var attachmentRange: NSRange?
+        content.enumerateAttribute(.attachment,
+                                   in: NSRange(location: 0, length: content.length),
+                                   options: []) { value, range, stop in
+            if value is MarkdownTableAttachment {
+                attachmentRange = range
+                stop.pointee = true
+            }
+        }
+
+        let range = try XCTUnwrap(attachmentRange, "表格块里应该有一个表格 attachment")
+        XCTAssertEqual(range.location, 0, "表格图应该排在源码前面")
+        XCTAssertEqual(range.length, 1, "attachment 在文本流里只占 1 个字符位")
+
+        let attachment = try XCTUnwrap(content.attribute(.attachment, at: range.location,
+                                                         effectiveRange: nil) as? MarkdownTableAttachment)
+        // 数据解析：表头 / 数据行 / 三种对齐
+        XCTAssertEqual(attachment.data.header, ["姓名", "年龄", "城市"])
+        XCTAssertEqual(attachment.data.rows.count, 2)
+        XCTAssertEqual(attachment.data.alignment(column: 0), .left)
+        XCTAssertEqual(attachment.data.alignment(column: 1), .center)
+        XCTAssertEqual(attachment.data.alignment(column: 2), .right)
+
+        // 尺寸：宽度 = 容器宽(600) - 16，高度按内容自适应
+        XCTAssertEqual(attachment.bounds.width, 584, accuracy: 1)
+        XCTAssertGreaterThan(attachment.bounds.height, 60, "三行表格的高度不该只有这么点")
+        XCTAssertNotNil(attachment.image, "表格要画成图片交给 TextKit")
+        XCTAssertEqual(attachment.image?.size.width ?? 0, attachment.bounds.width, accuracy: 1)
+    }
+
+    /// 单元格里的行内语法（`**粗体**`）取出来应该是纯文本，不该带星号
+    func testTableCellTextIsPlain() {
+        let source = "| 名称 | 说明 |\n| --- | --- |\n| **粗体** | `代码` |\n"
+        let store = makeStore(source)
+        let content = store.blocks[0].renderedContent
+
+        var attachment: MarkdownTableAttachment?
+        content.enumerateAttribute(.attachment,
+                                   in: NSRange(location: 0, length: content.length),
+                                   options: []) { value, _, stop in
+            if let found = value as? MarkdownTableAttachment {
+                attachment = found
+                stop.pointee = true
+            }
+        }
+        XCTAssertEqual(attachment?.data.rows.first, ["粗体", "代码"])
+    }
+
+    /// 只有表头、没有数据行的表格不能崩，往返也要正确
+    func testHeaderOnlyTable() {
+        let source = "| a | b |\n| --- | --- |\n"
+        let store = makeStore(source)
+        let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
+        XCTAssertEqual(restored, source, firstDifference(source, restored))
+    }
+
     // MARK: - 代码块背景（文档坐标修正）
 
     /// 加载测试用例文档（两个代码块，第二个很长、超出好几屏）
