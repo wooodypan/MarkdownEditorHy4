@@ -21,5 +21,63 @@
 			</array>
 		</dict>
 	</dict>
+
+	<!-- 文档类型：让 Finder 在 .md 上右键「打开方式」里列出本 App -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Markdown Document</string>
+			<!-- Editor = 可读可写；Viewer = 只读。我们要能存回去，所以用 Editor -->
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<!-- Alternate = 只出现在「打开方式」菜单，不抢别的 App 的默认关联；
+			     想让 .md 默认就由本 App 打开，把这里改成 Default -->
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>net.daringfireball.markdown</string>
+				<string>public.plain-text</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- UTI 声明：macOS 认识 net.daringfireball.markdown，iOS 不认识，这里补一份。
+	     系统已有的声明优先级更高，重复声明不会冲突。 -->
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>net.daringfireball.markdown</string>
+			<key>UTTypeDescription</key>
+			<string>Markdown Document</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.plain-text</string>
+			</array>
+			<key>UTTypeReferenceURL</key>
+			<string>https://daringfireball.net/projects/markdown/</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>md</string>
+					<string>markdown</string>
+					<string>mdown</string>
+					<string>mkd</string>
+					<string>mdwn</string>
+					<string>mdtext</string>
+					<string>mdtxt</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>text/markdown</string>
+			</dict>
+		</dict>
+	</array>
+
+	<!-- 允许直接编辑原文件（配合安全作用域书签），而不是先拷一份副本 -->
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 </dict>
 </plist>

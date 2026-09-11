@@ -13,7 +13,21 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        // 兜底：个别系统版本冷启动时只把文件 URL 放在 launchOptions 里，不派发给 scene
+        if let url = launchOptions?[.url] as? URL {
+            MarkdownDocumentOpener.shared.handle(url: url)
+        }
+        return true
+    }
+
+    // MARK: 从 Finder 打开 .md 文件
+
+    /// 兜底路径：SceneDelegate 没实现 openURLContexts 时，系统会走这里。
+    /// 两条路不会同时被调用（UIKit 优先派发给 scene），所以不会重复打开。
+    func application(_ app: UIApplication,
+                     open url: URL,
+                     options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+        MarkdownDocumentOpener.shared.handle(url: url)
         return true
     }
 

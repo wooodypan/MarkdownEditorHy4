@@ -481,6 +481,35 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         return textView
     }
 
+    // MARK: - 文件关联（Finder 右键「打开方式」）
+
+    /// Info.plist 里的声明被误删的话，Finder 右键 .md 文件的「打开方式」里就找不到本 App
+    func testAppDeclaresMarkdownDocumentType() throws {
+        let info = try XCTUnwrap(Bundle(for: MarkdownDocumentOpener.self).infoDictionary)
+
+        let documentTypes = try XCTUnwrap(info["CFBundleDocumentTypes"] as? [[String: Any]])
+        let handled = documentTypes.flatMap { $0["LSItemContentTypes"] as? [String] ?? [] }
+        XCTAssertTrue(handled.contains("net.daringfireball.markdown"),
+                      "CFBundleDocumentTypes 必须声明 net.daringfireball.markdown，否则右键菜单里没有本 App")
+
+        let imported = try XCTUnwrap(info["UTImportedTypeDeclarations"] as? [[String: Any]])
+        let extensions = imported.compactMap { entry -> [String]? in
+            guard entry["UTTypeIdentifier"] as? String == "net.daringfireball.markdown" else { return nil }
+            let tags = entry["UTTypeTagSpecification"] as? [String: Any]
+            return tags?["public.filename-extension"] as? [String]
+        }.flatMap { $0 }
+        XCTAssertTrue(extensions.contains("md"), "必须把 md 扩展名绑到 markdown UTI 上，否则系统认不出 .md")
+    }
+
+    /// 冷启动时界面还没建好，URL 要先攒着，等 ViewController 起来再取走
+    func testDocumentOpenerKeepsPendingURL() {
+        let url = URL(fileURLWithPath: "/tmp/MarkdownEditorHy4文件关联测试.md")
+        MarkdownDocumentOpener.shared.handle(url: url)
+        XCTAssertEqual(MarkdownDocumentOpener.shared.pendingURL, url)
+        XCTAssertEqual(MarkdownDocumentOpener.shared.takePendingURL(), url)
+        XCTAssertNil(MarkdownDocumentOpener.shared.takePendingURL(), "取走之后必须清空，否则下次启动会重复打开")
+    }
+
     /// 空文档和只有空行的文档不能崩，也不能凭空多出字符
     func testEmptyAndBlankDocuments() {
         for source in ["", "\n", "\n\n\n", "   "] {

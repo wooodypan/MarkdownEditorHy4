@@ -15,6 +15,15 @@ final class ViewController: UIViewController {
     private let statusLabel = UILabel()
     private var bottomConstraint: NSLayoutConstraint?
 
+    /// 当前打开的文件。nil 表示在看内置示例文档，这类内容不能保存回磁盘
+    private var openedFileURL: URL?
+    /// 上次打开/保存时的源码快照，和它比对就知道有没有改动
+    private var savedSource = ""
+    /// 有没有未保存的改动
+    private var isDirty: Bool { editor.markdownSource != savedSource }
+    /// 临时提示（比如「已保存」）显示完要恢复成常规状态栏
+    private var statusResetWork: DispatchWorkItem?
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -22,8 +31,22 @@ final class ViewController: UIViewController {
         setupEditor()
         setupStatusLabel()
         setupToolbar()
-        loadSampleDocument()
+        // 冷启动时文件 URL 已经在 MarkdownDocumentOpener 里等着了，先取出来用；
+        // 没有外部文件才退回到内置示例文档
+        if let url = MarkdownDocumentOpener.shared.takePendingURL() {
+            openDocument(at: url)
+        } else {
+            loadSampleDocument()
+        }
         observeKeyboard()
+        observeDocumentOpenRequests()
+        observeEditorChanges()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // 窗口（windowScene）要等 view 挂上去才有，标题在这里补一次
+        updateWindowTitle()
     }
 
     // MARK: 界面搭建
@@ -106,8 +129,100 @@ final class ViewController: UIViewController {
 
         ![示例图片](sample.png)
         """
+        openedFileURL = nil
+        savedSource = text
+        editor.imageBaseURL = FileManager.default.urls(for: .documentDirectory,
+                                                       in: .userDomainMask).first
         editor.setMarkdown(text)
         refreshStatus()
+        updateWindowTitle()
+    }
+
+    // MARK: 打开 / 保存外部 .md 文件
+
+    /// 打开 Finder 传进来的文件（右键「打开方式」、双击、拖到 Dock 图标都走这里）
+    private func openDocument(at url: URL) {
+        do {
+            let text = try loadText(from: url)
+            openedFileURL = url
+            savedSource = text
+            // 关键：md 里的图片多是相对路径，基准目录要指向文件所在目录，否则图片全裂
+            editor.imageBaseURL = url.deletingLastPathComponent()
+            editor.setMarkdown(text)
+            refreshStatus()
+            updateWindowTitle()
+        } catch {
+            showAlert(title: "打不开文件",
+                      message: "\(url.lastPathComponent)\n\n\(error.localizedDescription)")
+        }
+    }
+
+    private func loadText(from url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        // 按 UTF-8 解码。遇到不合法的字节会换成替换字符，总比整篇打不开强
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// ⌘S：写回原文件。没打开外部文件时给个提示
+    @objc private func saveDocument() {
+        guard let url = openedFileURL else {
+            showAlert(title: "没有可保存的文件",
+                      message: "现在看的是内置示例文档。在 Finder 里右键 .md 文件 →「打开方式」→ 选本 App，打开后就能用 ⌘S 存回原文件。")
+            return
+        }
+
+        let source = editor.markdownSource
+        do {
+            try source.write(to: url, atomically: true, encoding: .utf8)
+            savedSource = source
+            refreshStatus()
+            updateWindowTitle()
+            flashStatus("已保存 \(url.lastPathComponent)")
+        } catch {
+            showAlert(title: "保存失败", message: "\(url.lastPathComponent)\n\n\(error.localizedDescription)")
+        }
+    }
+
+    override var keyCommands: [UIKeyCommand]? {
+        // Mac 上的 ⌘S
+        [UIKeyCommand(input: "s", modifierFlags: .command, action: #selector(saveDocument))]
+    }
+
+    private func updateWindowTitle() {
+        let name = openedFileURL?.lastPathComponent ?? "示例文档"
+        let suffix = isDirty ? " — 已修改" : ""
+        title = name
+        // Mac Catalyst：windowScene.title 就是窗口标题栏上显示的文字
+        view.window?.windowScene?.title = name + suffix
+    }
+
+    private func observeDocumentOpenRequests() {
+        // 热启动：App 已经在跑，用户又双击了一个 md 文件
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(documentOpenRequested(_:)),
+            name: .markdownDocumentOpenRequested,
+            object: nil
+        )
+    }
+
+    @objc private func documentOpenRequested(_ notification: Notification) {
+        guard let url = notification.object as? URL else { return }
+        openDocument(at: url)
+    }
+
+    private func observeEditorChanges() {
+        // 内容一变就刷新窗口标题上的「已修改」标记
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(editorContentChanged),
+            name: UITextView.textDidChangeNotification,
+            object: editor
+        )
+    }
+
+    @objc private func editorContentChanged() {
+        updateWindowTitle()
     }
 
     private func loadSampleMarkdown() -> String? {
@@ -116,7 +231,18 @@ final class ViewController: UIViewController {
     }
 
     private func refreshStatus() {
-        statusLabel.text = "块数 \(editor.documentStore.blocks.count) · 源码 \(editor.markdownSource.utf16.count) 字符 · 渲染 \(editor.documentStore.renderedLength) 字符"
+        let name = openedFileURL?.lastPathComponent ?? "内置示例文档"
+        let dirty = isDirty ? " · 已修改（⌘S 保存）" : ""
+        statusLabel.text = "\(name)\(dirty) · 块数 \(editor.documentStore.blocks.count) · 源码 \(editor.markdownSource.utf16.count) 字符 · 渲染 \(editor.documentStore.renderedLength) 字符"
+    }
+
+    /// 状态栏上闪一句提示，1.5 秒后自动恢复成常规信息
+    private func flashStatus(_ message: String) {
+        statusResetWork?.cancel()
+        statusLabel.text = message
+        let work = DispatchWorkItem { [weak self] in self?.refreshStatus() }
+        statusResetWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
     // MARK: 按钮动作
@@ -208,6 +334,21 @@ final class ViewController: UIViewController {
     }
 
     // MARK: 小工具
+
+    /// 弹提示。冷启动时 view 还没挂到窗口上，present 会无效，所以延后一帧再弹
+    private func showAlert(title: String, message: String) {
+        let presentBlock = { [weak self] in
+            guard let self else { return }
+            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "好", style: .default))
+            self.present(alert, animated: true)
+        }
+        if view.window == nil {
+            DispatchQueue.main.async(execute: presentBlock)
+        } else {
+            presentBlock()
+        }
+    }
 
     /// 找出两段文本第一处不同的位置，方便定位问题
     private func firstDifferenceDescription(_ source: String, _ copied: String) -> String {

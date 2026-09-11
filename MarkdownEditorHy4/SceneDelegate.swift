@@ -17,6 +17,22 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // If using a storyboard, the `window` property will automatically be initialized and attached to the scene.
         // This delegate does not imply the connecting scene or session are new (see `application:configurationForConnectingSceneSession` instead).
         guard let _ = (scene as? UIWindowScene) else { return }
+
+        // 冷启动：App 没在跑时用户双击 md 文件，URL 从这里进来
+        handleURLContexts(connectionOptions.urlContexts)
+    }
+
+    // MARK: 从 Finder 打开 .md 文件
+
+    /// 热启动：App 已经在跑，用户再双击 md 文件（或把文件拖到 Dock 图标上）
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        handleURLContexts(URLContexts)
+    }
+
+    private func handleURLContexts(_ contexts: Set<UIOpenURLContext>) {
+        for context in contexts {
+            MarkdownDocumentOpener.shared.handle(url: context.url)
+        }
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {
