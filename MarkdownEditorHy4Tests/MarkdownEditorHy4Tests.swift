@@ -540,12 +540,12 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         return ranges
     }
 
-    /// 背景矩形必须真的罩住代码文字。
+    /// 背景矩形必须真的罩住代码**正文**。
     ///
     /// ### 防的是什么回归
     /// `layoutFragmentFrame` 的原点是 **textContainer 左上角（不含 textContainerInset）**，
     /// 直接当文档坐标用，背景会整体偏上一个 inset（16pt）。这里用官方 `caretRect(for:)`
-    /// （它的坐标含 inset，是权威基准）对照：背景顶必须在代码首行上方、且距离不超过一行。
+    /// （它的坐标含 inset，是权威基准）对照：背景顶/底必须贴着正文的首行和末行。
     func testCodeBlockBackgroundAlignsWithCaret() throws {
         let tv = try makeCodeBlockTestCaseEditor()
         let (frames, _) = tv.computeCodeBlockFrames()
@@ -554,14 +554,86 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertEqual(ranges.count, frames.count)
 
         for (entry, range) in zip(frames, ranges) {
-            guard let pos = tv.position(from: tv.beginningOfDocument, offset: range.location) else { continue }
-            let caret = tv.caretRect(for: pos)
-            let gap = caret.origin.y - entry.frame.origin.y
-            XCTAssertGreaterThanOrEqual(gap, 0,
-                "背景顶(\(entry.frame.origin.y))跑到了代码首行(\(caret.origin.y))下面")
-            XCTAssertLessThanOrEqual(gap, 40,
-                "背景顶离代码首行 \(gap)pt，太远了——背景整体偏上，多半是 inset 换算又丢了")
+            let lines = codeBlockLines(of: range, in: tv)
+            XCTAssertGreaterThanOrEqual(lines.count, 3, "测试用例里的代码块至少有开围栏、正文、闭围栏三行")
+
+            // 正文首行 = 开围栏那行的下一行，正文末行 = 闭围栏那行的上一行
+            guard let contentTopPos = tv.position(from: tv.beginningOfDocument, offset: lines[1].location),
+                  let contentBottomPos = tv.position(from: tv.beginningOfDocument,
+                                                    offset: lines[lines.count - 2].location) else { continue }
+            let contentTop = tv.caretRect(for: contentTopPos)
+            let contentBottom = tv.caretRect(for: contentBottomPos)
+
+            // 背景顶：在正文首行上方，但只差一个 padding（主题里是 6pt），给 20pt 容差防脆断
+            XCTAssertLessThanOrEqual(entry.frame.minY, contentTop.minY + 1,
+                "背景顶(\(entry.frame.minY))跑到正文首行(\(contentTop.minY))下面了")
+            XCTAssertGreaterThanOrEqual(entry.frame.minY, contentTop.minY - 20,
+                "背景顶离正文首行太远，多半是 inset 换算又丢了")
+            // 背景底：刚好压在正文末行下面
+            XCTAssertGreaterThanOrEqual(entry.frame.maxY, contentBottom.maxY - 1,
+                "背景底(\(entry.frame.maxY))没罩住正文末行(\(contentBottom.maxY))")
+            XCTAssertLessThanOrEqual(entry.frame.maxY, contentBottom.maxY + 20,
+                "背景底拖太长，多半把闭围栏那行也包进去了")
         }
+    }
+
+    /// **首尾的 \`\`\` 围栏行不能带灰底**（用户明确要求）。
+    ///
+    /// 背景只罩代码正文，围栏行留白，这样 ```bash 和收尾的 ``` 看起来是"框"，
+    /// 而不是被糊进灰方块里。
+    func testCodeBlockBackgroundExcludesFenceLines() throws {
+        let tv = try makeCodeBlockTestCaseEditor()
+        let (frames, _) = tv.computeCodeBlockFrames()
+        let ranges = codeBlockRanges(in: tv)
+
+        for (entry, range) in zip(frames, ranges) {
+            let lines = codeBlockLines(of: range, in: tv)
+
+            // 开围栏行（第一行）的文字不能被背景压住
+            guard let fencePos = tv.position(from: tv.beginningOfDocument, offset: lines[0].location) else { continue }
+            let fenceCaret = tv.caretRect(for: fencePos)
+            XCTAssertGreaterThan(entry.frame.minY, fenceCaret.minY,
+                "背景顶(\(entry.frame.minY))盖到了开围栏行(\(fenceCaret.minY))上")
+
+            // 闭围栏行（最后一行）同理：背景底不能探进它的文字区域
+            let closing = lines[lines.count - 1]
+            guard let closingPos = tv.position(from: tv.beginningOfDocument, offset: closing.location) else { continue }
+            let closingCaret = tv.caretRect(for: closingPos)
+            XCTAssertLessThan(entry.frame.maxY, closingCaret.maxY,
+                "背景底(\(entry.frame.maxY))盖到了闭围栏行(\(closingCaret.maxY))上")
+        }
+    }
+
+    /// 空代码块（开围栏紧接着闭围栏，中间没有正文）不该铺出任何背景
+    func testEmptyCodeBlockHasNoBackground() throws {
+        let tv = makeEditor("""
+        # 空代码块
+
+        ```
+        ```
+
+        正文
+        """)
+        let (frames, pending) = tv.computeCodeBlockFrames()
+        XCTAssertTrue(frames.isEmpty, "只有两个围栏行的空代码块不应该有背景，实际：\(frames)")
+        XCTAssertFalse(pending, "空代码块不是「TextKit 还没排出来」，不该触发重试")
+    }
+
+    /// 把一个代码块按行切开，返回每行在**整篇文本**里的 NSRange（含行尾换行）。
+    /// 这里故意不复用 `MarkdownTextView` 里的切分逻辑，免得它算错了测试也跟着错。
+    private func codeBlockLines(of range: NSRange, in textView: MarkdownTextView) -> [NSRange] {
+        let text = textView.textStorage.string as NSString
+        let end = NSMaxRange(range)
+        var lines: [NSRange] = []
+        var cursor = range.location
+        while cursor < end {
+            let line = text.lineRange(for: NSRange(location: cursor, length: 0))
+            let lineEnd = min(NSMaxRange(line), end)
+            guard lineEnd > cursor else { break }
+            lines.append(NSRange(location: cursor, length: lineEnd - cursor))
+            cursor = lineEnd
+        }
+        return lines
     }
 
     /// 同一个代码块，滚动到任何位置算出来的文档坐标矩形都必须一致。

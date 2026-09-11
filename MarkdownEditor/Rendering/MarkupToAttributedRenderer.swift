@@ -351,7 +351,8 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                              orphanAttributes: orphanAttributes)
         out.addAttributesIfAbsent([.paragraphStyle: codeStyle])
 
-        // 打上「这是一个代码块」的标记（**含**首尾的 ``` 行，这样背景矩形能把围栏也包进去）。
+        // 打上「这是一个代码块」的标记（**含**首尾的 ``` 行，这样首尾围栏也在同一段里，
+        // UI 层算矩形时能精确认出哪两行是围栏、把它们从背景里抠掉——背景只罩代码正文）。
         // UI 层靠它算出矩形位置、画出背景并放复制按钮，详见 CodeBlockInfo 的注释。
         out.setAttributes([.markdownCodeBlock: CodeBlockInfo(code: code, language: codeBlock.language)])
         return out

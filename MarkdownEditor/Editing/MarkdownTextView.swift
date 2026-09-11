@@ -311,19 +311,34 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
         var frames: [(info: CodeBlockInfo, frame: CGRect)] = []
         frames.reserveCapacity(marked.count)
+        // 有没有代码块连一个 fragment 都还没排出来（首帧常见）→ 交给调用方重试
+        var missingLayout = false
 
         for (range, info) in marked {
             // NSTextContentStorage 用的是 UTF-16 偏移，和 NSRange.location 同一套坐标
             guard let startLocation = contentStorage.location(documentStart, offsetBy: range.location),
                   let endLocation = contentStorage.location(documentStart, offsetBy: NSMaxRange(range)) else { continue }
 
-            // 3) 纵向范围：把这个区间覆盖到的所有 layout fragment 的外接矩形求出来
+            // 3) 纵向范围：把这个区间覆盖到的所有 layout fragment 的外接矩形求出来。
+            //    **首尾的 ``` 围栏行不算在内**——它们只是语法标记，铺灰底会让整块看起来
+            //    糊成一坨，用户要的是「只有代码正文有背景」。
+            let fenceRanges = fenceLineRanges(in: range)
+
             var top: CGFloat?
             var bottom: CGFloat = 0
+            var sawFragment = false
 
             layoutManager.enumerateTextLayoutFragments(from: startLocation, options: [.ensuresLayout]) { fragment in
                 let rect = fragment.layoutFragmentFrame
-                if !rect.isNull, rect.height > 0 {
+                // 这个 fragment 覆盖的字符区间（全局 UTF-16 偏移），用来判断它是不是围栏行
+                let fragmentStart = contentStorage.offset(from: documentStart, to: fragment.rangeInElement.location)
+                let fragmentEnd = contentStorage.offset(from: documentStart, to: fragment.rangeInElement.endLocation)
+                let fragmentRange = NSRange(location: fragmentStart, length: max(0, fragmentEnd - fragmentStart))
+
+                sawFragment = true
+                let isFenceLine = fenceRanges.contains { NSIntersectionRange($0, fragmentRange).length > 0 }
+
+                if !rect.isNull, rect.height > 0, !isFenceLine {
                     top = min(top ?? rect.minY, rect.minY)
                     bottom = max(bottom, rect.maxY)
                 }
@@ -331,6 +346,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
                 return contentStorage.offset(from: fragment.rangeInElement.endLocation, to: endLocation) > 0
             }
 
+            if !sawFragment {
+                // TextKit 还没把这段排出来，下一个布局周期再来
+                missingLayout = true
+                continue
+            }
+            // top == nil 说明这个块只有围栏两行（``` 紧接着 ```），没有正文 → 不铺背景
             guard let top else { continue }
             // ### 坐标系换算（不看注释直接用必错）
             // layoutFragmentFrame 的原点是 **textContainer 的左上角**，也就是已经扣掉了
@@ -343,7 +364,35 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
                                         width: width,
                                         height: (bottom - top) + padding * 2)))
         }
-        return (frames, frames.isEmpty)
+        return (frames, missingLayout)
+    }
+
+    /// 一个代码块里**不该铺背景**的行：第一行的 ```lang 和最后一行的 ```。
+    ///
+    /// 背景只罩代码正文，围栏行留白——视觉上更像"一段被高亮的代码"，而不是一整块灰方块。
+    ///
+    /// - returns: 这些行在**整篇文本**里的 NSRange（含行尾换行，和 fragment 的覆盖范围对齐）。
+    ///           行数不足 3 行（空代码块，开围栏紧接着闭围栏）时全部返回，此时没有正文可画。
+    private func fenceLineRanges(in blockRange: NSRange) -> [NSRange] {
+        let text = textStorage.string as NSString
+        let end = NSMaxRange(blockRange)
+
+        var lines: [NSRange] = []
+        var cursor = blockRange.location
+        while cursor < end {
+            // lineRange(for:) 会把行尾的 \n 也算进来，正好和 fragment 的覆盖范围对齐，
+            // 交集判断才不会漏掉半行
+            let line = text.lineRange(for: NSRange(location: cursor, length: 0))
+            let lineEnd = min(NSMaxRange(line), end)
+            let clipped = NSRange(location: cursor, length: lineEnd - cursor)
+            guard clipped.length > 0 else { break }   // 防御：长度算成 0 就别死循环了
+            lines.append(clipped)
+            cursor = lineEnd
+        }
+
+        // 只有「开围栏 + 闭围栏」两行（或更少）时没有正文行，整块都不铺背景
+        guard lines.count >= 3 else { return lines }
+        return [lines[0], lines[lines.count - 1]]
     }
 
     /// 把文档坐标的矩形搬到屏幕上，铺背景 view 和复制按钮
