@@ -518,6 +518,115 @@ final class MarkdownEditorHy4Tests: XCTestCase {
             XCTAssertEqual(restored, source, firstDifference(source, restored))
         }
     }
+
+    // MARK: - 代码块背景（文档坐标修正）
+
+    /// 加载测试用例文档（两个代码块，第二个很长、超出好几屏）
+    private func makeCodeBlockTestCaseEditor() throws -> MarkdownTextView {
+        let path = "/Users/pan/Project/iOSDemo/MarkdownEditorHy4/testcase/CodeBlockBackgroundTestCase.md"
+        return makeEditor(try String(contentsOfFile: path, encoding: .utf8))
+    }
+
+    /// 扫出 textStorage 里所有代码块的字符区间
+    private func codeBlockRanges(in textView: MarkdownTextView) -> [NSRange] {
+        var ranges: [NSRange] = []
+        textView.textStorage.enumerateAttribute(
+            .markdownCodeBlock,
+            in: NSRange(location: 0, length: textView.textStorage.length),
+            options: []
+        ) { value, range, _ in
+            if value is CodeBlockInfo { ranges.append(range) }
+        }
+        return ranges
+    }
+
+    /// 背景矩形必须真的罩住代码文字。
+    ///
+    /// ### 防的是什么回归
+    /// `layoutFragmentFrame` 的原点是 **textContainer 左上角（不含 textContainerInset）**，
+    /// 直接当文档坐标用，背景会整体偏上一个 inset（16pt）。这里用官方 `caretRect(for:)`
+    /// （它的坐标含 inset，是权威基准）对照：背景顶必须在代码首行上方、且距离不超过一行。
+    func testCodeBlockBackgroundAlignsWithCaret() throws {
+        let tv = try makeCodeBlockTestCaseEditor()
+        let (frames, _) = tv.computeCodeBlockFrames()
+        let ranges = codeBlockRanges(in: tv)
+        XCTAssertEqual(frames.count, 2, "测试用例里应该有 2 个代码块")
+        XCTAssertEqual(ranges.count, frames.count)
+
+        for (entry, range) in zip(frames, ranges) {
+            guard let pos = tv.position(from: tv.beginningOfDocument, offset: range.location) else { continue }
+            let caret = tv.caretRect(for: pos)
+            let gap = caret.origin.y - entry.frame.origin.y
+            XCTAssertGreaterThanOrEqual(gap, 0,
+                "背景顶(\(entry.frame.origin.y))跑到了代码首行(\(caret.origin.y))下面")
+            XCTAssertLessThanOrEqual(gap, 40,
+                "背景顶离代码首行 \(gap)pt，太远了——背景整体偏上，多半是 inset 换算又丢了")
+        }
+    }
+
+    /// 同一个代码块，滚动到任何位置算出来的文档坐标矩形都必须一致。
+    /// 之前背景「完全错乱」的一半原因就是坐标随滚动漂移。
+    func testCodeBlockFramesStableAcrossScroll() throws {
+        let tv = try makeCodeBlockTestCaseEditor()
+
+        var baseline: [CGRect] = []
+        for offset in [0, 300, 800, 1500, 2500, 3200] {
+            tv.contentOffset = CGPoint(x: 0, y: CGFloat(offset))
+            tv.layoutIfNeeded()
+            let (frames, _) = tv.computeCodeBlockFrames()
+            let rects = frames.map(\.frame)
+            XCTAssertEqual(rects.count, 2, "offset=\(offset) 时应该还是 2 个代码块")
+            if baseline.isEmpty {
+                baseline = rects
+            } else {
+                for (index, rect) in rects.enumerated() {
+                    XCTAssertEqual(rect, baseline[index],
+                        "offset=\(offset) 时块\(index)的矩形和 offset=0 不一致：\(rect) vs \(baseline[index])")
+                }
+            }
+        }
+    }
+
+    /// 滚动之后背景必须重新落位。
+    ///
+    /// 之前「完全错乱」的另一半原因：背景矩形算完就固化了，滚动只做平移，
+    /// 首帧那个估算坐标一直用到天荒地老。现在滚动停下 0.15s 会重算一次。
+    func testCodeBlockBackgroundFollowsScroll() throws {
+        let tv = try makeCodeBlockTestCaseEditor()
+        // 等首帧那条「结果不稳定就重试」的链路收敛
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+
+        let offsetY: CGFloat = 1500
+        tv.contentOffset = CGPoint(x: 0, y: offsetY)
+        tv.layoutIfNeeded()
+
+        let (frames, _) = tv.computeCodeBlockFrames()
+        XCTAssertEqual(frames.count, 2)
+
+        // 滚动停下之后的重算是异步的，轮询等它落位（最多等 3 秒）
+        var placed: [CGRect] = []
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            placed = backgroundFrames(of: tv)
+            if let first = placed.first,
+               abs(first.origin.y - (frames.last!.frame.origin.y - offsetY)) < 2 { break }
+        }
+
+        XCTAssertFalse(placed.isEmpty, "滚到 1500 时第二个代码块应该还在可见范围内")
+        XCTAssertEqual(placed.first?.origin.y ?? 0,
+                       frames.last!.frame.origin.y - offsetY,
+                       accuracy: 2,
+                       "背景没跟着滚动重新落位：\(placed.first?.origin.y ?? 0) 应该等于文档 y 减滚动量")
+    }
+
+    /// 背景层里实际铺上去的那些 view 的 frame（测试里用它看渲染结果对不对）
+    private func backgroundFrames(of textView: MarkdownTextView) -> [CGRect] {
+        for subview in textView.subviews {
+            if let layer = subview as? CodeBlockBackgroundLayer { return layer.subviews.map(\.frame) }
+        }
+        return []
+    }
 }
 
 // MARK: - 小工具

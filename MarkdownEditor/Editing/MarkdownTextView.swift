@@ -260,25 +260,36 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     }
 
     private func refreshCodeBlockDecorations() {
-        let (frames, pending) = computeCodeBlockFrames()
-        codeBlockFrames = frames
+        let (frames, _) = computeCodeBlockFrames()
 
-        // 文本里已经有代码块，但 TextKit 还没排出 fragment（首帧常见）→ 下一帧再算
-        if pending, codeBlockRetryCount < 5 {
+        // ### 为什么要对比上一轮结果（TextKit 2 的坑，别删）
+        // TextKit 2 是「viewport 按需排版」：刚加载、刚滚完的时候，屏幕外 fragment 的
+        // frame 还是**估算值**（实测差几十上百 pt，越靠下越歪）。直接拿去画背景必然错位。
+        // 这里每 60ms 重算一次并和上一轮比对：结果还在变就说明排版没稳定，继续重试；
+        // 连续两轮一致才收手。滚动停下后 scheduleFoldRedraw 也会再触发一轮校正。
+        let stable = frames.count == codeBlockFrames.count &&
+            zip(frames, codeBlockFrames).allSatisfy { $0.info === $1.info && $0.frame == $1.frame }
+        codeBlockFrames = frames
+        positionCodeBlockDecorations()
+
+        if !stable, codeBlockRetryCount < 30 {
             codeBlockRetryCount += 1
-            needsCodeBlockRefresh = true
-            setNeedsLayout()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+                // view 已经从窗口摘掉（比如切换文档）就别再刷了
+                guard let self, self.window != nil else { return }
+                self.refreshCodeBlockDecorations()
+            }
         } else {
             codeBlockRetryCount = 0
         }
-        positionCodeBlockDecorations()
     }
 
     /// 算出每个代码块在**文档坐标系**下占的矩形。
     ///
     /// - returns: `(frames, pending)`。`pending == true` 表示「文本里有代码块，
     ///            但 TextKit 还没把它排出来」，需要等下一个布局周期重试。
-    private func computeCodeBlockFrames() -> (frames: [(info: CodeBlockInfo, frame: CGRect)], pending: Bool) {
+    /// 注意：不开 `private` 是为了让单元测试能直接调它，验证滚动前后算出的矩形是否稳定
+    func computeCodeBlockFrames() -> (frames: [(info: CodeBlockInfo, frame: CGRect)], pending: Bool) {
         guard let layoutManager = textLayoutManager,
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
               bounds.width > 1 else { return ([], false) }
@@ -321,8 +332,14 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             }
 
             guard let top else { continue }
+            // ### 坐标系换算（不看注释直接用必错）
+            // layoutFragmentFrame 的原点是 **textContainer 的左上角**，也就是已经扣掉了
+            // textContainerInset —— fragment y=0 对应的是 inset.top 下面的第一行，不是
+            // textView 顶部。而背景 view 画在 textView 坐标系里，所以 y 必须补回 top inset
+            // （验证方法：caretRect(for:) 的 x/y 减 fragment 的 x/y 应该正好等于 inset）。
+            // 横向不用换算：x 和宽度本来就是按 inset 现算的整行宽度。
             frames.append((info, CGRect(x: x,
-                                        y: top - padding,
+                                        y: top + textContainerInset.top - padding,
                                         width: width,
                                         height: (bottom - top) + padding * 2)))
         }
@@ -390,7 +407,11 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private func scheduleFoldRedraw() {
         foldRedrawWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.positionFoldButtons()
+            guard let self else { return }
+            self.positionFoldButtons()
+            // 滚动停下后 fragment 才排实（滚动中屏幕外的还是估算值），
+            // 代码块背景矩形要重算一遍，不然一直拿着首帧的错坐标画
+            self.refreshCodeBlockDecorations()
         }
         foldRedrawWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
