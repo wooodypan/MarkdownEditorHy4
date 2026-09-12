@@ -39,6 +39,29 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         set { renderer.imageBaseURL = newValue }
     }
 
+    // MARK: 大纲（目录）
+
+    /// 大纲事件的出口。
+    ///
+    /// ### 为什么是协议而不是 `OutlineCoordinator`
+    /// 编辑器只需要「把标题列表和光标位置喊出去」，不需要知道外面是谁在听、
+    /// 更不需要知道目录长什么样。留这一层协议之后，把目录换成侧边栏、
+    /// 底部抽屉、甚至换成往日志里打一份，编辑器都一行不用改。
+    ///
+    /// 用 `weak`：协调者的生命周期由上层容器（`ViewController`）持有，
+    /// 编辑器只是「借用」它来发通知，不参与它的生死。
+    weak var outlineEventSink: MarkdownOutlineEventSink?
+
+    /// 光标上报的防抖任务。
+    ///
+    /// `textViewDidChangeSelection` 在拖光标 / 快速打字时会**高频**触发，
+    /// 每次都去通知目录会让高亮跟着手指疯狂跳。这里合并成 120ms 一次的尾部触发：
+    /// 目录高亮是「辅助感知」功能，不需要逐字符级别的实时性。
+    ///
+    /// 状态存在这里、读写发生在 `MarkdownTextView+Outline.swift`，
+    /// 所以不能标 `private`（跨文件扩展够不到）—— 它只在本模块内可见，不外泄。
+    var outlineCursorWork: DispatchWorkItem?
+
     // MARK: 状态
 
     /// 上一次同步给模型的渲染文本。textView 的实际内容和它 diff，就能定位用户改了哪一段。
@@ -150,6 +173,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         layoutIfNeeded()
         // 兜底：view 还没挂到 window 上（比如 init 刚结束）时 layoutSubviews 不会来，这里补一次
         if pendingFullReplace { applyPendingFullReplace() }
+
+        // 整篇换掉了，标题列表一定变了；光标也被重置，两样一起推给大纲
+        publishOutlineItems()
+        publishOutlineCursor()
     }
 
     /// 把模型里的渲染结果整篇写进 textStorage。
@@ -225,6 +252,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
         let caret = min(documentStore.renderedCaret(forSourceOffset: sourceCaret), (text as NSString).length)
         selectedRange = NSRange(location: caret, length: 0)
+
+        // 整篇重排会重建所有块（UUID 也跟着全换新），目录那边必须整份换掉，
+        // 否则它会拿着一批已经不存在的旧 id 去做高亮
+        publishOutlineItems()
     }
 
     // MARK: - 代码块装饰（整块一个矩形背景 + 右上角复制按钮）
@@ -851,6 +882,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         if selectedRange.location != caret || selectedRange.length != 0 {
             selectedRange = NSRange(location: caret, length: 0)
         }
+
+        // 只有这次编辑动到了标题块才重推整份标题列表。
+        // 在正文段落里打字时这里永远是 false —— 长文档也完全不会被目录拖慢
+        if outcome.headingsChanged { publishOutlineItems() }
     }
 
     /// 真正用来改内容的 NSTextStorage

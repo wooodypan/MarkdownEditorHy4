@@ -16,6 +16,29 @@ final class MarkdownPasteboardController {
 
     weak var textView: MarkdownTextView?
 
+    /// ### 为什么这里要显式写 `nonisolated deinit`（很重要，别删）
+    /// 原因和 `MarkdownBlock` 里那段注释完全一样：app target 开了
+    /// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`，本类的隐式 deinit 也是
+    /// 「actor 隔离的 deinit」，Swift 6.2 运行时释放它时会先切回 MainActor 执行器
+    /// （`swift_task_deinitOnExecutorImpl`），而这个函数维护的 task-local 作用域
+    /// 在某些释放时机下会 free 一个野指针 → `malloc: pointer being freed was not allocated`。
+    ///
+    /// ### 实测踩坑（ASan 堆栈，2026-09-13）
+    /// 本类是 `MarkdownTextView` 的一个存储属性，编辑器释放时会依次销毁各 ivar。
+    /// 只要这次释放发生在 RunLoop / dispatch 回调里，就会崩：
+    /// ```
+    /// free ← TaskLocal::StopLookupScope::~StopLookupScope
+    ///      ← swift_task_deinitOnExecutorImpl
+    ///      ← MarkdownPasteboardController.__deallocating_deinit
+    ///      ← MarkdownTextView.__ivar_destroyer ← UITextView dealloc
+    /// ```
+    /// 本类只持有一个 `weak` 引用，销毁时不需要任何主线程状态，所以声明成
+    /// `nonisolated` 不走执行器切换，从根上避免。
+    ///
+    /// ⚠️ 同类问题请一并检查 `MarkdownEditController`、`FoldAnchorInfo`
+    /// —— 凡是「非 UI 的类」都应该带上这一行。
+    nonisolated deinit {}
+
     // MARK: 复制
 
     /// 把选区对应的 **markdown 源码** 放进剪贴板。

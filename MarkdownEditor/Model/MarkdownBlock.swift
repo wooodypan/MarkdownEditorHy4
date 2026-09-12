@@ -77,6 +77,21 @@ final class MarkdownBlock {
     /// 调试用：这个块是什么语法类型
     var kindDescription: String
 
+    /// 标题层级（1...6）。**不是标题块时为 nil**。
+    ///
+    /// ### 为什么要在块上留一份，而不是用时再解析
+    /// 建块的时候 AST 就在手上（`makeBlock` 的 `ast` 参数），顺手取一次 `Heading.level`
+    /// 是零成本的；要是等到画大纲时再回头解析源码，就得为一篇文档多跑一遍解析器。
+    ///
+    /// 大纲功能（`MarkdownDocumentStore.outlineItems`）读的就是这个字段。
+    var headingLevel: Int?
+
+    /// 标题的纯文本（已经去掉 `#`、`**`、`*` 这些语法符号），不是标题块时为 nil。
+    ///
+    /// 用的是 swift-markdown 内置的 `Heading.plainText`：它会递归拼出所有行内子节点的
+    /// 纯文字，天然不带语法符号，不需要我们自己写文本清洗。
+    var headingTitle: String?
+
     /// 这一块是不是被折叠了（只显示第一行左侧的三角和一个「⋯」占位符）。
     ///
     /// ### 这是**视图状态**，不是源码的一部分

@@ -35,6 +35,14 @@ final class FoldAnchorInfo: NSObject {
         self.blockID = blockID
         self.isCollapsed = isCollapsed
     }
+
+    /// ### 为什么这里要显式写 `nonisolated deinit`（很重要，别删）
+    /// 和 `MarkdownPasteboardController` 同一个坑（详细堆栈见那个文件）：
+    /// 本类实例是挂在 `NSAttributedString` 属性上的值，随富文本一起销毁 ——
+    /// 而富文本的销毁时机完全不受我们控制（可能在任意 dispatch 回调里），
+    /// 隔离 deinit 就会踩 Swift 6.2 运行时的野指针 free。
+    /// 本类只有两个值类型字段，声明成 `nonisolated` 完全安全。
+    nonisolated deinit {}
 }
 
 extension NSAttributedString.Key {

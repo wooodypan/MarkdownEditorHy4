@@ -16,6 +16,14 @@ struct MarkdownEditOutcome {
     let newContent: NSAttributedString
     /// 编辑完成后光标应该落在的渲染偏移（**新**坐标系）
     let caretRenderedOffset: Int
+    /// 这次编辑有没有动到标题（新增 / 删除 / 改名 / 升降级）。
+    ///
+    /// ### 为什么要单独报一下
+    /// 大纲列表只在标题结构变化时才需要重新提取。判断依据是
+    /// 「被换掉的旧块 or 新生成的块里有没有标题块」——
+    /// 这是 `O(受影响块数)` 的事，文档再长也不变慢；
+    /// 而在普通正文里打字时新旧块都不是标题，直接跳过整趟提取和 UI 刷新。
+    let headingsChanged: Bool
 }
 
 /// 文档模型。
@@ -125,9 +133,14 @@ final class MarkdownDocumentStore {
         let caretSource = editRange.location + replacementLength
         let caret = renderedCaret(forSourceOffset: caretSource)
 
+        // 9) 这次编辑有没有动到标题块（大纲只在为 true 时才重新提取）
+        let headingsChanged = oldBlocks.contains { $0.headingLevel != nil }
+            || newBlocks.contains { $0.headingLevel != nil }
+
         return MarkdownEditOutcome(replacedRange: oldRenderedRange,
                                    newContent: newContent,
-                                   caretRenderedOffset: caret)
+                                   caretRenderedOffset: caret,
+                                   headingsChanged: headingsChanged)
     }
 
     // MARK: - 源码映射（复制/粘贴用）
@@ -316,6 +329,13 @@ final class MarkdownDocumentStore {
             charMappings: mappings,
             kindDescription: MarkdownBlock.describe(ast)
         )
+        // 标题块顺手把「层级 + 纯文本」存下来（大纲功能要用）。
+        // AST 就在手上，取这两个字段是零成本的；
+        // 注意 `plainText` 是 swift-markdown 给行内容器内置的，会自动去掉 `#`、`**` 这些标记
+        if let heading = ast as? Heading {
+            block.headingLevel = heading.level
+            block.headingTitle = heading.plainText
+        }
         // 给块首打一个「折叠锚点」—— UI 层据此在左边装订线里画小三角。
         // 但只有**多行的块**才打，单行块（标题、单行段落、分隔线）折起来没意义，
         // 每行挂个三角也太吵。

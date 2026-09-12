@@ -35,6 +35,7 @@
 		3B41EA60304497FD00F4E5EA /* MarkdownEditorHy4Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MarkdownEditorHy4Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B41EA6A304497FD00F4E5EA /* MarkdownEditorHy4UITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MarkdownEditorHy4UITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B4395D330542F8C00DE450C /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
+		3BF4A7D930559F3200FE03AD /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -136,6 +137,11 @@
 			sourceTree = "<group>";
 		};
 		3B4395D630542F8C00DE450C /* Products */ = {
+			isa = PBXGroup;
+			name = Products;
+			sourceTree = "<group>";
+		};
+		3BF4A7DC30559F3200FE03AD /* Products */ = {
 			isa = PBXGroup;
 			name = Products;
 			sourceTree = "<group>";
@@ -259,6 +265,10 @@
 				{
 					ProductGroup = 3B2DBA50304B0DCB00C262A1 /* Products */;
 					ProjectRef = 3B2DBA4D304B0DCB00C262A1 /* MarkdownEditorHy4.xcodeproj */;
+				},
+				{
+					ProductGroup = 3BF4A7DC30559F3200FE03AD /* Products */;
+					ProjectRef = 3BF4A7D930559F3200FE03AD /* MarkdownEditorHy4.xcodeproj */;
 				},
 				{
 					ProductGroup = 3B0EB4DF304F23B900409432 /* Products */;

@@ -18,6 +18,10 @@ final class ViewController: UIViewController {
     private let statusLabel = UILabel()
     /// 右上角的「⋯」按钮。点一下弹出菜单，里面装着重载 / 分块 / 源码 / 校验
     private let menuButton = UIButton(type: .system)
+    /// 悬浮目录面板（纯 UI 层，不认识编辑器）
+    private let outlineView = MarkdownOutlineView()
+    /// 大纲协调者：把编辑器和目录面板连起来
+    private let outlineCoordinator = OutlineCoordinator()
     private var bottomConstraint: NSLayoutConstraint?
 
     /// 当前打开的文件。nil 表示在看内置示例文档，这类内容不能保存回磁盘
@@ -49,6 +53,9 @@ final class ViewController: UIViewController {
         } else {
             loadSampleDocument()
         }
+        // 放在文档加载**之后**：装配时的「初次拉取」才能真正拉到标题。
+        // 放前面也能跑（编辑器那次 push 会被忽略），但会白拉一次空列表
+        setupOutline()
         observeKeyboard()
         observeDocumentOpenRequests()
         observeEditorChanges()
@@ -94,6 +101,42 @@ final class ViewController: UIViewController {
             statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
             statusLabel.heightAnchor.constraint(equalToConstant: 22)
         ])
+    }
+
+    /// 悬浮目录：建视图 + **把编辑器、协调者、目录面板三者接起来**。
+    ///
+    /// ### 为什么装配代码必须在这里
+    /// `OutlineCoordinator` 刻意不在编辑器或目录面板内部创建：
+    /// - 编辑器内部创建 → 编辑器就认识了协调者，将来换协调者策略得改编辑器；
+    /// - 目录面板内部创建 → 面板就得知道「去哪找编辑器」。
+    ///
+    /// 放在上层容器里，三者的生命周期和连接关系集中在这一处，
+    /// 两个组件各自的初始化都不需要对方的实例。
+    private func setupOutline() {
+        outlineView.translatesAutoresizingMaskIntoConstraints = false
+        // 浮在编辑器之上：加在 editor 后面，z 序自然在上层。
+        // 它的点击只落在自己那块卡片上，卡片以外的手势照常透给编辑器
+        view.addSubview(outlineView)
+
+        NSLayoutConstraint.activate([
+            // 贴在右上角「⋯」按钮下面，右边距和按钮对齐
+            outlineView.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 6),
+            outlineView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            // 兜底：窄屏上也要给左边留出位置。
+            // 面板自己的宽度算法（effectiveWidth）保证这条永远不会被顶爆
+            outlineView.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 12)
+        ])
+
+        // 三根线：数据源、展示方、事件出口
+        outlineCoordinator.editorDataSource = editor
+        outlineCoordinator.outlineView = outlineView
+        outlineView.delegate = outlineCoordinator
+        // 编辑器只拿到一个「事件出口」，它并不知道出口后面是协调者还是别的什么
+        editor.outlineEventSink = outlineCoordinator
+
+        // 主动要一次初次数据。文档这时已经加载完了，编辑器不会再有「标题变了」的通知；
+        // 不主动拉的话目录会一直空着（编辑器里那次 push 发生时装配还没完成）
+        outlineCoordinator.reloadFromEditor()
     }
 
     /// 页面右上角的「⋯」按钮。
