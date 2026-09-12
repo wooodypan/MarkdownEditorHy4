@@ -308,7 +308,7 @@ final class MarkdownDocumentStore {
     }
 
     private func makeBlock(source blockSource: String, absoluteStart: Int, ast: BlockMarkup) -> MarkdownBlock {
-        let (text, mappings) = renderer.render(blockSource: blockSource)
+        let (text, mappings) = renderer.render(blockSource: blockSource, blockOrigin: absoluteStart)
         let block = MarkdownBlock(
             sourceText: blockSource,
             sourceRange: NSRange(location: absoluteStart, length: blockSource.utf16Length),
@@ -362,7 +362,8 @@ final class MarkdownDocumentStore {
             return
         }
 
-        let (text, mappings) = renderer.render(blockSource: block.sourceText)
+        let (text, mappings) = renderer.render(blockSource: block.sourceText,
+                                                blockOrigin: block.sourceRange.location)
         guard canCollapse(block.sourceText) else {
             block.renderedContent = text
             block.charMappings = mappings

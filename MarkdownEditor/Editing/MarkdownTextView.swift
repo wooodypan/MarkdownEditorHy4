@@ -76,14 +76,13 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 监听滚动：滚动只改位置，不重算布局
     private var contentOffsetObservation: NSKeyValueObservation?
 
-    // MARK: - 引用块装饰（左侧绿条）——
-    //
-    // 绿条现在是**每行一个 NSTextAttachment**，由 renderer 在 visitBlockQuote 阶段插入，
-    // 跟随该行 layout，不需要任何 fragment 测量。详见 QuoteBarAttachment 的注释。
-    // 早期版本尝试在 UI 层盖 UIView 算 fragment 位置画整段竖条，但 TextKit 2 的
-    // layoutFragmentFrame 对 viewport 外的 fragment 永远是估算值（state=3 LayoutAvailable
-    // 但 usage bounds 是估算的），用 setContentOffset / invalidateLayout / 离屏 layout
-    // 都拿不到真实坐标，差 360+ 像素。改用 attachment 方案后零测量、零成本。
+    // MARK: 引用块竖条（每层嵌套一条，画在文字下面）
+
+    /// 竖条所在的层：加在代码块背景之上、文字之下（引用里可以嵌代码块）
+    private let quoteBarLayer = UIView()
+    /// 已经算好的竖条矩形（**文档坐标系**，滚动时只需整体平移）
+    /// `id` 是引用层的唯一标识，`level` 是嵌套深度（0 = 最外层）
+    private var quoteBarFrames: [(id: Int, level: Int, frame: CGRect)] = []
 
     // MARK: 初始化
 
@@ -234,11 +233,16 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private func setupCodeBlockDecorations() {
         // 背景层要插到 index 0，否则会盖住文字
         insertSubview(codeBlockBackgroundLayer, at: 0)
+        // 竖条层放在代码块背景上面（引用里可以嵌代码块，竖条要压在灰背景上），
+        // 但仍在文字之下 —— 它跟背景层一样只是陪衬，不许抢点击
+        insertSubview(quoteBarLayer, aboveSubview: codeBlockBackgroundLayer)
+        quoteBarLayer.isUserInteractionEnabled = false
         addSubview(codeBlockControlLayer)
 
         // 滚动时只做平移，不重算 —— 重算要走 TextKit 布局，滚动中做太贵
         contentOffsetObservation = observe(\.contentOffset, options: []) { [weak self] _, _ in
             self?.positionCodeBlockDecorations()
+            self?.positionQuoteBars()
             self?.positionFoldButtons()
             // TextKit 排版比滚动事件慢半拍：滚动过程中刚进 viewport 的 fragment
             // 可能还是估算值（三角被跳过）。停一下再补一次，三角就不会「滚过去才冒出来」。
@@ -248,10 +252,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     /// 每次布局时决定：是「重算矩形」还是「只平移」。
     /// 只有文本内容或宽度变了才需要重算，纯滚动走平移分支。
+    /// （代码块背景和引用竖条共用同一套判断，两者都靠 fragment 矩形吃饭）
     private func updateCodeBlockDecorationsIfNeeded() {
         let signature = "\(textStorage.length)/\(Int(bounds.width))"
         guard needsCodeBlockRefresh || signature != lastCodeBlockSignature else {
             positionCodeBlockDecorations()
+            positionQuoteBars()
             return
         }
         lastCodeBlockSignature = signature
@@ -261,6 +267,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     private func refreshCodeBlockDecorations() {
         let (frames, _) = computeCodeBlockFrames()
+        let (bars, _) = computeQuoteBarFrames()
 
         // ### 为什么要对比上一轮结果（TextKit 2 的坑，别删）
         // TextKit 2 是「viewport 按需排版」：刚加载、刚滚完的时候，屏幕外 fragment 的
@@ -268,9 +275,13 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 这里每 60ms 重算一次并和上一轮比对：结果还在变就说明排版没稳定，继续重试；
         // 连续两轮一致才收手。滚动停下后 scheduleFoldRedraw 也会再触发一轮校正。
         let stable = frames.count == codeBlockFrames.count &&
-            zip(frames, codeBlockFrames).allSatisfy { $0.info === $1.info && $0.frame == $1.frame }
+            zip(frames, codeBlockFrames).allSatisfy { $0.info === $1.info && $0.frame == $1.frame } &&
+            bars.count == quoteBarFrames.count &&
+            zip(bars, quoteBarFrames).allSatisfy { $0.id == $1.id && $0.level == $1.level && $0.frame == $1.frame }
         codeBlockFrames = frames
+        quoteBarFrames = bars
         positionCodeBlockDecorations()
+        positionQuoteBars()
 
         if !stable, codeBlockRetryCount < 30 {
             codeBlockRetryCount += 1
@@ -443,6 +454,126 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         sender.flashCopied()
     }
 
+    // MARK: - 引用块竖条
+
+    /// 算出每条引用竖条在**文档坐标系**下占的矩形（思路来自 doc/引用渲染方案.md）。
+    ///
+    /// ### 核心规则：竖条数量 = 嵌套深度，每层独立合并矩形
+    /// 渲染层给引用块内的字符挂了 `.markdownQuoteChain`（值是从外到内的层 ID 数组，
+    /// 见 `QuoteChain`）。这里把每个区间覆盖的 fragment 矩形求出来后，**链上的每一层
+    /// 都各自累计一份**：外层 ID 的矩形覆盖「所有包含它的行」（含内层引用的行），
+    /// 内层 ID 只覆盖内层自己的行 —— 所以外层竖条贯穿整块、内层竖条中途出现中途消失。
+    ///
+    /// x 坐标按嵌套深度往右错开：第 n 层画在 `inset.left + n * quoteIndent`，
+    /// 和第 n 层引用文字的段落缩进（`n * quoteIndent`）正好对齐。
+    ///
+    /// - returns: `(bars, pending)`。`pending` 表示还有区间没排出 fragment，需要重试。
+    /// 注意：不开 `private` 是为了让单元测试能直接调它
+    func computeQuoteBarFrames() -> (bars: [(id: Int, level: Int, frame: CGRect)], pending: Bool) {
+        guard let layoutManager = textLayoutManager,
+              let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
+              bounds.width > 1 else { return ([], false) }
+
+        // 1) 扫出所有带嵌套链标记的区间
+        var marked: [(NSRange, QuoteChain)] = []
+        let full = NSRange(location: 0, length: textStorage.length)
+        textStorage.enumerateAttribute(.markdownQuoteChain, in: full, options: []) { value, range, _ in
+            guard let chain = value as? QuoteChain else { return }
+            marked.append((range, chain))
+        }
+        guard !marked.isEmpty else { return ([], false) }
+
+        let documentStart = contentStorage.documentRange.location
+        // 有没有区间连一个 fragment 都没排出来（首帧常见）→ 交给调用方重试
+        var missingLayout = false
+        // key: 引用层 ID → (嵌套深度, 已合并的文档坐标矩形)
+        var barsByID: [Int: (level: Int, rect: CGRect)] = [:]
+
+        for (range, chain) in marked {
+            // NSTextContentStorage 用的是 UTF-16 偏移，和 NSRange.location 同一套坐标
+            guard let startLocation = contentStorage.location(documentStart, offsetBy: range.location),
+                  let endLocation = contentStorage.location(documentStart, offsetBy: NSMaxRange(range)) else { continue }
+
+            // 2) 这段字符覆盖到的所有 fragment 求外接矩形。
+            //    竖条要连续贯穿段距（不象旧版每行一根断成虚线），所以直接并 fragment 矩形，
+            //    不做行过滤 —— 引用没有代码块"围栏行"那种要抠掉的例外
+            var top: CGFloat?
+            var bottom: CGFloat = 0
+            var sawFragment = false
+
+            layoutManager.enumerateTextLayoutFragments(from: startLocation, options: [.ensuresLayout]) { fragment in
+                let rect = fragment.layoutFragmentFrame
+                sawFragment = true
+                if !rect.isNull, rect.height > 0 {
+                    top = min(top ?? rect.minY, rect.minY)
+                    bottom = max(bottom, rect.maxY)
+                }
+                // 还没走到这段的结尾就继续（offset > 0 表示 endLocation 在后面）
+                return contentStorage.offset(from: fragment.rangeInElement.endLocation, to: endLocation) > 0
+            }
+
+            if !sawFragment {
+                missingLayout = true
+                continue
+            }
+            guard let top else { continue }
+
+            // ### 坐标系换算（详细推导见 computeCodeBlockFrames 里的注释）
+            // layoutFragmentFrame 原点是 textContainer 左上角（不含 textContainerInset），
+            // 画在 textView 坐标系里 y 要补回 top inset。横向 x 不从 fragment 拿：
+            // 竖条固定画在「该层缩进边界」上，见下面第 4 步
+            let rect = CGRect(x: 0,
+                              y: top + textContainerInset.top,
+                              width: 0,
+                              height: bottom - top)
+
+            // 3) 链上每一层都各自累计自己的矩形
+            for (level, id) in chain.ids.enumerated() {
+                let union = barsByID[id]?.rect.union(rect) ?? rect
+                barsByID[id] = (level, union)
+            }
+        }
+
+        // 4) x 按嵌套深度错开，输出按 (level, id) 排序：
+        //    前后两轮的稳定性比对、以及测试断言都依赖顺序稳定
+        let bars = barsByID
+            .map { (id: $0.key,
+                    level: $0.value.level,
+                    frame: CGRect(x: textContainerInset.left + CGFloat($0.value.level) * renderer.theme.quoteIndent,
+                                  y: $0.value.rect.minY,
+                                  width: renderer.theme.quoteBarWidth,
+                                  height: $0.value.rect.height)) }
+            .sorted { ($0.level, $0.id) < ($1.level, $1.id) }
+        return (bars, missingLayout)
+    }
+
+    /// 把文档坐标的竖条搬到屏幕上（和 positionCodeBlockDecorations 同一套平移逻辑）
+    private func positionQuoteBars() {
+        quoteBarLayer.frame = bounds
+        // 竖条数量很少，每次重建比维护复用池省心
+        quoteBarLayer.subviews.forEach { $0.removeFromSuperview() }
+
+        let theme = renderer.theme
+        // 可见范围，上下各留 200pt 余量，滚快一点也不会闪出空白
+        let visible = CGRect(x: 0, y: -200, width: bounds.width, height: bounds.height + 400)
+
+        for bar in quoteBarFrames {
+            // 文档坐标 → 本层坐标：减掉滚动偏移
+            var frame = bar.frame
+            frame.origin.x -= contentOffset.x
+            frame.origin.y -= contentOffset.y
+
+            guard frame.intersects(visible) else { continue }
+
+            let strip = UIView(frame: frame)
+            strip.backgroundColor = theme.quoteBarColor
+            // 两端微微收圆，比直角条柔和一点；宽度只有 3pt，圆角最多 1.5pt
+            strip.layer.cornerRadius = theme.quoteBarWidth / 2
+            strip.isUserInteractionEnabled = false
+            quoteBarLayer.addSubview(strip)
+        }
+    }
+
     // MARK: - 折叠 / 展开（顶层块左侧的小三角）
 
     /// 铺好三角所在的控件层（最上层，只有按钮吃点击）
@@ -597,17 +728,20 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         selectedRange = NSRange(location: caret, length: 0)
     }
 
-    // MARK: - 引用块装饰（左侧绿条）
+    // MARK: - 引用块装饰（左侧竖条）
     //
-    // 绿条现在是**每行一个 NSTextAttachment**，由 renderer 在 visitBlockQuote 阶段插入，
-    // 跟随该行 layout，不需要任何 fragment 测量。详见 QuoteBarAttachment.swift 的注释。
-    //
-    // 早期版本（commit 撤回过）尝试在 UI 层盖 UIView 算 fragment 位置画整段竖条：
+    // ### 竖条为什么最终走「overlay + fragment 矩形合并」
+    // 这套机制曾经被放弃过：早期版本在 UI 层盖 UIView 画整段竖条，结果错位 360+ 像素 ——
     // TextKit 2 的 `NSTextLayoutFragment.layoutFragmentFrame` 对 viewport 外的 fragment
-    // **永远是估算值**（state=3 LayoutAvailable 但 usage bounds 是估算的），用
+    // **永远是估算值**（state=3 LayoutAvailable 但 usage bounds 是估算的），当时
     // `setContentOffset` / `invalidateLayout` / `ensureLayout` / 离屏 NSLayoutManager
-    // 全部拿不到真实坐标，差 360+ 像素。改用 attachment 方案后零测量、零成本，
-    // 绿条永远贴在正确的行首。
+    // 全部拿不到真实坐标，于是改成了每行插一个 attachment（绿条断成虚线是已知代价）。
+    //
+    // 后来代码块背景把「估算值」问题解决在了机制层面：**每 60ms 重算并和上一轮比对，
+    // 结果还在变就继续等；滚动停下后再补一轮**（见 refreshCodeBlockDecorations 的注释）。
+    // 竖条因此得以迁回 overlay 方案（doc/引用渲染方案.md 的思路），换来三个 attachment
+    // 方案做不到的效果：段距处连续、嵌套时每层一条且外层贯穿整块、x 随深度对齐缩进。
+    // 引用竖条和代码块背景共用同一套刷新循环。
 
     // MARK: - 编辑管线
 

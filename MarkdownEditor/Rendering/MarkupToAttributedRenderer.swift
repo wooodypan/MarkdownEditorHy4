@@ -46,6 +46,10 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     private var indent: CGFloat = 0
     /// 正在列表项内部：段落样式由列表项统一设置，段落自己不要重复设置
     private var isInsideListItem = false
+    /// 当前所处的引用嵌套链（每进一层 BlockQuote 追加一项，见 QuoteChain 的注释）
+    private var quoteChain: QuoteChain = QuoteChain(ids: [])
+    /// 本次渲染的块在整篇文档里的起始偏移（给引用链 ID 加盐，见 render 的注释）
+    private var blockOrigin: Int = 0
 
     /// 原因见 `MarkdownBlock` 里 `nonisolated deinit` 的注释：
     /// 隔离 deinit 一旦嵌套就会踩 Swift 6.2 运行时的野指针 free。
@@ -60,9 +64,14 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
 
     /// 渲染一个块。
     /// - parameter blockSource: 该块的 markdown 源码
+    /// - parameter blockOrigin: 该块在**整篇文档**里的起始偏移。引用块拿它给自己的
+    ///   嵌套链 ID 加盐 —— 不同块里的引用都可能从块内位置 0 开始，不加盐的话
+    ///   两个块的 ID 会撞车，UI 层会把两条竖条错误地合并成一条
     /// - returns: 富文本 + 每个字符位的源码映射
-    func render(blockSource: String) -> (text: NSAttributedString, mappings: [CharMapping]) {
+    func render(blockSource: String, blockOrigin: Int = 0) -> (text: NSAttributedString, mappings: [CharMapping]) {
         beginBlock(source: blockSource)
+        // 注意：等号右边是同名参数（遮蔽了属性），这里只能这样写；重置在 endBlock 里做
+        self.blockOrigin = blockOrigin
         defer { endBlock() }
 
         let document = Document(parsing: blockSource)
@@ -87,6 +96,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         self.currentTextColor = theme.textColor
         self.indent = 0
         self.isInsideListItem = false
+        self.quoteChain = QuoteChain(ids: [])
     }
 
     private func endBlock() {
@@ -95,6 +105,8 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         fontStack = []
         indent = 0
         isInsideListItem = false
+        quoteChain = QuoteChain(ids: [])
+        blockOrigin = 0
     }
 
     // MARK: - MarkupVisitor
@@ -259,19 +271,44 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         return out
     }
 
+    /// 引用块。
+    ///
+    /// ### 竖条怎么画（参考 doc/引用渲染方案.md 的思路）
+    /// 竖条**不在文本流里**（旧版每行插一个 QuoteBarAttachment，段距处会断成虚线、
+    /// 嵌套时两条挤在一起），改为渲染时只打 `.markdownQuoteChain` 标记、
+    /// UI 层按链在 overlay 层画**连续竖条**：每层一条，外层贯穿整块（含内层占据的行），
+    /// 内层只覆盖内层自己的行，x 坐标随嵌套深度往右错开 —— 详见
+    /// `MarkdownTextView.computeQuoteBarFrames()`。
+    ///
+    /// ### 本方法只负责三件事
+    /// 1. 把自己压进嵌套链（ID = 自己在块源码里的起始位置，重渲染也稳定）；
+    /// 2. 让子内容（加粗、列表、代码块、表格……）走各自已有的 visit，正常渲染；
+    /// 3. 补漏后给整块区间打上链标记 —— 用 add-if-absent，内层区间已有的
+    ///    更长链（`[外层ID, 内层ID]`）不会被外层的短链覆盖。
     func visitBlockQuote(_ blockQuote: BlockQuote) -> RenderedFragment {
         let savedIndent = indent
         let savedColor = currentTextColor
+        let savedChain = quoteChain
         let contentIndent = savedIndent + theme.quoteIndent
 
         indent = contentIndent
         currentTextColor = theme.quoteColor
         let quoteStyle = theme.paragraphStyle(indent: contentIndent)
 
+        // 自己的 ID：块内起始位置 + 块在文档里的起始偏移。
+        // 块区间两两不相交，所以不同块的 (origin + 块内位置) 不会撞车；
+        // 同一块每次重渲染结果一致，UI 层的「矩形稳定才收手」循环靠它判断前后两轮是不是同一批竖条
+        let ownID = blockOrigin &+ (localRange(of: blockQuote)?.location ?? savedChain.ids.count)
+        // 先把「打了自己 ID 的新链」存下来 —— 下面恢复现场后还要用它打标记，
+        // 直接读 quoteChain 的话拿到的是已经恢复的父链（踩过这个坑，外层竖条会整个消失）
+        let newChain = QuoteChain(ids: savedChain.ids + [ownID])
+        quoteChain = newChain
+
         var out = defaultVisit(blockQuote)
 
         currentTextColor = savedColor
         indent = savedIndent
+        quoteChain = savedChain
 
         // 把 `>` 这些没被子节点覆盖的源码字符补进来，
         // 并且给它们和引用正文一样的段落样式，否则行首的 `>` 会把整段的缩进带跑偏
@@ -282,51 +319,12 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                              orphanAttributes: orphanAttributes)
         out.addAttributesIfAbsent([.paragraphStyle: quoteStyle])
 
-        // 引用块的「左侧绿条」：每行一个绿条 attachment，贴在行首 `>` 之前。
-        // 这样绿条跟着该行 layout 走，零测量成本；行间留 6pt 段距不影响识别。
-        insertQuoteBars(into: &out,
-                        lineHeight: theme.bodyFont.lineHeight,
-                        color: theme.quoteBarColor,
-                        width: theme.quoteBarWidth)
+        // 给整块打上嵌套链标记（含补漏进来的 `>` 和空行）。
+        // add-if-absent：内层引用的区间已经带了自己的长链，不会被这里的短链覆盖 ——
+        // 这样 UI 层才能算出「外层竖条贯穿整块、内层竖条只到内层结束」两种范围。
+        out.addAttributesIfAbsent([.markdownQuoteChain: newChain])
 
         return out
-    }
-
-    /// 在引用块每行 `>` 字符之前插入一条绿条 attachment。
-    ///
-    /// reconciled 之后 textStorage 已经是「完整字符串 + 正确段落样式」，每行 `>` 都在位。
-    /// 我们反向遍历每个 `>` 字符位置，在它前面塞一个绿条 attachment：
-    ///   - attachment 跟随该行 layout（无需任何 fragment 测量）
-    ///   - attachment 是装饰性，isAttachmentView=true，复制时跳过
-    ///   - 退格选区如果选中绿条 attachment，整段一起删（`.markdownSyntaxMarker` 标记）
-    ///
-    /// 行间会留 ~6pt 段距缝隙（`paragraphSpacing` 不在 line height 内），
-    /// 视觉上像断开的虚线绿条，足够识别「这是引用块」。
-    private func insertQuoteBars(into out: inout RenderedFragment,
-                                 lineHeight: CGFloat,
-                                 color: UIColor,
-                                 width: CGFloat) {
-        // 找出所有 `>` 字符的位置
-        let nsString = out.text.string as NSString
-        var barPositions: [Int] = []
-        var idx = 0
-        while idx < nsString.length {
-            if nsString.character(at: idx) == 0x3E /* > */ {
-                barPositions.append(idx)
-            }
-            idx += 1
-        }
-        guard !barPositions.isEmpty else { return }
-
-        // 反向插入（从末尾开始插，否则前面的偏移会被后面搞乱）
-        let barFragment = RenderedFragment.decorationAttachment(
-            QuoteBarAttachment(width: width, height: lineHeight, color: color),
-            attributes: [:]
-        )
-        for pos in barPositions.reversed() {
-            out.text.insert(barFragment.text, at: pos)
-            out.mappings.insert(barFragment.mappings[0], at: pos)
-        }
     }
 
     func visitCodeBlock(_ codeBlock: CodeBlock) -> RenderedFragment {

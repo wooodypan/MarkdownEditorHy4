@@ -629,6 +629,111 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertEqual(restored, source, firstDifference(source, restored))
     }
 
+    // MARK: - 引用块竖条（嵌套链）
+
+    /// 渲染层必须给引用块打上 `.markdownQuoteChain` 嵌套链标记。
+    ///
+    /// ### 防的是什么回归
+    /// 竖条改到 overlay 方案后，标记是 UI 层画条的唯一依据。踩过的坑：打标记时
+    /// 读到了已恢复现场的父链，外层引用的竖条整个消失。这里验证：
+    /// 嵌套引用里，内层字符的链是 `[外层ID, 内层ID]`、外层自己的字符是 `[外层ID]`，
+    /// 且两者的第一层 ID 相同（同一条外层竖条）。
+    func testQuoteChainAttributeMarksNesting() {
+        let tv = makeEditor("""
+        > 外层开始
+        >
+        > > 内层引用
+        """)
+
+        var chains: [(range: NSRange, ids: [Int])] = []
+        tv.textStorage.enumerateAttribute(
+            .markdownQuoteChain,
+            in: NSRange(location: 0, length: tv.textStorage.length),
+            options: []
+        ) { value, range, _ in
+            guard let chain = value as? QuoteChain else { return }
+            chains.append((range, chain.ids))
+        }
+
+        // 内层（长链）一定存在
+        let nested = chains.filter { $0.ids.count == 2 }
+        XCTAssertEqual(nested.count, 1, "内层引用应该恰好有一个区间挂着两层链，实际：\(chains.map(\.ids))")
+        // 外层自己的字符（短链）第一层 ID 要和内层一致 —— 同一条外层竖条
+        let outer = chains.filter { $0.ids.count == 1 }
+        XCTAssertFalse(outer.isEmpty, "外层引用自己的字符也应该挂一层链（踩过的坑：打成了空链，外层竖条消失）")
+        for entry in outer {
+            XCTAssertEqual(entry.ids[0], nested[0].ids[0],
+                           "外层字符的链首 ID 和内层不一致，外层竖条会断开")
+        }
+    }
+
+    /// 嵌套引用的竖条：外层贯穿整块，内层只罩自己的行，x 随深度错开一个缩进单位。
+    func testNestedQuoteBarsOuterSpansInner() {
+        let tv = makeEditor("""
+        > 外层开始
+        >
+        > > 内层引用
+        """)
+
+        let (bars, _) = tv.computeQuoteBarFrames()
+        XCTAssertEqual(bars.count, 2, "两层嵌套应该恰好两条竖条，实际：\(bars)")
+        guard bars.count == 2 else { return }
+
+        let outer = bars.first { $0.level == 0 }!
+        let inner = bars.first { $0.level == 1 }!
+
+        // 外层竖条顶要高于内层竖条顶（从"外层开始"那行就开始了）；
+        // 底部允许齐平 —— 测试文档里内层引用恰好是最后一行，两条竖条共享底线是正确的
+        XCTAssertLessThan(outer.frame.minY, inner.frame.minY, "外层竖条顶应该高于内层竖条顶")
+        XCTAssertGreaterThanOrEqual(outer.frame.maxY, inner.frame.maxY, "外层竖条底不能高于内层竖条底")
+        XCTAssertGreaterThan(outer.frame.height, inner.frame.height,
+                             "外层竖条必须比内层高 —— 只比内层高不出一行的话，说明外层没有贯穿整块")
+        // 内层竖条往右错开一个缩进单位，和内层文字的缩进对齐
+        let theme = tv.renderer.theme
+        XCTAssertEqual(inner.frame.minX - outer.frame.minX, theme.quoteIndent, accuracy: 0.5,
+                       "内外竖条的水平间距应该等于 quoteIndent")
+        XCTAssertEqual(outer.frame.width, theme.quoteBarWidth, accuracy: 0.5)
+    }
+
+    /// 竖条必须连续贯穿段距（空行）——这是 overlay 方案相对旧版「每行一个 attachment」
+    /// 的核心改进：旧版在 6pt 段距处断成虚线。
+    func testQuoteBarCoversBlankLinesContinuously() {
+        let tv = makeEditor("""
+        > 第一段
+        >
+        > 第二段
+        """)
+
+        let (bars, _) = tv.computeQuoteBarFrames()
+        XCTAssertEqual(bars.count, 1, "带空行的引用应该只有一条连续竖条，实际：\(bars)")
+        let lineHeight = tv.renderer.theme.bodyFont.lineHeight
+        XCTAssertGreaterThan(bars.first?.frame.height ?? 0, lineHeight * 2,
+                             "竖条高度没盖住两行 + 中间段距，还是断的")
+    }
+
+    /// 两条**独立**的引用必须各自一条竖条，不能被合并成一条贯穿两个块的。
+    ///
+    /// ### 防的是什么回归
+    /// 竖条 ID 来自「块在文档里的起始偏移 + 引用节点在块内的位置」。早期版本忘了加盐，
+    /// 不同块里的引用都从块内位置 0 开始算 ID → 两个块的 ID 撞车，UI 层把两条竖条
+    /// 合并成一条、中间隔着普通段落还连在一起。
+    func testSeparateQuotesGetSeparateBars() {
+        let tv = makeEditor("""
+        > 第一条引用
+
+        普通段落
+
+        > 第二条引用
+        """)
+
+        let (bars, _) = tv.computeQuoteBarFrames()
+        XCTAssertEqual(bars.count, 2, "两条独立引用应该两条竖条，实际：\(bars)")
+        guard bars.count == 2 else { return }
+        let sorted = bars.sorted { $0.frame.minY < $1.frame.minY }
+        XCTAssertLessThan(sorted[0].frame.maxY, sorted[1].frame.minY,
+                          "两条竖条在竖直方向上不该有重叠 —— 重叠说明 ID 撞车被合并了")
+    }
+
     // MARK: - 代码块背景（文档坐标修正）
 
     /// 加载测试用例文档（两个代码块，第二个很长、超出好几屏）

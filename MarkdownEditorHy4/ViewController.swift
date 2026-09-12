@@ -2,7 +2,7 @@
 //  ViewController.swift
 //  MarkdownEditorHy4
 //
-//  Demo 界面：一个 markdown 编辑器 + 一排验证按钮
+//  Demo 界面：一个 markdown 编辑器 + 右上角「⋯」弹出菜单（重载 / 分块 / 源码 / 校验）
 //
 
 import UIKit
@@ -13,6 +13,8 @@ final class ViewController: UIViewController {
 
     private let editor = MarkdownTextView()
     private let statusLabel = UILabel()
+    /// 右上角的「⋯」按钮。点一下弹出菜单，里面装着重载 / 分块 / 源码 / 校验
+    private let menuButton = UIButton(type: .system)
     private var bottomConstraint: NSLayoutConstraint?
 
     /// 当前打开的文件。nil 表示在看内置示例文档，这类内容不能保存回磁盘
@@ -28,9 +30,10 @@ final class ViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
 
+        // 顺序有讲究：菜单按钮要先建好，编辑器的顶部约束要挂在它下面
+        setupMenuButton()
         setupEditor()
         setupStatusLabel()
-        setupToolbar()
         // 冷启动时文件 URL 已经在 MarkdownDocumentOpener 里等着了，先取出来用；
         // 没有外部文件才退回到内置示例文档
         if let url = MarkdownDocumentOpener.shared.takePendingURL() {
@@ -60,7 +63,8 @@ final class ViewController: UIViewController {
 
         bottomConstraint = editor.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         NSLayoutConstraint.activate([
-            editor.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            // 顶部对齐菜单按钮的下边，这样按钮不会盖住正文第一行
+            editor.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 2),
             editor.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             editor.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bottomConstraint!
@@ -84,36 +88,55 @@ final class ViewController: UIViewController {
         ])
     }
 
-    private func setupToolbar() {
-        let items: [(String, Selector)] = [
-            ("校验", #selector(verifyRoundTrip)),
-            ("源码", #selector(showSource)),
-            ("分块", #selector(showBlocks)),
-            ("重载", #selector(reloadSample))
-        ]
+    /// 页面右上角的「⋯」按钮。
+    /// 原来这里是贴着状态栏的一排四个按钮（校验 / 源码 / 分块 / 重载），
+    /// 现在全部收进弹出菜单，只留一个按钮，编辑区域更清爽
+    private func setupMenuButton() {
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "ellipsis.circle")
+        config.preferredSymbolConfigurationForImage =
+            UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        // 图标本身不大，靠内边距把可点区域撑到 40x40，手指和鼠标都好点
+        config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
 
-        let stack = UIStackView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.axis = .horizontal
-        stack.distribution = .fillEqually
-        stack.spacing = 8
-        view.addSubview(stack)
-
-        for (title, selector) in items {
-            var config = UIButton.Configuration.bordered()
-            config.title = title
-            config.cornerStyle = .capsule
-            let button = UIButton(configuration: config)
-            button.addTarget(self, action: selector, for: .touchUpInside)
-            stack.addArrangedSubview(button)
-        }
+        menuButton.configuration = config
+        menuButton.translatesAutoresizingMaskIntoConstraints = false
+        // 关键的一行：设为 true 后，单击就弹菜单，不需要长按等右键那一套
+        menuButton.showsMenuAsPrimaryAction = true
+        menuButton.menu = makeActionMenu()
+        menuButton.accessibilityLabel = "更多操作"
+        view.addSubview(menuButton)
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            stack.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -6),
-            stack.heightAnchor.constraint(equalToConstant: 36)
+            menuButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 2),
+            menuButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            menuButton.widthAnchor.constraint(equalToConstant: 40),
+            menuButton.heightAnchor.constraint(equalToConstant: 40)
         ])
+    }
+
+    /// 组装弹出菜单里的条目。
+    /// 每个 UIAction 就是一行：标题 + 图标 + 点击后要执行的代码
+    private func makeActionMenu() -> UIMenu {
+        let actions: [UIAction] = [
+            UIAction(title: "重载", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+                // 回到内置示例文档，重新渲染一遍
+                self?.reloadSample()
+            },
+            UIAction(title: "分块", image: UIImage(systemName: "square.grid.2x2")) { [weak self] _ in
+                // 弹窗列出当前所有块的源码 / 渲染区间
+                self?.showBlocks()
+            },
+            UIAction(title: "源码", image: UIImage(systemName: "doc.plaintext")) { [weak self] _ in
+                // 新开一页展示当前 markdown 源码
+                self?.showSource()
+            },
+            UIAction(title: "校验", image: UIImage(systemName: "checkmark.seal")) { [weak self] _ in
+                // 全选复制，比对复制出来的文本和源码是否逐字符一致
+                self?.verifyRoundTrip()
+            }
+        ]
+        return UIMenu(children: actions)
     }
 
     // MARK: 载入示例文档
