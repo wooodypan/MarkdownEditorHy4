@@ -10,7 +10,70 @@ import UIKit
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
+    // MARK: Mac 菜单栏
 
+    #if targetEnvironment(macCatalyst)
+    /// Mac 专属：往菜单栏加「文件」菜单 —— 新建 ⌘N / 打开… ⌘O / 存储 ⌘S。
+    ///
+    /// 整段用 `#if targetEnvironment(macCatalyst)` 包住 —— iOS 上这段代码
+    /// 不参与编译，所以 iOS 构建完全不受影响。
+    ///
+    /// 关于 target：这里不指定任何对象，等于让系统沿响应链（responder chain）
+    /// 去找「谁实现了这些方法」，当前窗口里的 ViewController 会接住。
+    /// 链上没人实现时菜单项自动变灰，不会崩。
+    override func buildMenu(with builder: UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        // 只管主菜单栏，系统菜单之类的一律不动
+        guard builder.system == .main else { return }
+
+        let newDoc = UIKeyCommand(title: "新建",
+                                  action: #selector(ViewController.newDocument),
+                                  input: "n",
+                                  modifierFlags: .command)
+        // ⚠️ 这里**故意不放**「打开…」。
+        // Catalyst 会为所有 App 自动提供一个「文件 > 打开…」(⌘O)，藏在系统菜单的子分组里：
+        // 再自己加一条同快捷键的项，UIKit 会直接抛
+        // NSInvalidArgumentException: Replacement elements contain duplicates 崩溃。
+        // 所以改成「接管」系统那一条 —— ViewController 实现 open(_:) 后，
+        // 系统菜单的「打开…」就会调到我们的实现，菜单位置和快捷键都是原生的。
+        let save = UIKeyCommand(title: "存储",
+                                action: #selector(ViewController.saveDocument),
+                                input: "s",
+                                modifierFlags: .command)
+
+        // 「存储」单独分一组（displayInline），菜单里和「新建」之间会显示一条分隔线
+        let fileItems: [UIMenuElement] = [
+            newDoc,
+            UIMenu(options: .displayInline, children: [save])
+        ]
+
+        if let existingFileMenu = builder.menu(for: .file) {
+            // 保险起见：先摘掉占用了 ⌘N / ⌘S 的旧项。
+            // UIKit 对重复快捷键是零容忍的 —— 撞上就抛
+            // NSInvalidArgumentException: Replacement elements contain duplicates 直接崩，
+            // 所以宁可先让路，再把我们这组放到菜单最前面
+            let takenInputs: Set<String> = ["n", "s"]
+            let keptItems = existingFileMenu.children.filter { element in
+                guard let command = element as? UIKeyCommand,
+                      let input = command.input,
+                      command.modifierFlags == .command else { return true }
+                return !takenInputs.contains(input)
+            }
+            builder.replaceChildren(ofMenu: .file) { _ in
+                fileItems + keptItems
+            }
+        } else {
+            // Catalyst 默认没有「文件」菜单，就自己建一个。
+            // 插在 App 菜单（.application）后面 —— 这正是 macOS 上「文件」该在的位置
+            let fileMenu = UIMenu(title: "文件",
+                                  image: nil,
+                                  identifier: UIMenu.Identifier("com.pan.MarkdownEditorHy4.file"),
+                                  options: [],
+                                  children: fileItems)
+            builder.insertSibling(fileMenu, afterMenu: .application)
+        }
+    }
+    #endif
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // 兜底：个别系统版本冷启动时只把文件 URL 放在 launchOptions 里，不派发给 scene

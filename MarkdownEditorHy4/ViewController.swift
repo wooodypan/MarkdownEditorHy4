@@ -3,9 +3,12 @@
 //  MarkdownEditorHy4
 //
 //  Demo 界面：一个 markdown 编辑器 + 右上角「⋯」弹出菜单（重载 / 分块 / 源码 / 校验）
+//  Mac 上另有菜单栏：文件 > 新建 / 打开 / 存储
 //
 
 import UIKit
+// 菜单里的「打开」要判断哪些文件可选，用到 UTType.markdown
+import UniformTypeIdentifiers
 
 final class ViewController: UIViewController {
 
@@ -25,6 +28,11 @@ final class ViewController: UIViewController {
     private var isDirty: Bool { editor.markdownSource != savedSource }
     /// 临时提示（比如「已保存」）显示完要恢复成常规状态栏
     private var statusResetWork: DispatchWorkItem?
+    /// 是不是「新建」出来的空白草稿。用来区分它和内置示例文档 —— 两者都没有关联文件，
+    /// 但标题该显示「未命名」还是「示例文档」不一样
+    private var isNewDraft = false
+    /// 当前弹出的文件选择器是不是「另存为」（导出）用途，回调里要靠它区分两种面板
+    private var isExportingDocument = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -152,6 +160,7 @@ final class ViewController: UIViewController {
 
         ![示例图片](sample.png)
         """
+        isNewDraft = false
         openedFileURL = nil
         savedSource = text
         editor.imageBaseURL = FileManager.default.urls(for: .documentDirectory,
@@ -161,12 +170,94 @@ final class ViewController: UIViewController {
         updateWindowTitle()
     }
 
+    // MARK: 新建 / 打开（Mac 菜单入口）
+
+    /// ⌘N：新建一份空白文档。
+    /// 这时还没有对应的磁盘文件，第一次按 ⌘S 会弹「另存为」让你挑保存位置
+    @objc func newDocument() {
+        confirmDiscardIfNeeded { [weak self] canContinue in
+            guard let self, canContinue else { return }
+            self.isNewDraft = true
+            self.openedFileURL = nil
+            self.savedSource = ""
+            // 新文档还没存到磁盘，粘贴的图片先放 Documents，等另存为之后不影响
+            self.editor.imageBaseURL = FileManager.default.urls(for: .documentDirectory,
+                                                               in: .userDomainMask).first
+            self.editor.setMarkdown("")
+            self.refreshStatus()
+            self.updateWindowTitle()
+            self.flashStatus("已新建空白文档")
+        }
+    }
+
+    /// ⌘O：弹系统文件选择器，挑一个 .md / .txt 打开
+    @objc func openDocumentFromPanel() {
+        confirmDiscardIfNeeded { [weak self] canContinue in
+            guard let self, canContinue else { return }
+            self.isExportingDocument = false
+            // UTType 里没有预置的 markdown 常量，只能按扩展名推一个；
+            // 推不出来就退回纯文本 —— md 本来就是纯文本，还能正常选到
+            let markdownType = UTType(filenameExtension: "md") ?? .plainText
+            // asCopy: false = 原地打开、不复制副本，这样 ⌘S 才能写回原文件
+            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [markdownType, .plainText],
+                                                        asCopy: false)
+            picker.delegate = self
+            picker.allowsMultipleSelection = false
+            self.present(picker, animated: true)
+        }
+    }
+
+    /// 接管系统菜单自带的「文件 > 打开…」(⌘O)。
+    ///
+    /// Catalyst 的「文件」菜单里本来就有一条 Open…，它的 action 是 `open:`。
+    /// 我们不去新增一条同快捷键的菜单项（UIKit 遇到重复快捷键会抛异常崩溃），
+    /// 而是实现这个方法 —— 系统那条菜单项会顺着响应链找到这里。
+    /// 方法名必须叫 `open`（selector 就是 `open:`），所以加了反引号
+    @objc func `open`(_ sender: Any?) {
+        openDocumentFromPanel()
+    }
+
+    /// 新建 / 打开都会顶掉当前内容，有未保存改动就先问一句。
+    /// 回调传 true 表示可以继续，false 表示用户选了取消
+    private func confirmDiscardIfNeeded(_ completion: @escaping (Bool) -> Void) {
+        guard isDirty else {
+            completion(true)
+            return
+        }
+        let name = openedFileURL?.lastPathComponent ?? (isNewDraft ? "未命名文档" : "示例文档")
+        let alert = UIAlertController(title: "还有改动没保存",
+                                      message: "「\(name)」改了还没存，继续的话这部分改动就丢了。",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in completion(false) })
+        alert.addAction(UIAlertAction(title: "放弃改动", style: .destructive) { _ in completion(true) })
+        present(alert, animated: true)
+    }
+
+    /// 没有关联文件时（刚「新建」的草稿）走「另存为」：把内容导出到用户挑的位置。
+    /// 导出面板必须给一个真实文件，所以先把内容写到临时目录再交给系统复制过去
+    private func presentSaveAsPanel() {
+        let name = openedFileURL?.lastPathComponent ?? "未命名.md"
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        do {
+            try editor.markdownSource.write(to: tempURL, atomically: true, encoding: .utf8)
+        } catch {
+            showAlert(title: "保存失败", message: error.localizedDescription)
+            return
+        }
+        isExportingDocument = true
+        // asCopy: true = 复制过去，临时文件留着也无所谓
+        let picker = UIDocumentPickerViewController(forExporting: [tempURL], asCopy: true)
+        picker.delegate = self
+        present(picker, animated: true)
+    }
+
     // MARK: 打开 / 保存外部 .md 文件
 
     /// 打开 Finder 传进来的文件（右键「打开方式」、双击、拖到 Dock 图标都走这里）
     private func openDocument(at url: URL) {
         do {
             let text = try loadText(from: url)
+            isNewDraft = false
             openedFileURL = url
             savedSource = text
             // 关键：md 里的图片多是相对路径，基准目录要指向文件所在目录，否则图片全裂
@@ -186,11 +277,20 @@ final class ViewController: UIViewController {
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// ⌘S：写回原文件。没打开外部文件时给个提示
-    @objc private func saveDocument() {
+    /// ⌘S：写回原文件。
+    /// 没有关联文件时（内置示例文档 / 刚「新建」的草稿）分两条路走：
+    ///   - Mac：弹「另存为」面板，让新建的草稿能落地成文件
+    ///   - iOS：弹个提示，说明得先从外部打开一个文件
+    /// 这里刻意不加 private —— 菜单栏的「存储」项要引用它的 selector，
+    /// 修饰符是 private 的话，AppDelegate 里 `#selector(...)` 取不到
+    @objc func saveDocument() {
         guard let url = openedFileURL else {
+            #if targetEnvironment(macCatalyst)
+            presentSaveAsPanel()
+            #else
             showAlert(title: "没有可保存的文件",
                       message: "现在看的是内置示例文档。在 Finder 里右键 .md 文件 →「打开方式」→ 选本 App，打开后就能用 ⌘S 存回原文件。")
+            #endif
             return
         }
 
@@ -206,13 +306,40 @@ final class ViewController: UIViewController {
         }
     }
 
+    #if targetEnvironment(macCatalyst)
+    /// Mac 专属：把 ⌘N / ⌘O / ⌘S 注册成键盘快捷键。
+    ///
+    /// 整段用 `#if targetEnvironment(macCatalyst)` 包住，iOS 上这段代码
+    /// 根本不参与编译，所以 iOS 构建完全不受影响。
+    ///
+    /// 说明：AppDelegate 里往菜单栏加了同样三个条目。
+    /// 两者不会打架 —— macOS 先走菜单的快捷键匹配，菜单命中后就不再往下传，
+    /// 这里只是菜单那条路走不通时的兜底。
     override var keyCommands: [UIKeyCommand]? {
-        // Mac 上的 ⌘S
-        [UIKeyCommand(input: "s", modifierFlags: .command, action: #selector(saveDocument))]
+        let new = UIKeyCommand(title: "新建",
+                               action: #selector(newDocument),
+                               input: "n",
+                               modifierFlags: .command)
+        let open = UIKeyCommand(title: "打开",
+                                action: #selector(openDocumentFromPanel),
+                                input: "o",
+                                modifierFlags: .command)
+        let save = UIKeyCommand(title: "存储",
+                                action: #selector(saveDocument),
+                                input: "s",
+                                modifierFlags: .command)
+        return [new, open, save]
+    }
+    #endif
+
+    /// 界面上要显示的名字：有文件就用文件名；没有文件则区分「新建的草稿」和「内置示例」
+    private var documentDisplayName: String {
+        if let url = openedFileURL { return url.lastPathComponent }
+        return isNewDraft ? "未命名" : "示例文档"
     }
 
     private func updateWindowTitle() {
-        let name = openedFileURL?.lastPathComponent ?? "示例文档"
+        let name = documentDisplayName
         let suffix = isDirty ? " — 已修改" : ""
         title = name
         // Mac Catalyst：windowScene.title 就是窗口标题栏上显示的文字
@@ -254,7 +381,7 @@ final class ViewController: UIViewController {
     }
 
     private func refreshStatus() {
-        let name = openedFileURL?.lastPathComponent ?? "内置示例文档"
+        let name = documentDisplayName
         let dirty = isDirty ? " · 已修改（⌘S 保存）" : ""
         statusLabel.text = "\(name)\(dirty) · 块数 \(editor.documentStore.blocks.count) · 源码 \(editor.markdownSource.utf16.count) 字符 · 渲染 \(editor.documentStore.renderedLength) 字符"
     }
@@ -384,5 +511,37 @@ final class ViewController: UIViewController {
             return "第 \(index) 个字符不同\n\n源码: …\(sourceSnippet)…\n复制: …\(copiedSnippet)…"
         }
         return "长度不同：源码 \(sourceChars.count) 字符，复制出来 \(copiedChars.count) 字符"
+    }
+}
+
+// MARK: 文件选择器回调
+//
+// 「打开」和「另存为」用的是同一个 UIDocumentPickerViewController，
+// 靠 isExportingDocument 区分这次弹的是哪一种，回调里分开处理。
+
+extension ViewController: UIDocumentPickerDelegate {
+
+    /// 用户挑完了（打开：挑中的文件；另存为：挑中的保存位置）
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard let url = urls.first else { return }
+
+        if isExportingDocument {
+            // 「另存为」：系统已经把临时文件复制到这个位置了，把它记成当前文件
+            isExportingDocument = false
+            isNewDraft = false
+            openedFileURL = url
+            savedSource = editor.markdownSource
+            refreshStatus()
+            updateWindowTitle()
+            flashStatus("已保存 \(url.lastPathComponent)")
+        } else {
+            // 「打开」：走正常的读文件流程（换基准目录、重建分块那些都在里面）
+            openDocument(at: url)
+        }
+    }
+
+    /// 用户点了取消：什么都不改，保持原样，顺手把导出标记清掉
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        isExportingDocument = false
     }
 }
