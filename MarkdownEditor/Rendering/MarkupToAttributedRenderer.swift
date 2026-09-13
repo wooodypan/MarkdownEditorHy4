@@ -292,7 +292,10 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         let contentIndent = savedIndent + theme.quoteIndent
 
         indent = contentIndent
-        currentTextColor = theme.quoteColor
+        // 引用正文的颜色由 `quoteTextColor` 单独控制（默认和正文同色）。
+        // 注意行首的 `>` 不走这里 —— 它属于「没被子节点覆盖的源码字符」，
+        // 由下面的补漏步骤用 `theme.markerAttributes` 上成灰色。
+        currentTextColor = theme.quoteTextColor
         let quoteStyle = theme.paragraphStyle(indent: contentIndent)
 
         // 自己的 ID：块内起始位置 + 块在文档里的起始偏移。

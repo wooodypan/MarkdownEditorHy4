@@ -25,11 +25,21 @@ struct MarkdownTheme {
     var textColor: UIColor
     /// 语法标记（`#`、`**`、`-`、`>` 这些）的弱化色
     var markerColor: UIColor
+    /// **有序列表**的「数字 + 点」（`1.` / `10.`）专用颜色。
+    ///
+    /// 单独拎出来是因为它和 `#`、`- ` 这类标记虽然都是弱化色，但语义不一样：
+    /// 有序列表的序号是正文要读的内容，经常想单独调（比如调成主色、或者跟正文同色），
+    /// 不该跟着 `markerColor` 一起变。默认沿用和 `markerColor` 一样的浅灰。
+    var orderedListMarkerColor: UIColor
     var linkColor: UIColor
     var inlineCodeColor: UIColor
     var inlineCodeBackground: UIColor
     var codeBlockBackground: UIColor
-    var quoteColor: UIColor
+    /// 引用块里**正文文字**的颜色（`>` 符号本身仍然是 `markerColor` 的灰色）。
+    ///
+    /// 默认和正文同色（下面的 `default` 里直接取 `textColor`），
+    /// 想让引用内容看起来淡一点就把这里改成 `.secondaryLabel` 之类。
+    var quoteTextColor: UIColor
     var bulletColor: UIColor
     var separatorColor: UIColor
 
@@ -96,20 +106,26 @@ struct MarkdownTheme {
         let body = UIFont.preferredFont(forTextStyle: .body)
         let code = UIFont.monospacedSystemFont(ofSize: body.pointSize - 1, weight: .regular)
 
+        // 正文色先算出来，下面引用正文色要直接复用它（默认「引用文字和正文一样黑」）
+        let text = UIColor(red: 0.13, green: 0.21, blue: 0.28, alpha: 1.00)
+        // 语法标记的弱化灰，有序列表序号默认也用它（想单独调改 `orderedListMarkerColor`）
+        let marker = UIColor(red: 0.9, green: 0.9, blue: 0.9, alpha: 1.00)
+
         return MarkdownTheme(
             bodyFont: body,
             codeFont: code,
             headingFonts: Self.makeHeadingFonts(base: body),
-            textColor: .label,
-            markerColor: .tertiaryLabel,
-            linkColor: .systemBlue,
-            inlineCodeColor: .systemPink,
-            inlineCodeBackground: UIColor.systemPink.withAlphaComponent(0.10),
+            textColor: text,
+            markerColor: marker,
+            orderedListMarkerColor: UIColor(red: 0.26, green: 0.72, blue: 0.51, alpha: 1.00),
+            linkColor: UIColor(red: 0.26, green: 0.72, blue: 0.51, alpha: 1.00), //#42b883
+            inlineCodeColor: UIColor(red: 0.28, green: 0.40, blue: 0.51, alpha: 1.00),
+            inlineCodeBackground: UIColor(red: 0.95, green: 0.95, blue: 0.95, alpha: 1.00),
             codeBlockBackground: UIColor.secondarySystemBackground,
-            quoteColor: .secondaryLabel,
-            bulletColor: .label,
+            quoteTextColor: text,
+            bulletColor: UIColor(red: 0.26, green: 0.72, blue: 0.51, alpha: 1.00),
             separatorColor: .separator,
-            bulletDiameter: 5,
+            bulletDiameter: 9,
             listIndent: 22,
             quoteIndent: 16,
             paragraphSpacing: 6,
@@ -118,8 +134,8 @@ struct MarkdownTheme {
             codeBlockCornerRadius: 8,
             codeBlockVerticalPadding: 6,
             codeBlockTextInset: 10,
-            quoteBarColor: UIColor(red: 0.27, green: 0.68, blue: 0.49, alpha: 1.00),
-            quoteBarWidth: 3,
+            quoteBarColor: UIColor(red: 0.20, green: 0.63, blue: 0.44, alpha: 1.00),
+            quoteBarWidth: 5,
             foldButtonSide: 20,
             foldButtonGap: 2,
             foldGutterWidth: 22,
@@ -174,9 +190,11 @@ struct MarkdownTheme {
         [.foregroundColor: linkColor]
     }
 
-    /// 列表标记（有序列表的 `1.` 这类）
+    /// 有序列表的序号（`1.` / `10.`）属性。
+    ///
+    /// 颜色走单独的 `orderedListMarkerColor`，不受 `markerColor` 影响。
     var listMarkerAttributes: [NSAttributedString.Key: Any] {
-        [.font: bodyFont, .foregroundColor: markerColor]
+        [.font: bodyFont, .foregroundColor: orderedListMarkerColor]
     }
 
     /// 表格下方那几行**表格源码**的样式：等宽字体 + 浅灰。

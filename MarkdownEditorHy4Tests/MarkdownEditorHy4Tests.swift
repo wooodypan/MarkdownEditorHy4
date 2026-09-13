@@ -1072,6 +1072,59 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         }
         return []
     }
+
+    // MARK: - 颜色：有序列表序号 / 引用正文
+
+    /// 有序列表的「数字 + 点」必须走 `orderedListMarkerColor`，改 `markerColor` 不能动它。
+    ///
+    /// ### 防的是什么回归
+    /// 这两个色以前是同一个变量（`markerColor`），想单独调序号颜色就只能连 `#`、`- `
+    /// 一起改。拆开后这里锁住「改 markerColor 不影响序号，改 orderedListMarkerColor 只动序号」。
+    func testOrderedListMarkerUsesOwnColor() {
+        let source = "1. 第一项\n2. 第二项\n"
+        let tv = makeEditor(source)
+        tv.renderer.theme.markerColor = .red          // 别的语法标记全变红
+        tv.renderer.theme.orderedListMarkerColor = .blue
+        tv.setMarkdown(source)                        // 换主题后要重新渲染一次才生效
+
+        let text = tv.textStorage.string as NSString
+        let marker = text.range(of: "1.")
+        XCTAssertNotEqual(marker.location, NSNotFound, "渲染结果里应该能找到有序列表的序号")
+
+        let color = tv.textStorage.attribute(.foregroundColor,
+                                             at: marker.location,
+                                             effectiveRange: nil) as? UIColor
+        XCTAssertEqual(color, .blue,
+                       "有序列表序号应该用 orderedListMarkerColor，不受 markerColor 影响（现在是 \(String(describing: color))）")
+    }
+
+    /// 引用里只有 `>` 是灰色，正文文字走 `quoteTextColor`（默认和正文同色）。
+    func testQuoteTextUsesOwnColor() {
+        let tv = makeEditor("> 引用正文\n")
+        let theme = tv.renderer.theme
+        XCTAssertEqual(theme.quoteTextColor, theme.textColor,
+                       "默认引用正文应该和正文同色，想让它淡一点要显式改 quoteTextColor")
+
+        let text = tv.textStorage.string as NSString
+
+        // 1) 行首的 `>` 仍然是弱化灰（`markerColor`）
+        let marker = text.range(of: ">")
+        XCTAssertNotEqual(marker.location, NSNotFound)
+        let markerColor = tv.textStorage.attribute(.foregroundColor,
+                                                   at: marker.location,
+                                                   effectiveRange: nil) as? UIColor
+        XCTAssertEqual(markerColor, theme.markerColor,
+                       "引用行首的 > 应该还是弱化灰，实际：\(String(describing: markerColor))")
+
+        // 2) 引用正文用 quoteTextColor，不是灰色、也不是系统次要色
+        let body = text.range(of: "引用正文")
+        XCTAssertNotEqual(body.location, NSNotFound)
+        let bodyColor = tv.textStorage.attribute(.foregroundColor,
+                                                 at: body.location,
+                                                 effectiveRange: nil) as? UIColor
+        XCTAssertEqual(bodyColor, theme.quoteTextColor,
+                       "引用正文应该用 quoteTextColor，实际：\(String(describing: bodyColor))")
+    }
 }
 
 // MARK: - 小工具
