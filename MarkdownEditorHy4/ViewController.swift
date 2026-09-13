@@ -22,6 +22,10 @@ final class ViewController: UIViewController {
     private let outlineView = MarkdownOutlineView()
     /// 大纲协调者：把编辑器和目录面板连起来
     private let outlineCoordinator = OutlineCoordinator()
+    /// 用户配置（「记住目录大纲滚动位置」等）。改完会发通知，下面挂了监听同步给大纲面板
+    private let settings = MarkdownEditorSettings.shared
+    /// 每份文档「上次读到哪儿」的记忆
+    private let scrollMemory = DocumentScrollMemory.shared
     private var bottomConstraint: NSLayoutConstraint?
 
     /// 当前打开的文件。nil 表示在看内置示例文档，这类内容不能保存回磁盘
@@ -61,6 +65,9 @@ final class ViewController: UIViewController {
         observeKeyboard()
         observeDocumentOpenRequests()
         observeEditorChanges()
+        observeSettingsChanges()
+        // 离开前台时把「读到哪儿」记一笔（用户常常是随手切走、再也没回来）
+        observeAppLifecycle()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -136,6 +143,12 @@ final class ViewController: UIViewController {
         // 编辑器只拿到一个「事件出口」，它并不知道出口后面是协调者还是别的什么
         editor.outlineEventSink = outlineCoordinator
 
+        // 默认收起：冷启动时右上角只留一个小方块（展开按钮），点它才展开整份目录。
+        // 目录属于「想看的时候看一眼」的东西，默认摊开会一直占着正文右上角
+        outlineView.setCollapsed(true, animated: false)
+        // 按用户的配置定高度（默认「父视图高度的 70%」当上限）
+        applyOutlineAppearance()
+
         // 主动要一次初次数据。文档这时已经加载完了，编辑器不会再有「标题变了」的通知；
         // 不主动拉的话目录会一直空着（编辑器里那次 push 发生时装配还没完成）
         outlineCoordinator.reloadFromEditor()
@@ -191,9 +204,101 @@ final class ViewController: UIViewController {
             UIAction(title: "导出成图片", image: UIImage(systemName: "photo.on.rectangle")) { [weak self] _ in
                 // 把编辑器整篇内容渲染成一张长图，弹系统分享面板
                 self?.exportEditorAsImage()
+            },
+            UIAction(title: "设置", image: UIImage(systemName: "gearshape")) { [weak self] _ in
+                // 弹出设置页（目前就一行：是否记住目录大纲滚动位置）
+                self?.showSettings()
             }
         ]
         return UIMenu(children: actions)
+    }
+
+    // MARK: 设置
+
+    /// 弹出设置页。
+    ///
+    /// 包一层 `UINavigationController`：设置页右上角那个「完成」要挂在导航栏上才正常，
+    /// 而且以后设置项多了、需要点进二级页面时，导航栏是现成的。
+    /// 用弹窗（present）而不是 push 到主界面：设置和文档是两码事，看完就关，
+    /// 不该占着主界面的导航栈
+    @objc private func showSettings() {
+        let controller = SettingsViewController(settings: settings)
+        present(UINavigationController(rootViewController: controller), animated: true)
+    }
+
+    /// 设置变了（用户在设置页拨了开关）→ 立刻作用到大纲面板上，不用重启
+    private func observeSettingsChanges() {
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(settingsDidChange),
+                                               name: MarkdownEditorSettings.didChangeNotification,
+                                               object: settings)
+    }
+
+    @objc private func settingsDidChange() {
+        applyScrollSetting()
+        applyOutlineAppearance()
+    }
+
+    /// 把「是否记住滚动位置」同步给大纲面板
+    private func applyScrollSetting() {
+        outlineView.remembersScrollPosition = settings.remembersScrollPosition
+    }
+
+    /// 把「大纲面板高度」的配置同步给大纲面板。
+    ///
+    /// 「配置 → 面板参数」的换算本身放在配置那边
+    /// （`MarkdownEditorSettings.applyOutlineHeight`），这样它能被单独测；
+    /// 这里只负责把结果送过去、再让面板重算一次宽高
+    private func applyOutlineAppearance() {
+        settings.applyOutlineHeight(to: &outlineView.appearance)
+        // 宽高是算出来的（不算动画：拖滑块时不该一直有动画）
+        outlineView.refreshAppearance()
+    }
+
+    // MARK: 记住「这份文档读到哪儿了」
+
+    /// 这份文档在「阅读位置」里的钥匙。
+    ///
+    /// - 打开的磁盘文件 → 用文件路径（同一个文件重开回到原处）；
+    /// - 内置示例文档 → 一个固定字符串（内容每次都一样，记得住就有意义）；
+    /// - 新建的空白草稿 → `nil`，不记。它每次都是新的，记了也没下一次。
+    private var documentScrollKey: String? {
+        if let url = openedFileURL { return url.path }
+        return isNewDraft ? nil : "<sample>"
+    }
+
+    /// 离开当前文档之前，把它读到哪儿记下来。
+    /// 三个时机调用：换文档之前、按⌘S保存之后、App 失去焦点 / 进后台时
+    private func rememberCurrentScrollPosition() {
+        guard settings.remembersScrollPosition, let key = documentScrollKey else { return }
+        scrollMemory.remember(sourceOffset: editor.topVisibleSourceOffset, for: key)
+    }
+
+    /// 换完文档之后，回到上次读到的位置。
+    ///
+    /// 关掉「记住滚动位置」时什么都不做 —— 打开就是文档开头。
+    /// 滚动本身在编辑器内部是异步收敛的（TextKit 2 一次滚不到位），这里只管发出指令
+    private func restoreScrollPositionIfNeeded() {
+        guard settings.remembersScrollPosition, let key = documentScrollKey else { return }
+        guard let offset = scrollMemory.sourceOffset(for: key) else { return }
+        editor.restoreScrollPosition(sourceOffset: offset)
+    }
+
+    /// App 被切走 / 进后台时也该记一次 —— 用户很可能就是随手切出去、再也没回来
+    private func observeAppLifecycle() {
+        let center = NotificationCenter.default
+        center.addObserver(self,
+                           selector: #selector(appWillLeaveForeground),
+                           name: UIApplication.willResignActiveNotification,
+                           object: nil)
+        center.addObserver(self,
+                           selector: #selector(appWillLeaveForeground),
+                           name: UIApplication.didEnterBackgroundNotification,
+                           object: nil)
+    }
+
+    @objc private func appWillLeaveForeground() {
+        rememberCurrentScrollPosition()
     }
 
     // MARK: 载入示例文档
@@ -217,6 +322,9 @@ final class ViewController: UIViewController {
         editor.setMarkdown(text)
         refreshStatus()
         updateWindowTitle()
+        // 换文档 → 大纲从「全部展开」开始（上一份文档折过什么，跟这一份没关系）
+        outlineView.resetFolding()
+        restoreScrollPositionIfNeeded()
     }
 
     // MARK: 新建 / 打开（Mac 菜单入口）
@@ -226,6 +334,9 @@ final class ViewController: UIViewController {
     @objc func newDocument() {
         confirmDiscardIfNeeded { [weak self] canContinue in
             guard let self, canContinue else { return }
+            // 换文档 = 换一把「阅读位置」的钥匙。必须在改 openedFileURL / isNewDraft 之前记，
+            // 那之后 documentScrollKey 就已经指向新文档了
+            self.rememberCurrentScrollPosition()
             self.isNewDraft = true
             self.openedFileURL = nil
             self.savedSource = ""
@@ -235,6 +346,7 @@ final class ViewController: UIViewController {
             self.editor.setMarkdown("")
             self.refreshStatus()
             self.updateWindowTitle()
+            self.outlineView.resetFolding()
             self.flashStatus("已新建空白文档")
         }
     }
@@ -306,6 +418,9 @@ final class ViewController: UIViewController {
     private func openDocument(at url: URL) {
         do {
             let text = try loadText(from: url)
+            // 读出来了才记「上一份文档读到哪儿」；读失败就当作没换过文档，别把记录搅乱。
+            // 同样要在改 openedFileURL 之前调用（那之后 documentScrollKey 就指向新文档了）
+            rememberCurrentScrollPosition()
             isNewDraft = false
             openedFileURL = url
             savedSource = text
@@ -314,6 +429,10 @@ final class ViewController: UIViewController {
             editor.setMarkdown(text)
             refreshStatus()
             updateWindowTitle()
+            // 换文档 → 大纲从「全部展开」开始，别继承上一份文档的折叠
+            outlineView.resetFolding()
+            // 换完内容再滚回这个文件上次读到的位置
+            restoreScrollPositionIfNeeded()
         } catch {
             showAlert(title: "打不开文件",
                       message: "\(url.lastPathComponent)\n\n\(error.localizedDescription)")
@@ -347,6 +466,8 @@ final class ViewController: UIViewController {
         do {
             try source.write(to: url, atomically: true, encoding: .utf8)
             savedSource = source
+            // 存盘是个天然的「我读到这儿了」的时间点，顺手记一次
+            rememberCurrentScrollPosition()
             refreshStatus()
             updateWindowTitle()
             flashStatus("已保存 \(url.lastPathComponent)")

@@ -39,5 +39,12 @@ struct OutlineItem: Identifiable, Equatable {
     /// 整套编辑器（`MarkdownBlock.sourceRange`、`CharMapping`、`NSRange`）统一用
     /// UTF-16 偏移做源码坐标，这里跟着用 Int，两边可以直接换算，不用来回转。
     /// 点击跳转时编辑器拿它去查「源码偏移 → 渲染位置」的映射表。
+    ///
+    /// ### ⚠️ 这是一个**快照**，会过期
+    /// 文档是活的：在任意一个标题**上面**编辑（哪怕只打一个正文字），它后面所有标题
+    /// 的这个值都会跟着往后挪。所以目录只要显示过一份列表，往后每次「标题位置可能变了」
+    /// 的编辑，都得**重新给目录一份新列表**；否则照着旧值去跳，就会落在标题前面几个字的位置。
+    /// 「这次编辑要不要重给」由 `MarkdownEditOutcome.headingsChanged` 说了算，
+    /// 不要绕过它自己把这个值缓存着用。
     let sourceOffset: Int
 }

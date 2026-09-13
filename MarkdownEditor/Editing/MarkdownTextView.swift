@@ -196,7 +196,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 兜底：view 还没挂到 window 上（比如 init 刚结束）时 layoutSubviews 不会来，这里补一次
         if pendingFullReplace { applyPendingFullReplace() }
 
-        // 整篇换掉了，标题列表一定变了；光标也被重置，两样一起推给大纲
+        // 整篇换掉了，标题列表一定变了；光标也被重置。这两件事一起告诉目录
         publishOutlineItems()
         publishOutlineCursor()
     }
@@ -1054,8 +1054,11 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             selectedRange = NSRange(location: caret, length: 0)
         }
 
-        // 只有这次编辑动到了标题块才重推整份标题列表。
-        // 在正文段落里打字时这里永远是 false —— 长文档也完全不会被目录拖慢
+        // 这次编辑如果让目录「对不上号」了，就重新抓一份标题列表给它。
+        //
+        // 什么叫对不上号？两种：标题本身被增删改，或者标题的位置被上面的正文顶移了。
+        // 只有「在文档最末尾（所有标题后面）的正文里打字」才不算 ——
+        // 那时候标题一个都没动，目录不用白跑一趟，长文档连续打字也就不会被拖慢。
         if outcome.headingsChanged { publishOutlineItems() }
     }
 

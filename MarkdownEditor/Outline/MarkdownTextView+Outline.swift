@@ -18,7 +18,8 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
     // MARK: 跳转时的视口对齐参数
 
     /// 标题距离屏幕上沿留出的空白（点）。
-    /// 留这点空是为了让标题**完整**落在屏幕上沿下方 —— 紧贴着边的话，标题上半截会被裁掉
+    /// 留这点空是为了让标题**完整**落在屏幕上沿下方 —— 紧贴着边的话，标题上半截会被裁掉。
+    /// （「记住阅读位置」恢复时用的上边距是 0，因为记住的就是「最上面那一行」）
     private static let jumpTopPadding: CGFloat = 16
     /// 「滚 → 量视口 → 再滚」最多跑几轮。实测 2~4 轮收敛，多留一些兜底
     private static let maxJumpRounds = 16
@@ -70,7 +71,53 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
                  targetRendered: caret,
                  round: 1,
                  previousGap: 0,
-                 referenceSpan: 0)
+                 referenceSpan: 0,
+                 topPadding: Self.jumpTopPadding)
+    }
+
+    /// 按「源码偏移」把文档滚回那个位置（记住阅读位置用的）。
+    ///
+    /// 和 `scrollToOutlineItem` 是同一套迭代滚动，区别只有两点：
+    /// - **不动光标**：只是想回到上次读到的位置，光标该在哪儿还在哪儿；
+    /// - **上边距为 0**：目标直接顶到可视区最上面 —— 记住的就是「最上面那一行」。
+    ///
+    /// ### 为什么要等一帧再开始
+    /// 调用时机是「刚 `setMarkdown` 换完整篇内容」，那一刻 TextKit 还没按新内容排版，
+    /// `viewportRange` 是空的，量不到就滚不准。等一个 runloop 之后布局已经发生，
+    /// 才能真正开始「滚 → 量 → 再滚」。
+    func restoreScrollPosition(sourceOffset: Int) {
+        guard sourceOffset > 0 else { return }
+
+        let length = (text as NSString).length
+        let target = min(max(0, documentStore.renderedCaret(forSourceOffset: sourceOffset)), length)
+
+        outlineJumpToken &+= 1
+        let token = outlineJumpToken
+        DispatchQueue.main.async { [weak self] in
+            // 期间用户又点了目录 / 又换了文档 → 这一轮作废，别和新的滚动目标互相拉扯
+            guard let self, token == self.outlineJumpToken else { return }
+            self.layoutIfNeeded()
+            self.jumpStep(token: token,
+                          targetRendered: target,
+                          round: 1,
+                          previousGap: 0,
+                          referenceSpan: 0,
+                          topPadding: 0)
+        }
+    }
+
+    /// 当前屏幕最上面那一行对应的**源码偏移**，用来「记住读到哪儿了」。
+    ///
+    /// ### 为什么记源码偏移而不是 `contentOffset.y`
+    /// `contentOffset.y` 跟窗口宽度强相关：同一份文档在 iPhone 竖屏和 Catalyst 宽窗口里，
+    /// 第 3000 点可能是一个位置，也可能完全不是。源码偏移是文档自身的位置，
+    /// 换窗口大小、换字号都还指在同一段文字上。
+    ///
+    /// 量不到视口（还没排版完）时返回 0，也就是「当作在读文档开头」——
+    /// 这种情况下不记位置，比记一个错的强。
+    var topVisibleSourceOffset: Int {
+        guard let viewport = renderedRangeInViewport() else { return 0 }
+        return documentStore.sourceCaret(forRenderedOffset: viewport.start)
     }
 
     /// 迭代滚动：每一轮看「视口顶部现在停在哪」，算出还差多少，再滚过去。
@@ -100,11 +147,14 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
     ///
     /// - parameter previousGap: 上一轮的 `gap`，用来识别「滚过头了」并减小步长
     /// - parameter referenceSpan: 第一轮量到的「一屏字符数」，用来识别异常读数
+    /// - parameter topPadding: 目标最后要停在「屏幕上沿往下多少点」。跳标题时留一点空，
+    ///   免得标题上半截被裁掉（`jumpTopPadding`）；恢复阅读位置时是 0，因为记住的就是最上面那一行
     private func jumpStep(token: Int,
                           targetRendered: Int,
                           round: Int,
                           previousGap: Int,
-                          referenceSpan: Int) {
+                          referenceSpan: Int,
+                          topPadding: CGFloat) {
         guard token == outlineJumpToken, round <= Self.maxJumpRounds else { return }
         guard markedTextRange == nil else { return }
         guard let viewport = renderedRangeInViewport() else {
@@ -127,14 +177,15 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
         if targetIsLaidOut, let caretFrame = caretFrame(atRenderedOffset: targetRendered) {
             // caretRect 和 contentOffset 是同一套坐标系（textView 内容坐标，含 inset），
             // 所以「光标所在行顶部 - 想要的内边距」直接就等于目标 contentOffset
-            let desired = min(max(0, caretFrame.minY - Self.jumpTopPadding),
+            let desired = min(max(0, caretFrame.minY - topPadding),
                               maximumContentOffsetY)
             if abs(desired - contentOffset.y) <= Self.jumpSettleTolerance {
                 return // 停好了，收工
             }
             setContentOffset(CGPoint(x: contentOffset.x, y: desired), animated: false)
             scheduleNextJumpRound(token: token, targetRendered: targetRendered,
-                                  round: round, previousGap: gap, referenceSpan: span)
+                                  round: round, previousGap: gap, referenceSpan: span,
+                                  topPadding: topPadding)
             return
         }
 
@@ -147,7 +198,8 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
             if abs(bottom - contentOffset.y) <= Self.jumpSettleTolerance { return } // 已经到底了
             setContentOffset(CGPoint(x: contentOffset.x, y: bottom), animated: false)
             scheduleNextJumpRound(token: token, targetRendered: targetRendered,
-                                  round: round, previousGap: gap, referenceSpan: span)
+                                  round: round, previousGap: gap, referenceSpan: span,
+                                  topPadding: topPadding)
             return
         }
 
@@ -173,7 +225,8 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
 
         setContentOffset(CGPoint(x: contentOffset.x, y: next), animated: false)
         scheduleNextJumpRound(token: token, targetRendered: targetRendered,
-                              round: round, previousGap: gap, referenceSpan: span)
+                              round: round, previousGap: gap, referenceSpan: span,
+                              topPadding: topPadding)
     }
 
     /// 某个渲染偏移处「光标那一行的矩形」（内容坐标，和 contentOffset 同一套）。
@@ -194,13 +247,15 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
                                        targetRendered: Int,
                                        round: Int,
                                        previousGap: Int,
-                                       referenceSpan: Int) {
+                                       referenceSpan: Int,
+                                       topPadding: CGFloat) {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.jumpStepDelay) { [weak self] in
             self?.jumpStep(token: token,
                            targetRendered: targetRendered,
                            round: round + 1,
                            previousGap: previousGap,
-                           referenceSpan: referenceSpan)
+                           referenceSpan: referenceSpan,
+                           topPadding: topPadding)
         }
     }
 
@@ -243,17 +298,22 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
 
 extension MarkdownTextView {
 
-    /// 标题结构可能变了 → 重新提取整份列表推出去。
+    /// 标题列表变了 → 重新提取整份列表，交给目录 UI 显示。
     ///
     /// 只在三个地方被调用（都在主文件里，一眼能找全）：
     /// 整篇加载 `setMarkdown`、整篇重排 `reRenderPreservingCaret`、
     /// 以及增量编辑里 `outcome.headingsChanged == true` 的情况。
+    ///
+    /// ⚠️ 「变了」不只是指标题被增删改，**标题位置被顶移**也算 ——
+    /// 在某个标题上面的正文里打字，它后面所有标题的 `sourceOffset` 都会平移。
+    /// 漏掉这一种，目录就会拿着一批过期偏移，一点就跳到正文中间
+    /// （判据在 `MarkdownDocumentStore.applyEdit` 第 9 步）。
     func publishOutlineItems() {
         guard let sink = outlineEventSink else { return }
         sink.editorDidUpdateOutline(documentStore.outlineItems)
     }
 
-    /// 光标动了 → 防抖之后把「光标所在的源码偏移」推出去。
+    /// 光标动了 → 等 0.12 秒没有新动作之后，告诉目录「光标现在在源码的第几个字」。
     ///
     /// 上报的是**源码偏移**而不是光标所在的块 id：这样协调者只要在
     /// 「按源码偏移排好序的标题数组」里二分查找就能判断归属，不需要反过来问编辑器

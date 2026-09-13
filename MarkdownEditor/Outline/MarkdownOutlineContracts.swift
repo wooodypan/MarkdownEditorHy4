@@ -17,8 +17,9 @@ protocol MarkdownOutlineDataSource: AnyObject {
 
     /// 把当前文档的完整标题列表报告给协调者。
     ///
-    /// 只在「标题结构可能变化」时调用 —— 不是每次敲键盘都调用，
-    /// 具体触发时机见 `MarkdownDocumentStore.applyEdit` 返回的 `headingsChanged`。
+    /// 只在「标题列表真的变了」时调用 —— 不是每次敲键盘都调用。判据见
+    /// `MarkdownDocumentStore.applyEdit` 返回的 `headingsChanged`，它同时覆盖
+    /// 「标题被增删改」和「标题位置被上面正文里的编辑顶移」两种情况。
     func currentOutlineItems() -> [OutlineItem]
 
     /// 请求编辑器把光标 / 视口定位到指定标题。
