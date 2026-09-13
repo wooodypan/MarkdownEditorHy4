@@ -229,6 +229,37 @@ final class MarkdownDocumentStore {
         return renderedLength
     }
 
+    /// 源码区间 → 渲染区间（查映射表；这段源码当前没有渲染字符对应时返回 nil）。
+    ///
+    /// ### 给谁用
+    /// 任务列表的复选框被点一下，要改的其实是源码里 `[x]` 那三个字符，
+    /// 而编辑管线 `applyEdit` 只认**渲染坐标**，所以需要这一步换算。
+    ///
+    /// ### 为什么不用 `renderedCaret` 拼
+    /// `renderedCaret` 是给光标用的：它会主动跳过 attachment、在块边界上做取舍，
+    /// 拼出来的长度不可靠。这里直接查映射表，取「源码落在区间内的第一个渲染字符」
+    /// 到「最后一个渲染字符」，长度才是精确的。
+    func renderedRange(forSourceRange range: NSRange) -> NSRange? {
+        for block in blocks {
+            guard let inter = block.sourceRange.intersection(range), inter.length > 0 else { continue }
+            let localStart = inter.location - block.sourceRange.location
+            let localEnd = NSMaxRange(inter) - block.sourceRange.location
+
+            var first: Int?
+            var last: Int?
+            for (index, mapping) in block.charMappings.enumerated() {
+                // 装饰字符（行尾补的换行、不占源码的竖条…）没有源码对应，跳过
+                guard !mapping.isDecoration, mapping.sourceStart >= 0, mapping.sourceLength > 0 else { continue }
+                guard mapping.sourceStart >= localStart, mapping.sourceStart < localEnd else { continue }
+                if first == nil { first = index }
+                last = index
+            }
+            guard let first, let last else { continue }
+            return NSRange(location: block.renderedRange.location + first, length: last - first + 1)
+        }
+        return nil
+    }
+
     /// 在一个块里找「源码偏移 local」对应的渲染位置
     /// - parameter skipAttachmentViews: 是否跳过图片 / 圆点这类视觉元素
     private func searchCaret(in block: MarkdownBlock, local: Int, skipAttachmentViews: Bool) -> Int? {

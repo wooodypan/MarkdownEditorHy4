@@ -87,6 +87,9 @@ struct MarkdownTheme {
     /// 同名会让代码里到处要写 `Markdown.Table`，容易看错。
     var table = TableStyle()
 
+    /// 任务列表（`- [x] xxx`）的样式
+    var taskList = TaskListStyle()
+
     // MARK: 默认样式
 
     static var `default`: MarkdownTheme {
@@ -254,6 +257,42 @@ extension MarkdownTheme {
         var cornerRadius: CGFloat = 8
         /// 表格源码文字的颜色（浅灰）
         var sourceTextColor: UIColor = .tertiaryLabel
+    }
+
+    /// 任务列表复选框的样式。
+    ///
+    /// 复选框是**真正的 UIButton**（叠在文本上的原生控件），不是画进文本流的图片，
+    /// 所以尺寸、颜色这些是 UIKit 原生的属性，不是绘制参数。
+    struct TaskListStyle {
+        /// 复选框边长（同时也是点击热区大小）
+        var checkboxSide: CGFloat = 16
+        /// 复选框和 `[x]` 之间的间距（只在「不遮盖」模式下生效）
+        var checkboxGap: CGFloat = 3
+        /// 勾选后的填充色
+        var checkedColor: UIColor = .systemGreen
+        /// 未勾选时的边框色
+        var uncheckedBorderColor: UIColor = .separator
+        /// 未勾选时的底色。
+        ///
+        /// 「不遮盖」模式下用透明（复选框就浮在源码旁边，不该挖个洞）；
+        /// 「遮盖」模式下必须是**不透明**的，否则底下的 `[x]` 会透出来。
+        var uncheckedFillColor: UIColor = .clear
+        /// 勾选后那个对勾的颜色
+        var checkmarkColor: UIColor = .white
+        /// 边框粗细
+        var borderWidth: CGFloat = 1.5
+        /// 圆角
+        var cornerRadius: CGFloat = 4
+
+        /// **复选框要不要盖住 `[x]` / `[ ]` 这三个字符**。
+        ///
+        /// - `true`（默认）：复选框正好盖在 `[x]` 上，源码字符仍然在文本里
+        ///   （复制、编辑都不受影响），只是视觉上被挡住 —— Bear / Obsidian 的常见样子。
+        /// - `false`：复选框画在 `[x]` **左边**，`[x]` 照常显示 ——
+        ///   源码看得更全，但实测复选框会挤到列表标记 `- ` 的位置，视觉比较挤。
+        ///
+        /// 想换效果只改这一个值即可，详见 `MarkdownTextView.positionCheckboxes()`。
+        var coversCheckboxLiteral: Bool = true
     }
 }
 

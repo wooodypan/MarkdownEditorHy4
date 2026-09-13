@@ -70,6 +70,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private(set) var isApplyingModelChange = false
     /// 上一次渲染时用的容器宽度，窗口尺寸变了要整篇重排
     private var renderedWidth: CGFloat = 0
+    /// 程序自己发起的编辑正在进行（比如点复选框）。
+    ///
+    /// 这种编辑**不是系统记的**，`applyEdit` 里 disable/enable undo 的配对在这种时机
+    /// 会踩 `_UITextUndoManager invalid state` 崩溃（和折叠功能是同一个坑，
+    /// 详见 toggleCollapse 里的长注释），所以要跳过那对调用。
+    private var isProgrammaticEdit = false
     /// 有一整篇内容等着写进 textStorage（真正的写入要等到布局阶段）
     private var pendingFullReplace = false
     /// 输入法组合还没结束，等结束（markedTextRange == nil）再补一次排版
@@ -106,6 +112,13 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 已经算好的竖条矩形（**文档坐标系**，滚动时只需整体平移）
     /// `id` 是引用层的唯一标识，`level` 是嵌套深度（0 = 最外层）
     private var quoteBarFrames: [(id: Int, level: Int, frame: CGRect)] = []
+
+    // MARK: 任务列表复选框（浮在 `[x]` / `[ ]` 旁边）
+
+    /// 复选框所在的控件层，加在最上层，只让按钮吃点击
+    private let checkboxLayer = CheckboxLayer()
+    /// 已经算好的 `[x]` / `[ ]` 三个字符的矩形（**文档坐标系**，滚动时只需整体平移）
+    private var checkboxFrames: [(info: CheckboxInfo, frame: CGRect)] = []
 
     // MARK: 大纲跳转（见 MarkdownTextView+Outline.swift）
 
@@ -278,11 +291,13 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         insertSubview(quoteBarLayer, aboveSubview: codeBlockBackgroundLayer)
         quoteBarLayer.isUserInteractionEnabled = false
         addSubview(codeBlockControlLayer)
+        addSubview(checkboxLayer)
 
         // 滚动时只做平移，不重算 —— 重算要走 TextKit 布局，滚动中做太贵
         contentOffsetObservation = observe(\.contentOffset, options: []) { [weak self] _, _ in
             self?.positionCodeBlockDecorations()
             self?.positionQuoteBars()
+            self?.positionCheckboxes()
             self?.positionFoldButtons()
             // TextKit 排版比滚动事件慢半拍：滚动过程中刚进 viewport 的 fragment
             // 可能还是估算值（三角被跳过）。停一下再补一次，三角就不会「滚过去才冒出来」。
@@ -298,6 +313,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         guard needsCodeBlockRefresh || signature != lastCodeBlockSignature else {
             positionCodeBlockDecorations()
             positionQuoteBars()
+            positionCheckboxes()
             return
         }
         lastCodeBlockSignature = signature
@@ -308,6 +324,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private func refreshCodeBlockDecorations() {
         let (frames, _) = computeCodeBlockFrames()
         let (bars, _) = computeQuoteBarFrames()
+        let (boxes, _) = computeCheckboxFrames()
 
         // ### 为什么要对比上一轮结果（TextKit 2 的坑，别删）
         // TextKit 2 是「viewport 按需排版」：刚加载、刚滚完的时候，屏幕外 fragment 的
@@ -317,11 +334,15 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         let stable = frames.count == codeBlockFrames.count &&
             zip(frames, codeBlockFrames).allSatisfy { $0.info === $1.info && $0.frame == $1.frame } &&
             bars.count == quoteBarFrames.count &&
-            zip(bars, quoteBarFrames).allSatisfy { $0.id == $1.id && $0.level == $1.level && $0.frame == $1.frame }
+            zip(bars, quoteBarFrames).allSatisfy { $0.id == $1.id && $0.level == $1.level && $0.frame == $1.frame } &&
+            boxes.count == checkboxFrames.count &&
+            zip(boxes, checkboxFrames).allSatisfy { $0.info === $1.info && $0.frame == $1.frame }
         codeBlockFrames = frames
         quoteBarFrames = bars
+        checkboxFrames = boxes
         positionCodeBlockDecorations()
         positionQuoteBars()
+        positionCheckboxes()
 
         if !stable, codeBlockRetryCount < 30 {
             codeBlockRetryCount += 1
@@ -614,6 +635,140 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         }
     }
 
+    // MARK: - 任务列表复选框
+
+    /// 算出每个 `[x]` / `[ ]` 在**文档坐标系**下占的矩形（就是那三个字符的字面范围）。
+    ///
+    /// ### 和代码块背景、引用竖条的差别
+    /// 那两个要的是「整段的纵向范围」，合并 layout fragment 的矩形就够了；
+    /// 复选框要的是**某三个字符的横向范围**，行级的 fragment 给不了（一个 fragment 就是一整行），
+    /// 所以这里走 TextKit 官方的 `enumerateTextSegments`——它能精确到字符级。
+    ///
+    /// - returns: `(boxes, pending)`。坐标和 `computeCodeBlockFrames` 同一套：
+    ///           TextKit 给的矩形原点在 textContainer 左上角，画到 textView 里要补回 inset。
+    ///           注意：不开 `private` 是为了让单元测试能直接调它
+    func computeCheckboxFrames() -> (boxes: [(info: CheckboxInfo, frame: CGRect)], pending: Bool) {
+        guard let layoutManager = textLayoutManager,
+              let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
+              bounds.width > 1 else { return ([], false) }
+
+        // 1) 扫出所有打了 `.markdownCheckbox` 标记的区间
+        var marked: [(NSRange, CheckboxInfo)] = []
+        let full = NSRange(location: 0, length: textStorage.length)
+        textStorage.enumerateAttribute(.markdownCheckbox, in: full, options: []) { value, range, _ in
+            guard let info = value as? CheckboxInfo else { return }
+            marked.append((range, info))
+        }
+        guard !marked.isEmpty else { return ([], false) }
+
+        let documentStart = contentStorage.documentRange.location
+        var boxes: [(info: CheckboxInfo, frame: CGRect)] = []
+        boxes.reserveCapacity(marked.count)
+
+        for (range, info) in marked {
+            guard let startLocation = contentStorage.location(documentStart, offsetBy: range.location),
+                  let endLocation = contentStorage.location(documentStart, offsetBy: NSMaxRange(range)),
+                  let textRange = NSTextRange(location: startLocation, end: endLocation) else { continue }
+
+            // 2) 字符级矩形：把这三个字符覆盖到的所有 segment 求并集。
+            //    正常情况下就是一行里的一个小矩形；万一 `[x]` 被折到两行（极窄窗口），
+            //    并集会变成一个跨行的大矩形，此时按钮仍然能点，只是位置偏一点，不崩
+            var rect: CGRect?
+            layoutManager.enumerateTextSegments(in: textRange, type: .standard, options: []) { _, segment, _, _ in
+                guard !segment.isNull else { return true }
+                rect = rect.map { $0.union(segment) } ?? segment
+                return true
+            }
+            guard let rect else { continue }
+
+            // 3) 坐标系换算（推导见 computeCodeBlockFrames 里的注释）：
+            //    TextKit 的矩形不含 textContainerInset，画在 textView 里要补回来
+            boxes.append((info, CGRect(x: rect.minX + textContainerInset.left,
+                                       y: rect.minY + textContainerInset.top,
+                                       width: rect.width,
+                                       height: rect.height)))
+        }
+        return (boxes, false)
+    }
+
+    /// 把复选框摆到屏幕上（和 `positionQuoteBars` 同一套平移逻辑）
+    private func positionCheckboxes() {
+        checkboxLayer.frame = bounds
+        // 复选框数量不多，每次重建比维护复用池省心
+        checkboxLayer.subviews.forEach { $0.removeFromSuperview() }
+
+        let theme = renderer.theme
+        let style = theme.taskList
+        let side = style.checkboxSide
+        // 可见范围，上下各留 200pt 余量，滚快一点也不会闪出空白
+        let visible = CGRect(x: 0, y: -200, width: bounds.width, height: bounds.height + 400)
+
+        for entry in checkboxFrames {
+            let literal = entry.frame
+            let buttonFrame: CGRect
+            if style.coversCheckboxLiteral {
+                // 遮盖模式（默认）：方框压在 `[x]` 正中，把它整个挡住（底色不透明）。
+                // 宽度取 max(方框边长, 字面宽度) —— `[X]` 比方框宽（实测 22.7pt vs 16pt），
+                // 不拉宽的话字的边角会从方框旁边露出来
+                let width = max(side, literal.width)
+                buttonFrame = CGRect(x: literal.midX - width / 2,
+                                     y: literal.midY - side / 2,
+                                     width: width,
+                                     height: side)
+            } else {
+                // 并列模式：方框画在 `[x]` 左边，源码照常露出来。
+                // 实测它会把列表标记 `- ` 压在身下（复选框和标记挤在同一个位置），
+                // 视觉比较挤 —— 这就是主题里 `coversCheckboxLiteral` 开关存在的原因
+                buttonFrame = CGRect(x: literal.minX - side - style.checkboxGap,
+                                     y: literal.midY - side / 2,
+                                     width: side,
+                                     height: side)
+            }
+
+            // 文档坐标 → 本层坐标：减掉滚动偏移
+            var frame = buttonFrame
+            frame.origin.x -= contentOffset.x
+            frame.origin.y -= contentOffset.y
+            guard frame.intersects(visible) else { continue }
+
+            let button = MarkdownCheckboxButton(side: side)
+            button.frame = frame
+            button.checkbox = entry.info
+            button.apply(isChecked: entry.info.isChecked,
+                         theme: theme,
+                         covers: style.coversCheckboxLiteral)
+            button.addTarget(self, action: #selector(checkboxTapped(_:)), for: .touchUpInside)
+            checkboxLayer.addSubview(button)
+        }
+    }
+
+    @objc private func checkboxTapped(_ sender: MarkdownCheckboxButton) {
+        guard let info = sender.checkbox else { return }
+        toggleCheckbox(info)
+        // 立刻触发一轮布局：applyEdit 换掉的那一块有了全新的 CheckboxInfo，
+        // 重算矩形 + 重摆按钮后，勾选状态马上从旧图标换成新的（不等下一个 runloop）
+        setNeedsLayout()
+        layoutIfNeeded()
+    }
+
+    /// 切换一个任务列表项的勾选状态：把源码里的 `[x]` 换成 `[ ]`（或反过来）。
+    ///
+    /// ### 为什么走 `applyEdit` 而不是自己改源码
+    /// 走标准编辑管线有三个白拿的好处：**撤销 / 重做自动生效**、只重解析重渲染
+    /// 受影响的那一块（成本很小）、渲染结果和模型永远一致（不会出现「按钮显示已勾选、
+    /// 源码还是 `[ ]`」这种两套状态）。
+    ///
+    /// - parameter info: 被点到的复选框（它带着 `[` 在整篇源码里的偏移）
+    func toggleCheckbox(_ info: CheckboxInfo) {
+        let sourceRange = NSRange(location: info.sourceStart, length: 3)
+        guard let rendered = documentStore.renderedRange(forSourceRange: sourceRange) else { return }
+        isProgrammaticEdit = true
+        defer { isProgrammaticEdit = false }
+        applyEdit(renderedRange: rendered,
+                  replacementText: info.isChecked ? "[ ]" : "[x]",
+                  alreadyAppliedToTextStorage: false)
+    }
+
     // MARK: - 折叠 / 展开（顶层块左侧的小三角）
 
     /// 铺好三角所在的控件层（最上层，只有按钮吃点击）
@@ -630,6 +785,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.positionFoldButtons()
+            self.positionCheckboxes()
             // 滚动停下后 fragment 才排实（滚动中屏幕外的还是估算值），
             // 代码块背景矩形要重算一遍，不然一直拿着首帧的错坐标画
             self.refreshCodeBlockDecorations()
@@ -869,8 +1025,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
                                   length: min(rawRange.length, storageLength - min(rawRange.location, storageLength)))
 
         isApplyingModelChange = true
-        // 不注册 undo：编辑动作已经由系统记录过一次了，再记一次会让撤销栈错乱
-        undoManager?.disableUndoRegistration()
+        // 不注册 undo：编辑动作已经由系统记录过一次了，再记一次会让撤销栈错乱。
+        // （程序自己发起的编辑没有「系统刚记过」这个时机，连 disable/enable 都不能碰，
+        //  否则 _UITextUndoManager 抛 invalid state —— 见 isProgrammaticEdit 的注释）
+        if !isProgrammaticEdit {
+            undoManager?.disableUndoRegistration()
+        }
 
         if let contentStorage = textLayoutManager?.textContentManager as? NSTextContentStorage {
             // TextKit 2 的事务接口：一次提交，TextKit 自己算最小失效区域做增量重排
@@ -881,7 +1041,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             backingStorage.replaceCharacters(in: targetRange, with: outcome.newContent)
         }
 
-        undoManager?.enableUndoRegistration()
+        if !isProgrammaticEdit {
+            undoManager?.enableUndoRegistration()
+        }
         isApplyingModelChange = false
 
         lastSyncedString = documentStore.renderedString

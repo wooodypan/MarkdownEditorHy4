@@ -26,6 +26,13 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
     private static let jumpStepDelay: TimeInterval = 0.06
     /// 认为「已经到位」的像素误差（点）。小于它就当已经停好了
     private static let jumpSettleTolerance: CGFloat = 0.5
+    /// 「目标已经在视口边上」的判定松紧度（字符）。
+    ///
+    /// 视口的渲染范围本身带一点余量，而且读数有可能比滚动慢半拍 ——
+    /// 实测「目标差 9 个字符（约半行）没落进范围」就被判成「还没排版」，
+    /// 于是退回按字符密度粗调，拿着过期读数一轮一轮空转到轮次耗尽。
+    /// 允许差这么一点点，正是为了避免这种边界误判。
+    private static let jumpNearViewportSlack = 16
 
     /// 当前文档的完整标题列表（H1-H6）。
     ///
@@ -45,6 +52,16 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
         selectedRange = NSRange(location: caret, length: 0)
         // 让光标真正落位，用户跳过去就能直接开始改
         becomeFirstResponder()
+
+        // 主动把光标报给目录。
+        //
+        // ### 为什么不能只等 UITextView 自己通知
+        // 改 `selectedRange` 一般会触发 delegate 的 `textViewDidChangeSelection`，
+        // 于是「光标动了 → 上报」这条链本来是被动生效的。但实测这个回调**不保证每次都来**
+        // （受第一响应者状态影响，单元测试里尤其明显），一漏掉目录高亮就停在旧位置不动
+        // —— 表现为「点了目录，光标过去了，但高亮那一行没跟着走」。
+        // 主动报一次，这条路就不再依赖 UIKit 的心情了。
+        publishOutlineCursor()
 
         // 一次点击内部要滚好几轮（原因见下面的注释），期间用户可能又点了别的标题，
         // 用序号把上一轮的残余步骤作废，免得两个目标互相拉扯
@@ -71,7 +88,7 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
     ///   「这一屏渲染的是哪一段文本」，滚到哪儿就报哪儿，不依赖任何估算。
     ///   一屏横跨了 n 个字符、高度是 h，那么每个字符大约占 h/n 点，按这个换算步长。
     ///
-    /// **精细对齐**：一旦目标字符落进了视口渲染范围（`[viewport.start, viewport.end)`），
+    /// **精细对齐**：一旦目标字符落在视口渲染范围**附近**（详见 `jumpNearViewportSlack`），
     ///   说明它**已经真的排过版了**，此刻 `caretRect` 才是可信的，于是直接用像素算：
     ///   想让光标停在「屏幕上沿往下 `jumpTopPadding`」处，就把滚动位置设成
     ///   `caretRect.minY - jumpTopPadding`。
@@ -100,12 +117,14 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
         let span = referenceSpan == 0 ? rowSpan : referenceSpan
         let gap = viewport.start - targetRendered
 
-        NSLog("[STEP] token=%d round=%d 视口=%d..%d 目标=%d gap=%d offset=%.1f",
-              token, round, viewport.start, viewport.end, targetRendered, gap, contentOffset.y)
+        // 目标算不算「已经排过版」？落在渲染范围里算，差一丁点（约半行）也算 ——
+        // 理由见 jumpNearViewportSlack 的注释
+        let slack = max(Self.jumpNearViewportSlack, rowSpan / 16)
+        let targetIsLaidOut = targetRendered >= viewport.start - slack
+            && targetRendered < viewport.end + slack
 
         // ===== 阶段一：精细对齐（目标已经排过版，几何数据可信）=====
-        if viewport.start <= targetRendered && targetRendered < viewport.end,
-           let caretFrame = caretFrame(atRenderedOffset: targetRendered) {
+        if targetIsLaidOut, let caretFrame = caretFrame(atRenderedOffset: targetRendered) {
             // caretRect 和 contentOffset 是同一套坐标系（textView 内容坐标，含 inset），
             // 所以「光标所在行顶部 - 想要的内边距」直接就等于目标 contentOffset
             let desired = min(max(0, caretFrame.minY - Self.jumpTopPadding),
@@ -161,7 +180,8 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
     ///
     /// ⚠️ 只有目标**已经排过版**时这个值才可信 —— 屏幕外没排过版的区域，
     /// TextKit 2 返回的是估算值（实测一个真实位置 2783 的标题，它一直报 1817）。
-    /// 所以调用方必须先用 `renderedRangeInViewport()` 确认目标落在视口渲染范围里。
+    /// 所以调用方必须先用 `renderedRangeInViewport()` 确认目标就在视口渲染范围附近
+    /// （判定见 `jumpNearViewportSlack`）。
     private func caretFrame(atRenderedOffset offset: Int) -> CGRect? {
         guard let position = self.position(from: beginningOfDocument, offset: offset) else {
             return nil

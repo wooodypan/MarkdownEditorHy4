@@ -475,10 +475,16 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                 // 圆点后面弱化显示 `- ` 源码：和有序列表的 `1. ` 视觉对称，又能看到真实语法。
                 // 这 `- ` 就是源码本身（真实映射），所以光标停在它后面输入完全正常。
                 if theme.showsSourceHints {
+                    let hintStart = out.text.length
                     out.append(.sourceHint(markerText,
                                            sourceStart: markerRange.location,
                                            isSyntaxMarker: true,
                                            attributes: theme.markerAttributes))
+                    markCheckboxLiteral(in: &out,
+                                        hintStart: hintStart,
+                                        markerText: markerText,
+                                        markerRange: markerRange,
+                                        item: item)
                 }
             }
         }
@@ -499,6 +505,54 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                                           contentIndent: contentIndent)
         ])
         return out
+    }
+
+    // MARK: 任务列表（`- [x] xxx`）
+
+    /// 给列表标记里的 `[x]` / `[ ]` 这三个字符打上 `.markdownCheckbox` 标记。
+    ///
+    /// ### 为什么只在源码提示文字上打标记
+    /// 这三个字符就是源码本身，本来就被 `sourceHint` 显示着（弱化灰色）。
+    /// 在它上面挂一个自定义属性，**一个字符都不用增删** ——
+    /// 「全选复制 === 源文件」这条不变量天然不受影响，UI 层扫到标记就在旁边放按钮。
+    ///
+    /// ### 为什么不用 `NSTextAttachmentViewProvider`（和 doc/任务列表渲染方案.md 的差异）
+    /// 方案建议用 view provider 挂真正的 view，但本项目在图片上实测过它的坑：
+    /// 整篇替换内容后 TextKit 2 会把 attachment 的 view 摘掉、却**不再回调 `loadView()`**，
+    /// view 就永久消失了。所以复选框走的是和折叠三角同一条路 —— 文本流里只留标记，
+    /// 真正的按钮由 UI 层按字符矩形**叠**上去（见 `MarkdownTextView.positionCheckboxes()`）。
+    private func markCheckboxLiteral(in out: inout RenderedFragment,
+                                     hintStart: Int,
+                                     markerText: String,
+                                     markerRange: NSRange,
+                                     item: ListItem) {
+        guard let checkbox = item.checkbox,
+              let literal = checkboxLiteralRange(in: markerText, markerRange: markerRange) else { return }
+
+        let info = CheckboxInfo(sourceStart: blockOrigin + literal.location,
+                                isChecked: checkbox == .checked)
+        // hint 的第 0 个字符对应 markerRange.location，所以块内偏移直接平移过去就行
+        let offsetInHint = literal.location - markerRange.location
+        let range = NSRange(location: hintStart + offsetInHint, length: literal.length)
+        guard NSMaxRange(range) <= out.text.length else { return }
+        out.text.addAttribute(.markdownCheckbox, value: info, range: range)
+    }
+
+    /// 在列表标记文本（`- [x] ` / `1. [ ] `）里找出 `[x]` / `[ ]` 这三个字符的源码范围。
+    ///
+    /// 标记文本的前导部分可能是 `- `、`* `、`1. `、`10. ` 等各种长度，
+    /// 所以不能写死偏移量，要真的去找那个 `[`。
+    private func checkboxLiteralRange(in markerText: String, markerRange: NSRange) -> NSRange? {
+        let nsText = markerText as NSString
+        // 从左往右扫到第一个 `[`
+        for offset in 0..<nsText.length {
+            guard nsText.character(at: offset) == 0x5B /* [ */ else { continue }
+            // 后面至少还得有「一个状态字符 + 一个 ]」
+            guard offset + 2 < nsText.length,
+                  nsText.character(at: offset + 2) == 0x5D /* ] */ else { return nil }
+            return NSRange(location: markerRange.location + offset, length: 3)
+        }
+        return nil
     }
 
     // MARK: 折叠（顶层块左侧的展开 / 折叠按钮）

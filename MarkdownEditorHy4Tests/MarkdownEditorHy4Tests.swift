@@ -734,6 +734,135 @@ final class MarkdownEditorHy4Tests: XCTestCase {
                           "两条竖条在竖直方向上不该有重叠 —— 重叠说明 ID 撞车被合并了")
     }
 
+    // MARK: - 任务列表复选框
+
+    /// 扫出 textStorage 里所有复选框标记的（区间, 信息）
+    private func checkboxMarkedRanges(in textView: MarkdownTextView) -> [(NSRange, CheckboxInfo)] {
+        var result: [(NSRange, CheckboxInfo)] = []
+        textView.textStorage.enumerateAttribute(.markdownCheckbox,
+                                                in: NSRange(location: 0, length: textView.textStorage.length),
+                                                options: []) { value, range, _ in
+            guard let info = value as? CheckboxInfo else { return }
+            result.append((range, info))
+        }
+        return result
+    }
+
+    /// `[x]` / `[ ]` 三个字符必须带着正确的标记，且**字符本身原样保留在文本里**。
+    ///
+    /// ### 防的是什么回归
+    /// 复选框是「叠在源码上」的按钮，不是替换掉源码 —— 这三个字符一旦被删掉或改成
+    /// 装饰字符，「全选复制 === 源文件」就破了。
+    func testTaskListCheckboxMarkedOnLiteralText() {
+        let tv = makeEditor("""
+        - [x] 已完成
+        - [ ] 未完成
+        """)
+        let marked = checkboxMarkedRanges(in: tv)
+        XCTAssertEqual(marked.count, 2, "两个任务项应该有两个复选框标记")
+
+        // 字符还在原位
+        XCTAssertEqual(tv.textStorage.string, "￼- [x] 已完成⏎￼- [ ] 未完成"
+            .replacingOccurrences(of: "⏎", with: "\n")
+            .replacingOccurrences(of: "￼", with: "\u{FFFC}"))
+
+        // 勾选状态识别正确
+        XCTAssertEqual(marked[0].1.isChecked, true, "`[x]` 应该识别为已勾选")
+        XCTAssertEqual(marked[1].1.isChecked, false, "`[ ]` 应该识别为未勾选")
+
+        // sourceStart 必须精确指向 `[`（点复选框时靠它定位要改的三个字符）
+        let source = tv.markdownSource as NSString
+        XCTAssertEqual(source.substring(with: NSRange(location: marked[0].1.sourceStart, length: 3)), "[x]")
+        XCTAssertEqual(source.substring(with: NSRange(location: marked[1].1.sourceStart, length: 3)), "[ ]")
+    }
+
+    /// 点一下复选框 = 一次标准源码编辑：`[ ]` ↔ `[x]`，再点一次回到原样。
+    func testCheckboxToggleRewritesSourceBothWays() {
+        let original = "- [ ] 未完成\n"
+        let tv = makeEditor(original)
+
+        guard let info = checkboxMarkedRanges(in: tv).first?.1 else {
+            return XCTFail("没有找到复选框标记")
+        }
+        tv.toggleCheckbox(info)
+        XCTAssertEqual(tv.markdownSource, "- [x] 未完成\n", "点击后源码里的 `[ ]` 应该变成 `[x]`")
+
+        // 切换之后块会重新渲染，标记是全新的实例 —— 用新实例再点一次切回去
+        guard let reloaded = checkboxMarkedRanges(in: tv).first?.1 else {
+            return XCTFail("切换之后复选框标记丢了")
+        }
+        XCTAssertEqual(reloaded.isChecked, true)
+        tv.toggleCheckbox(reloaded)
+        XCTAssertEqual(tv.markdownSource, original, "再点一次应该切回 `[ ]`，源码一字不差")
+    }
+
+    /// 大写 `[X]` 按 GFM 也算已勾选；点一下取消勾选（写成 `[ ]`）。
+    func testUppercaseXIsCheckedAndTogglesOff() {
+        let tv = makeEditor("- [X] 大写也算完成\n")
+        guard let info = checkboxMarkedRanges(in: tv).first?.1 else {
+            return XCTFail("没有找到复选框标记")
+        }
+        XCTAssertEqual(info.isChecked, true)
+        tv.toggleCheckbox(info)
+        XCTAssertEqual(tv.markdownSource, "- [ ] 大写也算完成\n")
+    }
+
+    /// 复选框矩形必须精确罩住 `[x]` 三个字符 —— 用官方 `caretRect` 做基准对照。
+    ///
+    /// ### 防的是什么回归
+    /// `enumerateTextSegments` 给的矩形和 fragment 一样，原点在 textContainer 左上角
+    /// （不含 textContainerInset）。忘了补 inset 的话按钮会整体偏移一个 inset。
+    func testCheckboxFrameAlignsWithCaret() {
+        let tv = makeEditor("- [x] 已完成\n- [ ] 未完成\n")
+        let (boxes, _) = tv.computeCheckboxFrames()
+        XCTAssertEqual(boxes.count, 2)
+
+        for (info, frame) in boxes {
+            guard let rendered = tv.documentStore.renderedRange(forSourceRange:
+                        NSRange(location: info.sourceStart, length: 3)),
+                  let pos = tv.position(from: tv.beginningOfDocument, offset: rendered.location) else {
+                continue
+            }
+            let caret = tv.caretRect(for: pos)
+            XCTAssertEqual(frame.minX, caret.minX, accuracy: 2,
+                           "`[` 字符的 x 应该和光标矩形对齐（差值大了说明 inset 换算又丢了）")
+            XCTAssertEqual(frame.minY, caret.minY, accuracy: 2,
+                           "y 没对齐 —— 八成是忘了补 textContainerInset.top")
+            XCTAssertGreaterThan(frame.width, 8, "矩形宽度不该是 0 —— segment 没算出来")
+        }
+    }
+
+    /// 嵌套任务项也要有自己的复选框，且源码定位各自正确。
+    func testNestedTaskListGetsOwnCheckbox() {
+        let tv = makeEditor("""
+        - [x] 父任务
+          - [ ] 子任务
+        """)
+        let marked = checkboxMarkedRanges(in: tv)
+        XCTAssertEqual(marked.count, 2, "嵌套项也要有自己的复选框")
+
+        let source = tv.markdownSource as NSString
+        XCTAssertEqual(source.substring(with: NSRange(location: marked[0].1.sourceStart, length: 3)), "[x]")
+        XCTAssertEqual(source.substring(with: NSRange(location: marked[1].1.sourceStart, length: 3)), "[ ]")
+
+        // 嵌套项的 `[` 在源码里必须指向子任务那一行（`- [x] 父任务\n  ` 之后第 3 个字符）
+        XCTAssertEqual(marked[1].1.sourceStart, 14, "子任务的 `[` 应该在偏移 14（前 10 个字符 + 两个缩进空格 + 2）")
+    }
+
+    /// 任务列表文档「全选复制」必须还原源文件（复选框 UI 不许偷走任何字符）
+    func testTaskListSelectAllCopiesSource() {
+        let source = "- [x] 已完成\n- [ ] 未完成\n  - [X] 嵌套\n"
+        let store = makeStore(source)
+        XCTAssertEqual(store.sourceText(forRenderedRange: fullRenderedRange(store)), source,
+                       firstDifference(source, store.sourceText(forRenderedRange: fullRenderedRange(store))))
+    }
+
+    /// 遮盖模式必须是默认值 —— 上次截图对比过，并列模式会把列表标记 `- ` 压在身下。
+    /// 如果要改默认值，先更新这条测试和 MarkdownTheme 里的注释。
+    func testCheckboxCoversLiteralByDefault() {
+        XCTAssertTrue(MarkdownTheme.default.taskList.coversCheckboxLiteral)
+    }
+
     // MARK: - 代码块背景（文档坐标修正）
 
     /// 加载测试用例文档（两个代码块，第二个很长、超出好几屏）
