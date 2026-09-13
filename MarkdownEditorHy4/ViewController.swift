@@ -37,6 +37,8 @@ final class ViewController: UIViewController {
     private var isNewDraft = false
     /// 当前弹出的文件选择器是不是「另存为」（导出）用途，回调里要靠它区分两种面板
     private var isExportingDocument = false
+    /// 当前弹出的文件选择器是不是「导出成图片」用途（Mac），和上面那个互斥
+    private var isExportingImage = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -185,6 +187,10 @@ final class ViewController: UIViewController {
             UIAction(title: "校验", image: UIImage(systemName: "checkmark.seal")) { [weak self] _ in
                 // 全选复制，比对复制出来的文本和源码是否逐字符一致
                 self?.verifyRoundTrip()
+            },
+            UIAction(title: "导出成图片", image: UIImage(systemName: "photo.on.rectangle")) { [weak self] _ in
+                // 把编辑器整篇内容渲染成一张长图，弹系统分享面板
+                self?.exportEditorAsImage()
             }
         ]
         return UIMenu(children: actions)
@@ -507,6 +513,67 @@ final class ViewController: UIViewController {
         dismiss(animated: true)
     }
 
+    /// 「导出成图片」：编辑器整篇内容 → 一张长图。
+    /// 渲染细节（撑大视口、逐段画文字那些）都封装在 MarkdownTextView 里，这里只管「导出到哪」：
+    ///   - Mac Catalyst：弹系统「存储」面板，直接落到用户选的本地文件夹
+    ///   - iOS：弹系统分享面板（存相册 / AirDrop / 存到「文件」都行）
+    private func exportEditorAsImage() {
+        guard let image = editor.renderFullContentImage() else {
+            showAlert(title: "导出失败", message: "没有可导出的内容。")
+            return
+        }
+        #if targetEnvironment(macCatalyst)
+        saveImageToFolder(image)
+        #else
+        presentShareSheet(for: image)
+        #endif
+    }
+
+    #if targetEnvironment(macCatalyst)
+    /// Mac 专属：把长图存成 PNG，落到用户选的本地文件夹。
+    ///
+    /// ### 为什么不用 NSSavePanel
+    /// Catalyst 把它标记成 unavailable（Swift 编译器直接拦）。等效替代是
+    /// `UIDocumentPickerViewController(forExporting:asCopy:)` —— 项目里「另存为」
+    /// 用的同一块面板，在 Mac 上呈现的就是原生风格的存储对话框（选文件夹 + 改文件名）。
+    private func saveImageToFolder(_ image: UIImage) {
+        guard let pngData = image.pngData() else {
+            showAlert(title: "导出失败", message: "图片编码成 PNG 失败。")
+            return
+        }
+        flashStatus("已生成图片 \(Int(image.size.width))×\(Int(image.size.height))，请选择存储位置")
+
+        // 导出面板要求给一个真实文件：先写进临时目录，面板再把副本复制到用户选的位置。
+        // 默认文件名跟文档同名：notes.md → notes.png
+        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".png"
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedName)
+        do {
+            try pngData.write(to: tempURL)
+        } catch {
+            showAlert(title: "导出失败", message: error.localizedDescription)
+            return
+        }
+
+        // 面板回调里要靠这个标记区分「图片导出」和「另存为 markdown」（见 delegate）
+        isExportingImage = true
+        let picker = UIDocumentPickerViewController(forExporting: [tempURL], asCopy: true)
+        picker.delegate = self
+        present(picker, animated: true)
+    }
+    #else
+    /// iOS：系统分享面板，存相册 / AirDrop / 存到「文件」都走这里
+    private func presentShareSheet(for image: UIImage) {
+        flashStatus("已生成图片 \(Int(image.size.width))×\(Int(image.size.height))，正在打开分享面板")
+        let activity = UIActivityViewController(activityItems: [image], applicationActivities: nil)
+        // iPad 上分享面板必须以 popover 形式出现，得给个锚点；iPhone 用不上这条，留着不碍事
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = menuButton
+            popover.sourceRect = menuButton.bounds
+        }
+        present(activity, animated: true)
+    }
+    #endif
+
     // MARK: 键盘避让
 
     private func observeKeyboard() {
@@ -564,11 +631,15 @@ final class ViewController: UIViewController {
 
 extension ViewController: UIDocumentPickerDelegate {
 
-    /// 用户挑完了（打开：挑中的文件；另存为：挑中的保存位置）
+    /// 用户挑完了（打开：挑中的文件；另存为/导出图片：挑中的保存位置）
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
 
-        if isExportingDocument {
+        if isExportingImage {
+            // 「导出成图片」：系统已经把 PNG 副本复制到这个位置了，提示一下就完事
+            isExportingImage = false
+            flashStatus("图片已存储到 \(url.deletingLastPathComponent().path)")
+        } else if isExportingDocument {
             // 「另存为」：系统已经把临时文件复制到这个位置了，把它记成当前文件
             isExportingDocument = false
             isNewDraft = false
@@ -586,5 +657,6 @@ extension ViewController: UIDocumentPickerDelegate {
     /// 用户点了取消：什么都不改，保持原样，顺手把导出标记清掉
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         isExportingDocument = false
+        isExportingImage = false
     }
 }

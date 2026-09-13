@@ -1125,6 +1125,65 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertEqual(bodyColor, theme.quoteTextColor,
                        "引用正文应该用 quoteTextColor，实际：\(String(describing: bodyColor))")
     }
+
+    /// 「导出成图片」的核心保证：截出来的图必须覆盖**整篇内容**，而不是只有屏幕上可见的那一屏
+    func testFullContentImageCoversWholeDocument() {
+        // 视口故意开得很小（300x400），文档内容远超一屏
+        let editor = MarkdownTextView()
+        editor.frame = CGRect(x: 0, y: 0, width: 300, height: 400)
+        // 纯文本文档撑高度，不掺图片（图片是异步加载的，时序不好控）
+        let long = (1...80).map { "第 \($0) 段：这是一段用来撑高度的普通文本。" }
+            .joined(separator: "\n\n")
+        editor.setMarkdown(long)
+        editor.layoutIfNeeded()
+
+        guard let image = editor.renderFullContentImage() else {
+            return XCTFail("导出长图返回了 nil")
+        }
+
+        // 像素高度要明显超过 400pt 的视口，说明屏幕外的内容也被画进去了
+        let pixelHeight = image.size.height * image.scale
+        XCTAssertGreaterThan(pixelHeight, 400, "导出的图只有 \(Int(pixelHeight))px，没覆盖到全文")
+
+        // 宽度应该和内容宽度一致（只截编辑器，不带左右留白差异）
+        XCTAssertEqual(image.size.width, editor.contentSize.width, accuracy: 2,
+                       "导出宽度 \(image.size.width) 和内容宽度 \(editor.contentSize.width) 对不上")
+
+        // 关键回归：原视口以下不能是纯白（曾踩过坑 —— UITextView 的 layer 缓存只有
+        // 画过的部分，直接 layer.render 导出时屏幕外全是白底）。取文档中段采样验墨
+        let sampleY = max(500, image.size.height * 0.7)
+        XCTAssertTrue(bandHasInk(image, yPoint: sampleY, heightPoint: 80),
+                      "图片 \(Int(sampleY))pt 以下采样带全是白底，屏幕外内容没有真正渲染出来")
+    }
+
+    /// 从图片里裁一条横带，降采样后看有没有「墨」（明显暗于白底的像素）。
+    /// 纯背景/纯白返回 false；只要有文字或装饰就算 true
+    private func bandHasInk(_ image: UIImage, yPoint: CGFloat, heightPoint: CGFloat) -> Bool {
+        guard let cg = image.cgImage else { return false }
+        let scale = image.scale
+        let pixelRect = CGRect(x: 0, y: yPoint * scale,
+                               width: CGFloat(cg.width), height: heightPoint * scale).integral
+        guard let cropped = cg.cropping(to: pixelRect) else { return false }
+
+        // 降采样到 64x8 再读像素，够判断「有没有墨」且不怕行间空隙
+        let sampleWidth = 64
+        let sampleHeight = 8
+        var pixels = [UInt8](repeating: 255, count: sampleWidth * sampleHeight * 4)
+        guard let ctx = CGContext(data: &pixels,
+                                  width: sampleWidth,
+                                  height: sampleHeight,
+                                  bitsPerComponent: 8,
+                                  bytesPerRow: sampleWidth * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        ctx.interpolationQuality = .low
+        ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: sampleWidth, height: sampleHeight))
+
+        // CGContext 原点在左下角，但这里只关心有没有暗像素，方向无所谓
+        return stride(from: 0, to: pixels.count, by: 4).contains { i in
+            pixels[i] < 240 && pixels[i + 1] < 240 && pixels[i + 2] < 240
+        }
+    }
 }
 
 // MARK: - 小工具
