@@ -135,21 +135,74 @@ final class MarkdownOutlineTests: XCTestCase {
         XCTAssertEqual(items[1].title, "（空标题）")
     }
 
-    /// 改标题之后 `headingsChanged` 标志要立起来；在正文里打字则不能立
+    /// 改标题之后 `headingsChanged` 标志要立起来；在正文里打字则不能立。
+    ///
+    /// 注意这条样例里**标题在最前面**，所以「在它下面的正文里打字」不会顶移任何标题，
+    /// 允许为 false。反过来（标题在下游）必须为 true ——
+    /// 见 `testTypingInBodyAboveHeadingsShiftsOffsetsAndFlagsRepublish`。
     func testHeadingsChangedFlagTracksHeadingEdits() {
         let store = makeStore("# 标题\n\n正文段落。")
 
-        // 在正文末尾敲一个字：没碰标题 → false
+        // 在正文末尾敲一个字：标题在它上面，没被顶移 → false
         let bodyEdit = store.applyEdit(inRenderedRange: NSRange(location: 9, length: 0),
                                        replacementText: "啊",
                                        containerWidth: 600)
-        XCTAssertFalse(bodyEdit.headingsChanged, "在正文里打字不该触发大纲重算")
+        XCTAssertFalse(bodyEdit.headingsChanged,
+                       "标题都在编辑点上面、位置一个没动，不该让目录重新读一遍")
 
         // 在标题的 `#` 后面敲一个字：碰到标题 → true
         let headingEdit = store.applyEdit(inRenderedRange: NSRange(location: 1, length: 0),
                                           replacementText: "新",
                                           containerWidth: 600)
         XCTAssertTrue(headingEdit.headingsChanged, "改标题必须触发大纲重算")
+    }
+
+    /// 🐞 回归：在**标题上面**的正文里打字，下游所有标题的偏移都会后移，
+    /// 这时候 `headingsChanged` 必须立起来。
+    ///
+    /// ### 这条锁的是哪个 bug
+    /// 判据以前只看了「被换掉的块里有没有标题」。在正文段落里打字时受影响的块全是段落，
+    /// 一个标题都没有 → 判定「标题没变」→ 不去刷新目录 → 目录里存的还是老偏移快照。
+    /// 用户再点靠后的标题，编辑器拿旧偏移查渲染坐标，就落到标题**前面**
+    /// 「刚打进去那几个字」的位置，也就是正文中间。
+    func testTypingInBodyAboveHeadingsShiftsOffsetsAndFlagsRepublish() {
+        let store = makeStore("# 一级\n\n第一段正文。\n\n## 二级\n\n第二段正文。")
+        let before = store.outlineItems
+        XCTAssertEqual(before.count, 2, "样例应该正好两个标题")
+
+        // 找到第一个正文段落（非标题块），在它中间插一个字
+        guard let paragraph = store.blocks.first(where: {
+            $0.headingLevel == nil && $0.renderedLength > 0
+        }) else { return XCTFail("样例里应该有一个正文段落") }
+        let insertAt = paragraph.renderedRange.location + 1
+
+        let outcome = store.applyEdit(inRenderedRange: NSRange(location: insertAt, length: 0),
+                                      replacementText: "啊",
+                                      containerWidth: 600)
+
+        XCTAssertTrue(outcome.headingsChanged,
+                      "在正文里打字把下游标题整体顶移了，必须让目录重新读一遍")
+
+        let after = store.outlineItems
+        XCTAssertEqual(after.count, 2)
+        XCTAssertEqual(after[0].sourceOffset, before[0].sourceOffset,
+                       "编辑点**上面**的标题位置不该动")
+        XCTAssertEqual(after[1].sourceOffset, before[1].sourceOffset + 1,
+                       "编辑点**下面**的标题必须整体后移 1 个字符")
+    }
+
+    /// 反过来：在文档**最末尾**（所有标题之后）追加内容时，没有任何标题被顶移，
+    /// 所以不该去刷新目录 —— 否则长文档在最后一段里连续打字会被目录拖慢。
+    func testTypingAfterLastHeadingDoesNotFlagRepublish() {
+        let store = makeStore("# 一级\n\n## 二级\n\n结尾这一段正文。")
+        let end = store.renderedLength
+
+        let outcome = store.applyEdit(inRenderedRange: NSRange(location: end, length: 0),
+                                      replacementText: "啊",
+                                      containerWidth: 600)
+
+        XCTAssertFalse(outcome.headingsChanged,
+                       "所有标题都在编辑点上面，一个都没动，不该让目录重新读一遍")
     }
 
     // MARK: - 第 2 层：协调者的归属查询
@@ -414,6 +467,58 @@ final class MarkdownOutlineTests: XCTestCase {
         let target = coordinator.items[5]
         rows[5].sendActions(for: .touchUpInside)
         XCTAssertEqual(editor.cursorSourceOffset, target.sourceOffset)
+    }
+
+    /// 🐞 回归（用户报的原始现象）：在正文里打几个字，再点目录里靠后的标题，
+    /// 光标必须落在那个标题上，**不能落在正文中间**。
+    ///
+    /// ### 这条和 `testEndToEndWiringMovesCaret` 的区别
+    /// 那条一装配完就点，此时目录拿到的偏移还是新的，所以侥幸是对的。
+    /// 这条中间插了一段**编辑**：正文里打字会把它后面所有标题的 `sourceOffset`
+    /// 整体后移，而标题自己一个字没改。目录如果不重新读一遍，手里握着的就是过期快照 ——
+    /// 点下去正好差「刚打进去的字符数」，落在正文中间。
+    ///
+    /// 走的是完整链路：编辑器打字 → 目录收到新列表 → 点行 → 回到编辑器跳转。
+    func testTappingOutlineAfterTypingInBodyLandsOnHeading() {
+        let markdown = "# 一级\n\n第一段正文。\n\n## 二级\n\n第二段正文。\n\n### 三级\n\n第三段正文。"
+        let editor = makeEditor(markdown)
+        let outlineView = MarkdownOutlineView()
+        outlineView.frame = CGRect(x: 0, y: 0, width: 210, height: 300)
+        let coordinator = OutlineCoordinator()
+
+        coordinator.editorDataSource = editor
+        coordinator.outlineView = outlineView
+        outlineView.delegate = coordinator
+        editor.outlineEventSink = coordinator
+        coordinator.reloadFromEditor()
+
+        XCTAssertEqual(rowViews(in: outlineView).count, 3, "样例应该有三个标题")
+
+        // 在**第一段正文**里打两个字（走键盘那条入口：insertText → 系统插入 →
+        // textViewDidChange → 增量编辑管线）
+        guard let paragraph = editor.documentStore.blocks.first(where: {
+            $0.headingLevel == nil && $0.renderedLength > 0
+        }) else { return XCTFail("样例里应该有一个正文段落") }
+        editor.selectedRange = NSRange(location: paragraph.renderedRange.location + 1, length: 0)
+        editor.insertText("测试")
+
+        XCTAssertEqual((editor.markdownSource as NSString).length,
+                       (markdown as NSString).length + 2,
+                       "打字没落到模型上，后面的断言就没意义了")
+
+        // 打完字：标题一个字没改，但下游标题整体后移了 2 个字符。
+        // 目录那边必须已经换成新偏移 —— 这正是以前漏掉的那一步
+        let fresh = editor.currentOutlineItems()
+        XCTAssertEqual(fresh.map(\.sourceOffset), coordinator.items.map(\.sourceOffset),
+                       "正文里打字顶移了下游标题，目录却还拿着旧偏移（过期快照）")
+
+        // 模仿「用户点最后一行目录」，光标必须落在「三级」上
+        let rows = rowViews(in: outlineView)
+        rows[2].sendActions(for: .touchUpInside)
+
+        XCTAssertEqual(editor.cursorSourceOffset, fresh[2].sourceOffset,
+                       "点了「三级」，光标却落在源码第 \(editor.cursorSourceOffset) 位"
+                       + "（「三级」在第 \(fresh[2].sourceOffset) 位）—— 跳到了正文中间")
     }
 
     /// 光标移动 → 目录高亮跟着走（同样是端到端）

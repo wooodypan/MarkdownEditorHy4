@@ -16,14 +16,40 @@ struct MarkdownEditOutcome {
     let newContent: NSAttributedString
     /// 编辑完成后光标应该落在的渲染偏移（**新**坐标系）
     let caretRenderedOffset: Int
-    /// 这次编辑有没有动到标题（新增 / 删除 / 改名 / 升降级）。
+    /// 这次编辑之后，目录要不要重新拿一份最新的标题列表。
     ///
-    /// ### 为什么要单独报一下
-    /// 大纲列表只在标题结构变化时才需要重新提取。判断依据是
-    /// 「被换掉的旧块 or 新生成的块里有没有标题块」——
-    /// 这是 `O(受影响块数)` 的事，文档再长也不变慢；
-    /// 而在普通正文里打字时新旧块都不是标题，直接跳过整趟提取和 UI 刷新。
+    /// ### 为什么不能每次编辑都通知一遍
+    /// 目录每更新一次，都要把 N 行视图拆掉重建、再重新布局一遍，
+    /// 花的功夫跟标题数量成正比。每敲一个字都更新一遍，长文档下输入会明显发顿。
+    /// 所以得先判断「值不值得更新」。
+    ///
+    /// ### 什么情况算「值得更新」—— 两种，缺一不可
+    /// 1. **标题自己变了**：新增 / 删除 / 改名 / 升降级；
+    /// 2. **标题自己一个字没动，但位置被顶移了**：在某个标题**上面**的正文里
+    ///    打字或删字，它后面所有标题的 `sourceOffset` 都会整体平移。
+    ///
+    /// ⚠️ 第 2 种以前是漏判的（判据只看了「被换掉的块里有没有标题」）：
+    /// 在正文段落里打字时受影响的块全是段落，一个标题都没有 → 判定为「没变」→
+    /// 目录手里那份 `OutlineItem` 就成了过期快照。用户再点目录，
+    /// 编辑器照着旧偏移去查渲染坐标，就跳到标题**前面**「刚打进去那几个字」的位置，
+    /// 落在正文中间。
+    ///
+    /// 所以判据不能只盯受影响的几块，得把整篇的标题位置前后各拍一张快照比一比，
+    /// 见 `headingFingerprint()`。
     let headingsChanged: Bool
+}
+
+/// 一个标题块的「身份快照」：位置 + 层级 + 文本。
+///
+/// 三个字段合起来正好等价于「目录里那一行长什么样、指向哪里」——
+/// 两张快照相等，就说明重新读一遍也还是这份内容、和用户正看着的一模一样，不必白跑一趟。
+///
+/// 刻意**不含** `MarkdownBlock.id`：块被重建时 UUID 会换新，但那种情况受影响的块里
+/// 必然带着标题，由 `applyEdit` 第 9 步的第一支判据兜住，不需要在这里重复判断。
+private struct HeadingFingerprint: Equatable {
+    let sourceOffset: Int
+    let level: Int
+    let title: String
 }
 
 /// 文档模型。
@@ -91,6 +117,11 @@ final class MarkdownDocumentStore {
                    containerWidth: CGFloat) -> MarkdownEditOutcome {
         renderer.containerWidth = containerWidth
 
+        // 编辑前先给「整篇的标题列表」拍一张快照。第 9 步要拿它和编辑后的比一比，
+        // 才能发现「标题自己没动、只是被上面的编辑顶移了」这一类变化。
+        // 必须在这之前取：下面第 6 步就会把旧块换掉，之后就拍不到旧照片了
+        let headingsBefore = headingFingerprint()
+
         // 1) 渲染范围 → 源码范围。
         //    删除时先做一次「语法标记扩展」：退格删到 `- ` 里就整段删掉（见方法注释）
         let effectiveRange = text.isEmpty ? expandedSyntaxMarkerRange(renderedRange) : renderedRange
@@ -133,9 +164,20 @@ final class MarkdownDocumentStore {
         let caretSource = editRange.location + replacementLength
         let caret = renderedCaret(forSourceOffset: caretSource)
 
-        // 9) 这次编辑有没有动到标题块（大纲只在为 true 时才重新提取）
+        // 9) 这次编辑要不要让目录重新拿一份标题列表？两条判据，命中任一就算「变了」：
+        //
+        //    ① 受影响的块里出现了标题 —— 标题被增删改，块本身也换新了（UUID 变了，
+        //       UI 那边必须拿到新 id 才能继续正确高亮）；
+        //    ② 标题本身没动，但**位置**被顶移了 —— 在正文段落里打字，它后面所有
+        //       标题的 sourceOffset 整体后移。这种情况受影响的块里一个标题都没有，
+        //       只看 ① 会漏判，目录就会拿着过期偏移去跳（跳到正文中间，不是标题处）。
+        //       ② 靠编辑前后两张「标题指纹」的比对兜住，见 headingFingerprint()。
+        //
+        //    注意 ② 只在「下游真有标题」时才会命中：在文末（所有标题之后）追加内容时
+        //    指纹不变，仍是 false —— 长文档在最后一段里连续打字不会被目录拖慢。
         let headingsChanged = oldBlocks.contains { $0.headingLevel != nil }
             || newBlocks.contains { $0.headingLevel != nil }
+            || headingsBefore != headingFingerprint()
 
         return MarkdownEditOutcome(replacedRange: oldRenderedRange,
                                    newContent: newContent,
@@ -498,6 +540,39 @@ final class MarkdownDocumentStore {
             block.renderedRange = NSRange(location: renderedLocation, length: block.renderedLength)
             sourceLocation += block.sourceText.utf16Length
             renderedLocation += block.renderedLength
+        }
+    }
+
+    // MARK: - 标题指纹
+
+    /// 给「整篇的标题列表」拍一张快照：每个标题块的位置 + 层级 + 文本，按文档顺序排列。
+    ///
+    /// ### 用途
+    /// `applyEdit` 前后各拍一张，两张不相等就说明目录该重新读一遍标题了（原因见
+    /// `MarkdownEditOutcome.headingsChanged` 的注释）。
+    ///
+    /// ### 为什么三个字段都要比，不能只比位置
+    /// - 只比位置：漏掉「标题原地改了字」（`## 甲` → `## 乙`，长度相同、位置不动），
+    ///   目录里显示的文字就旧了；
+    /// - 只比位置 + 文本：漏掉升降级（`## 甲` → `### 甲`，位置和文本都没变，
+    ///   但目录里那一行的字号/缩进该跟着变）。
+    ///
+    /// 三个一起比，才等价于「目录显示出来的东西有没有变」。
+    ///
+    /// ### 成本
+    /// `O(块数)` 的纯字段读取（不做字符串比较，除非前面字段都相同）。
+    /// 标题数量远小于块数，而且块数在同一量级上的扫描 `affectedBlockIndices` 里
+    /// 本来就有一次，所以这条不会改变 `applyEdit` 的复杂度量级。
+    ///
+    /// ### 顺序
+    /// 按 `blocks` 顺序遍历，而块与块的源码首尾相接、偏移单调递增，
+    /// 所以两张快照的数组顺序天然可比（不需要排序）。
+    private func headingFingerprint() -> [HeadingFingerprint] {
+        blocks.compactMap { block in
+            guard let level = block.headingLevel else { return nil }
+            return HeadingFingerprint(sourceOffset: block.sourceRange.location,
+                                      level: level,
+                                      title: block.headingTitle ?? "")
         }
     }
 
