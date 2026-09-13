@@ -107,6 +107,15 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// `id` 是引用层的唯一标识，`level` 是嵌套深度（0 = 最外层）
     private var quoteBarFrames: [(id: Int, level: Int, frame: CGRect)] = []
 
+    // MARK: 大纲跳转（见 MarkdownTextView+Outline.swift）
+
+    /// 当前正在进行的那次「跳到某个标题」的序号。
+    ///
+    /// 跳转要分好几轮滚动才能收敛（原因见 `MarkdownTextView+Outline.swift` 里的说明），
+    /// 而这期间用户可能又点了别的标题 —— 用序号把上一轮的残余步骤作废，
+    /// 免得两个目标互相拉扯。
+    var outlineJumpToken = 0
+
     // MARK: 初始化
 
     init(markdown: String = "") {

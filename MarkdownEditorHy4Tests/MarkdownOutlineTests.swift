@@ -46,6 +46,33 @@ final class MarkdownOutlineTests: XCTestCase {
         """
     }
 
+    /// 一段长度足够滚动的样例：标题散在正文之间，
+    /// 跳到「第三节」这种文档中部的标题**必须真的滚动**才看得到。
+    /// 短文档测不出跳转 bug —— 不滚动的时候，随便怎么写都能「看起来对」
+    private var scrollableSample: String {
+        let filler = Array(repeating: "正文内容，用来把文档撑得比一屏长。", count: 12)
+            .joined(separator: "\n\n")
+        return """
+        # 第一节
+
+        \(filler)
+
+        ## 第二节
+
+        \(filler)
+
+        ### 第三节
+
+        \(filler)
+
+        ## 第四节
+
+        \(filler)
+
+        # 结尾
+        """
+    }
+
     // MARK: - 第 1 层：编辑器侧的标题提取
 
     /// H1-H6 一个不落，顺序正确，层级正确
@@ -413,6 +440,61 @@ final class MarkdownOutlineTests: XCTestCase {
                        "高亮应该落在光标所在的标题上")
     }
 
+    // MARK: - 第 3 层补测：跳转的稳定性（回归「点 5 次才跳到位」）
+
+    /// 连点同一个标题 5 次，滚动位置一次到位、之后再点也不许动。
+    ///
+    /// ### 这条锁的是哪个 bug
+    /// 以前 `scrollToOutlineItem` 一次点击只滚一次，而 TextKit 2 是**按视口惰性排版**的
+    /// —— 屏幕外的坐标全是估算值（图片块能差上千点），滚一次根本到不了位。
+    /// 用户的实际体验就是：「点 5 次光标才落到标题左边，点 8 次直接滚到最后一行」。
+    ///
+    /// 修好之后内部变成「滚一段 → 重新量视口 → 再滚」的迭代，点一次就到位；
+    /// 既然已经到位了，**再点一次就应该什么都不变**。这条断言就是照这个说的。
+    func testRepeatedJumpsToSameHeadingDoNotDrift() {
+        let editor = makeEditor(scrollableSample)
+        guard let target = editor.currentOutlineItems().first(where: { $0.title == "第三节" }) else {
+            return XCTFail("样例里应该有一个叫「第三节」的标题")
+        }
+
+        editor.scrollToOutlineItem(target)
+        let firstOffset = waitForJumpToSettle(editor)
+
+        XCTAssertGreaterThan(firstOffset, 0,
+                             "「第三节」在文档中部，跳过去必须滚动，offset 不该还是 0")
+
+        for click in 2...5 {
+            editor.scrollToOutlineItem(target)
+            let offset = waitForJumpToSettle(editor)
+            XCTAssertEqual(offset, firstOffset, accuracy: 0.5,
+                           "第 \(click) 次点击之后滚动位置从 \(firstOffset) 漂到了 \(offset)")
+        }
+
+        XCTAssertEqual(editor.cursorSourceOffset, target.sourceOffset,
+                       "重复点击之后光标也得还在标题上")
+    }
+
+    /// 跳过去之后，光标必须落在**可视区域**里 —— 否则等于没跳
+    /// （滚动位置对、但目标停在屏幕外一屏之外，用户还是看不到）
+    func testJumpPutsCaretInsideVisibleArea() {
+        let editor = makeEditor(scrollableSample)
+        let items = editor.currentOutlineItems()
+        XCTAssertGreaterThanOrEqual(items.count, 4, "样例应该有好几个标题")
+
+        for item in items {
+            editor.scrollToOutlineItem(item)
+            waitForJumpToSettle(editor)
+
+            guard let screenY = caretScreenY(editor) else {
+                return XCTFail("「\(item.title)」量不到光标矩形")
+            }
+            XCTAssertGreaterThanOrEqual(screenY, -1,
+                                        "「\(item.title)」的光标跑到屏幕上沿之外了（y=\(screenY)）")
+            XCTAssertLessThanOrEqual(screenY, editor.bounds.height,
+                                     "「\(item.title)」的光标跑到屏幕下沿之外了（y=\(screenY)）")
+        }
+    }
+
     // MARK: - 第 4 层：真实界面装配
 
     /// 起一个真的 `ViewController`，验证三个组件在真实界面里确实接上了。
@@ -448,6 +530,39 @@ final class MarkdownOutlineTests: XCTestCase {
 
     // MARK: - 小工具
 
+    /// 等跳转的「滚 → 量 → 再滚」跑完，返回最终的滚动位置。
+    ///
+    /// 为什么要轮询而不是 `sleep(1)`：内部每一轮之间隔 60ms，轮数不固定（2~4 轮常见）。
+    /// 轮询「连续 0.25 秒位置没变」就当作停了 —— 比固定睡 1 秒快得多，也不会偶发不等够。
+    @discardableResult
+    private func waitForJumpToSettle(_ editor: MarkdownTextView,
+                                     timeout: TimeInterval = 3) -> CGFloat {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastOffset = editor.contentOffset.y
+        var stableSince = Date()
+
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            let current = editor.contentOffset.y
+            if abs(current - lastOffset) <= 0.5 {
+                if Date().timeIntervalSince(stableSince) >= 0.25 { return current }
+            } else {
+                lastOffset = current
+                stableSince = Date()
+            }
+        }
+        return editor.contentOffset.y
+    }
+
+    /// 光标（也就是目标标题那一行）距离屏幕上沿多少点。量不到返回 nil
+    private func caretScreenY(_ editor: MarkdownTextView) -> CGFloat? {
+        let offset = editor.selectedRange.location
+        guard let position = editor.position(from: editor.beginningOfDocument, offset: offset) else {
+            return nil
+        }
+        return editor.caretRect(for: position).minY - editor.contentOffset.y
+    }
+
     private func makeStore(_ markdown: String) -> MarkdownDocumentStore {
         let store = MarkdownDocumentStore()
         store.load(markdown: markdown, containerWidth: 600)
@@ -465,8 +580,7 @@ final class MarkdownOutlineTests: XCTestCase {
         return textView
     }
 
-    private func makeItem(level: Int, title: String, offset: Int) -> OutlineItem {
-        OutlineItem(id: UUID(), level: level, title: title, sourceOffset: offset)
+    private func makeItem(level: Int, title: String, offset: Int) -> OutlineItem {        OutlineItem(id: UUID(), level: level, title: title, sourceOffset: offset)
     }
 
     /// 目录面板的宽度是按父视图算的，所以挂到一个窗口里让它有父视图可量
