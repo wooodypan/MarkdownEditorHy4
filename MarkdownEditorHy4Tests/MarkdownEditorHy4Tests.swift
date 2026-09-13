@@ -1184,6 +1184,113 @@ final class MarkdownEditorHy4Tests: XCTestCase {
             pixels[i] < 240 && pixels[i + 1] < 240 && pixels[i + 2] < 240
         }
     }
+
+    // MARK: - 撤销（粘贴 / 剪切）
+    //
+    // ### 这几条测试守的是什么
+    // 编辑器存进 textStorage 的是**渲染文本**，它和源码长度不一定相等：
+    // 无序列表每行行首会多一个圆点占位符（`U+FFFC`）。而系统的撤销是
+    // 「按插入时的长度记账」的，插入之后我们又把这一段重渲染成另一个长度
+    // （那次替换不注册撤销），这条账就失效了 —— 表现为 Cmd+Z 之后
+    // 末尾残留几个字。所以粘贴/剪切改成走 `insertMarkdownSourceUndoably`：
+    // 撤销记录按**整篇源码快照**登记，恢复时整篇换回去，逐字符一致。
+
+    /// 造一个「能撤销」的编辑器。
+    ///
+    /// ### 为什么挂到 app 真实的窗口，而不是像别处那样自建一个
+    /// `UndoManager` 是从响应者链上取的（view → superview → window → …），
+    /// 游离的 view 根本拿不到它，自建的窗口也不一定有。用 app 自己的窗口最稳。
+    ///
+    /// ### 为什么不 `becomeFirstResponder()`
+    /// 撤销记录不依赖第一响应者，只要 view 挂在窗口上就能拿到 `UndoManager`。
+    /// 不去抢第一响应者是为了**别干扰别的用例**（整套跑的时候，抢了第一响应者
+    /// 会影响那些依赖「光标回调」的用例，实测会让大纲那条端到端高亮测试偶发失败）。
+    /// 用完请 `removeFromSuperview()`（测试里用 defer），别留在窗口上。
+    private func makeUndoableEditor(_ markdown: String) -> MarkdownTextView? {
+        guard let window = UIApplication.shared.windows.first(where: { $0.isKeyWindow })
+                ?? UIApplication.shared.windows.first else { return nil }
+
+        let textView = MarkdownTextView(markdown: markdown)
+        textView.frame = CGRect(x: 0, y: 0, width: 700, height: 900)
+        window.addSubview(textView)
+        textView.layoutIfNeeded()
+        return textView
+    }
+
+    /// 粘贴两行任务列表后撤销：一个字符都不许残留。
+    ///
+    /// ### 这个 bug 的由来（别改回去）
+    /// 源码 19 个字符，渲染出来是 21 个（每行行首多一个圆点占位符）。
+    /// 系统按「插入时的 19」记账，撤销时就从 21 个字符里删掉 19 个 ——
+    /// 末尾正好剩下「完成」两个字。
+    func testPasteTaskListCanBeUndoneCleanly() throws {
+        let pasted = "- [x] 已完成\n- [ ] 未完成"
+
+        // 先把「渲染比源码长」这件事钉住 —— 它就是系统记账会失效的根因
+        let store = makeStore(pasted)
+        XCTAssertEqual(store.renderedLength, (pasted as NSString).length + 2,
+                       "无序列表每行行首会多一个圆点占位符，渲染结果应该比源码长 2 个字符")
+
+        let textView = try XCTUnwrap(makeUndoableEditor(""), "拿不到可用窗口，没法验证撤销")
+        defer { textView.removeFromSuperview() }
+
+        textView.insertMarkdownSourceUndoably(pasted)
+        XCTAssertEqual(textView.markdownSource, pasted, "插入之后源码应该就是粘贴的内容")
+
+        let manager = try XCTUnwrap(textView.undoManager)
+        XCTAssertTrue(manager.canUndo, "插入之后必须能撤销")
+
+        manager.undo()
+        XCTAssertEqual(textView.markdownSource, "", "撤销后源码必须清空，不许残留尾巴")
+        XCTAssertEqual(textView.text ?? "", "", "撤销后显示的内容也必须清空")
+
+        manager.redo()
+        XCTAssertEqual(textView.markdownSource, pasted, "重做要把粘贴的内容原样放回来")
+    }
+
+    /// 在已有文档末尾粘贴后撤销：源码要逐字符回到粘贴前的样子
+    func testPasteIntoExistingDocumentCanBeUndone() throws {
+        let original = "# 标题\n\n正文一段\n"
+        let textView = try XCTUnwrap(makeUndoableEditor(original))
+        defer { textView.removeFromSuperview() }
+
+        // 光标移到文末再粘
+        textView.selectedRange = NSRange(location: (textView.text as NSString).length, length: 0)
+        textView.insertMarkdownSourceUndoably("- [ ] 未完成")
+        XCTAssertNotEqual(textView.markdownSource, original, "粘贴之后源码应该变了")
+
+        textView.undoManager?.undo()
+        XCTAssertEqual(textView.markdownSource, original, "撤销后源码必须逐字符回到原文")
+    }
+
+    /// 选中一段再粘贴（替换选区）后撤销：被替换掉的内容要回来
+    func testPasteReplacingSelectionCanBeUndone() throws {
+        let original = "第一行\n第二行"
+        let textView = try XCTUnwrap(makeUndoableEditor(original))
+        defer { textView.removeFromSuperview() }
+
+        // 选中渲染文本开头三个字（对应源码的「第一行」）
+        textView.selectedRange = NSRange(location: 0, length: 3)
+        textView.insertMarkdownSourceUndoably("- [x] 已完成")
+        XCTAssertTrue(textView.markdownSource.hasPrefix("- [x] 已完成"), "粘贴应该替换掉选区")
+
+        textView.undoManager?.undo()
+        XCTAssertEqual(textView.markdownSource, original, "撤销后源码必须回到原文")
+    }
+
+    /// 剪切（Cmd+X）也要能撤销 —— 剪切是我们自己做的，系统没替我们记账
+    func testCutCanBeUndone() throws {
+        let original = "第一段\n\n第二段\n"
+        let textView = try XCTUnwrap(makeUndoableEditor(original))
+        defer { textView.removeFromSuperview() }
+
+        textView.selectedRange = NSRange(location: 0, length: 3)
+        textView.cut(nil)
+        XCTAssertNotEqual(textView.markdownSource, original, "剪切之后源码应该少了内容")
+
+        textView.undoManager?.undo()
+        XCTAssertEqual(textView.markdownSource, original, "撤销后源码必须回到剪切前的样子")
+    }
 }
 
 // MARK: - 小工具

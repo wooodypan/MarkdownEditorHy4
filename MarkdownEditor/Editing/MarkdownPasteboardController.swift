@@ -83,8 +83,22 @@ final class MarkdownPasteboardController {
             return false
         }
 
-        textView.insertMarkdownSource("![粘贴的图片](attachments/\(fileName))")
+        // 图片插入同样走「可撤销」那条路：图片源码渲染出来是一个附件字符，
+        // 和源码长度差得更远，交给系统记撤销会残留一串字符
+        textView.insertMarkdownSourceUndoably("![粘贴的图片](attachments/\(fileName))")
         return true
+    }
+
+    /// 剪贴板里的纯文本（没有、或者只有空白时返回 nil）。
+    ///
+    /// ### 为什么只「取出来」，不在这里插入
+    /// 插入必须走 `MarkdownTextView.insertMarkdownSourceUndoably` ——
+    /// 粘贴不能交给系统自带的撤销（原因见那个方法的注释：渲染文本和源码长度不等，
+    /// 系统的撤销记录会失效，撤销后残留尾巴）。而「怎么插入」是编辑器的职责，
+    /// 剪贴板层只负责把内容取出来，别越界。
+    func pasteboardText() -> String? {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else { return nil }
+        return text
     }
 
     /// 图片存放目录：`Documents/attachments`

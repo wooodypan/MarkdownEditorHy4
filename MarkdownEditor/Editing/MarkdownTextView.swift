@@ -1095,19 +1095,114 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             super.cut(sender)
             return
         }
-        // 复制成功后删掉选区，走同一套增量管线（保证源码和渲染同时更新）
-        applyEdit(renderedRange: selectedRange, replacementText: "", alreadyAppliedToTextStorage: false)
+        // 复制成功后删掉选区，走同一套增量管线（保证源码和渲染同时更新）。
+        // 外面套一层「可撤销」：剪切是我们自己做的，系统没替我们记过账 ——
+        // 不补这一笔的话，Cmd+Z 会去弹更早的一条记录，而那条记录的范围早就失效了
+        performUndoableModelEdit(actionName: "剪切") {
+            applyEdit(renderedRange: selectedRange, replacementText: "", alreadyAppliedToTextStorage: false)
+        }
     }
 
     override func paste(_ sender: Any?) {
-        // 剪贴板里是图片：存成临时文件，插入 ![](路径) 源码
+        // 1) 剪贴板里是图片：存成临时文件，插入 ![](路径) 源码
         if pasteboardController.handlePasteImage() { return }
+        // 2) 纯文本：走下面那个「可撤销插入」。
+        //    ⚠️ 千万别退回 `super.paste(sender)` —— 系统的撤销记录按**源码长度**记账，
+        //    而这段文本会被渲染成另一个长度，撤销就会残留尾巴（详见下面方法的注释）
+        if let text = pasteboardController.pasteboardText() {
+            insertMarkdownSourceUndoably(text)
+            return
+        }
         super.paste(sender)
     }
 
-    /// 供 PasteboardController 调用：把一段 markdown 源码插到光标处
+    /// 供 PasteboardController 调用：把一段 markdown 源码插到光标处。
+    ///
+    /// 只负责插入、不注册撤销。要能撤销请用 `insertMarkdownSourceUndoably(_:)`。
     func insertMarkdownSource(_ source: String) {
         applyEdit(renderedRange: selectedRange, replacementText: source, alreadyAppliedToTextStorage: false)
+    }
+
+    /// 把一段 markdown 源码插到光标处，**并且这次插入可以安全撤销**。
+    ///
+    /// ### 为什么粘贴必须自己接管撤销（这是「撤销残留」bug 的根因，别改回去）
+    /// 编辑器存进 textStorage 的是**渲染文本**，它和源码的长度不一定相等。
+    /// 无序列表每行开头会多一个圆点占位符（`U+FFFC`），实测粘贴这两行：
+    /// ```
+    /// - [x] 已完成      ← 源码 19 个 UTF-16 单元
+    /// - [ ] 未完成      ← 渲染出来是 21 个（每行行首多一个 ￼）
+    /// ```
+    /// 系统的撤销是**按插入时的长度记账**的：插进去 19 个字符，它就记成
+    /// 「撤销 = 删掉 19 个字符」。可插入之后我们又把这 19 个字符重渲染成了 21 个
+    /// （而且那次替换特意不注册撤销，免得栈里多记一笔），这条账就彻底对不上了 ——
+    /// Cmd+Z 时从 21 个字符里删掉 19 个，末尾正好剩下「完成」两个字。
+    ///
+    /// ### 改成了什么
+    /// 撤销记录不再交给系统，而是我们自己按**整篇源码快照**登记：撤销时
+    /// 把整篇源码换回粘贴之前的样子。渲染是确定性的（同样的源码 + 同样的宽度 →
+    /// 逐字符一样的渲染结果），所以换回去之后 textStorage 和当初完全一致，
+    /// 撤销栈里更早的那些记录也不会被带歪。
+    func insertMarkdownSourceUndoably(_ source: String) {
+        performUndoableModelEdit(actionName: "粘贴") {
+            insertMarkdownSource(source)
+        }
+    }
+
+    /// 跑一次「会改到文档内容」的命令类编辑，并登记一条整篇快照式的撤销。
+    ///
+    /// ### 只给谁用
+    /// 粘贴、剪切、插入图片 —— 它们的共同点是**不经过系统的文本输入**：
+    /// 系统不会替我们记撤销，所以我们得自己补；也正因为是自己补，
+    /// 才有机会按「模型快照」来记，而不是按「会随渲染失效的字符范围」记。
+    ///
+    /// 键盘输入不归它管：那种编辑系统自己会记账，我们再记一笔反而让撤销栈错乱
+    /// （见 `applyEdit` 里 disable/enable 那段注释）。
+    ///
+    /// - parameter actionName: 撤销菜单上显示的名字（Edit 菜单会显示「撤销 粘贴」）
+    private func performUndoableModelEdit(actionName: String, _ edit: () -> Void) {
+        // 快照：撤销就是「把整篇源码恢复成现在这样」
+        let previousSource = documentStore.sourceDocument
+        let previousCaret = selectedRange.location
+
+        // 标记成「程序自己发起的编辑」：这样 applyEdit 会跳过 disable/enable 那对调用
+        // （那对调用只在「系统刚替我们记过账」的时机才合法，别的时候会抛 invalid state）
+        let wasProgrammatic = isProgrammaticEdit
+        isProgrammaticEdit = true
+        edit()
+        isProgrammaticEdit = wasProgrammatic
+
+        registerRestore(toSource: previousSource, caret: previousCaret, actionName: actionName)
+    }
+
+    /// 登记一条撤销：「把整篇源码恢复成 `source`，光标回到 `caret`」。
+    ///
+    /// 顺便把**重做**也挂上：撤销和重做共用同一个 UndoManager，
+    /// 在撤销过程中再 `registerUndo` 会被记进重做栈（NSUndoManager 的标准用法），
+    /// 所以撤销、重做可以来回走。
+    private func registerRestore(toSource source: String, caret: Int, actionName: String) {
+        guard let undoManager else { return }
+
+        // 记下「现在」的样子 —— 撤销之后要拿它当重做的目标
+        let currentSource = documentStore.sourceDocument
+        let currentCaret = selectedRange.location
+
+        undoManager.registerUndo(withTarget: self) { target in
+            target.registerRestore(toSource: currentSource, caret: currentCaret, actionName: actionName)
+            target.restoreDocument(source: source, caret: caret)
+        }
+        // 让 Edit 菜单显示「撤销 粘贴」而不是干巴巴一个「撤销」
+        undoManager.setActionName(actionName)
+    }
+
+    /// 整篇恢复到某个源码快照 —— 撤销和重做都走这里。
+    ///
+    /// 用 `setMarkdown` 而不是逐块替换：快照存的就是整篇源码，
+    /// 整篇重建最省心，而且渲染结果和当初逐字符一致
+    /// （`setMarkdown` 只动 storage，完全不会碰撤销栈，见 `replaceWholeStorage`）。
+    private func restoreDocument(source: String, caret: Int) {
+        setMarkdown(source)
+        let length = (text as NSString).length
+        selectedRange = NSRange(location: min(max(0, caret), length), length: 0)
     }
 
     // MARK: - MarkdownAttachmentHost
