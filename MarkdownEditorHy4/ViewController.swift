@@ -61,6 +61,7 @@ final class ViewController: UIViewController {
         }
         // 放在文档加载**之后**：装配时的「初次拉取」才能真正拉到标题。
         // 放前面也能跑（编辑器那次 push 会被忽略），但会白拉一次空列表
+        applyTableStyle()
         setupOutline()
         observeKeyboard()
         observeDocumentOpenRequests()
@@ -237,6 +238,18 @@ final class ViewController: UIViewController {
     @objc private func settingsDidChange() {
         applyScrollSetting()
         applyOutlineAppearance()
+        applyTableStyle()
+    }
+
+    /// 把「表格列宽」的配置同步给编辑器主题。
+    ///
+    /// ### 为什么要整篇重渲染
+    /// 表格是**渲染时画成的一张图**，列宽在画的那一刻就定死了；
+    /// 只改主题里的数值、不重新渲染的话，画面上的表格纹丝不动。
+    /// 拖滑块是低频操作，整篇重渲染一遍完全没问题。
+    private func applyTableStyle() {
+        settings.applyTableColumnWidths(to: &editor.renderer.theme)
+        editor.setMarkdown(editor.markdownSource)
     }
 
     /// 把「是否记住滚动位置」同步给大纲面板

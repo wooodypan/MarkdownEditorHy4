@@ -33,17 +33,17 @@ final class MarkdownTableAttachment: NSTextAttachment {
         self.data = data
         super.init(data: nil, ofType: nil)
 
-        let width = max(120, maxWidth)
+        // `availableWidth` 只是「最多能用多宽」，表格按内容算出来可能比它窄得多
+        // （列宽受 `TableStyle.min/maxColumnWidth` 限制，不再撑满容器）。
+        // 所以 bounds 用**画出来的图片**的尺寸，而不是拿容器宽度当表格宽度
+        let availableWidth = max(120, maxWidth)
         image = MarkdownTableView.image(data: data,
                                         style: theme.table,
                                         bodyFont: theme.bodyFont,
                                         textColor: theme.textColor,
-                                        width: width)
-        let height = MarkdownTableView.height(data: data,
-                                              style: theme.table,
-                                              bodyFont: theme.bodyFont,
-                                              width: width)
-        bounds = CGRect(x: 0, y: 0, width: width, height: height)
+                                        availableWidth: availableWidth)
+        let size = image?.size ?? .zero
+        bounds = CGRect(x: 0, y: 0, width: size.width, height: size.height)
     }
 
     required init?(coder: NSCoder) {

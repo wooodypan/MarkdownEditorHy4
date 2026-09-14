@@ -16,6 +16,12 @@ struct MarkdownTableLayout {
     /// 表格总高度（所有行高之和，分隔线画在行内部，不额外占高）
     var totalHeight: CGFloat
 
+    /// 表格总宽度（所有列宽之和）。
+    ///
+    /// 注意它**不一定**等于排版时给的容器宽度：容器宽只是「最多能用多宽」，
+    /// 表格自己按内容算出来是多少就是多少（见 `makeLayout` 第 2 步的说明）
+    var totalWidth: CGFloat { columnWidths.reduce(0, +) }
+
     /// 某一行顶部的 y 坐标
     func y(ofRow row: Int) -> CGFloat {
         guard row < rowHeights.count else { return totalHeight }
@@ -75,8 +81,11 @@ final class MarkdownTableView: UIView {
         self.headerFont = bodyFont.adding(.traitBold)
         self.textColor = textColor
         self.layout = Self.makeLayout(data: data, style: style, bodyFont: bodyFont,
-                                      headerFont: bodyFont.adding(.traitBold), width: width)
-        super.init(frame: CGRect(x: 0, y: 0, width: width, height: layout.totalHeight))
+                                      headerFont: bodyFont.adding(.traitBold),
+                                      availableWidth: width)
+        super.init(frame: CGRect(x: 0, y: 0,
+                                 width: layout.totalWidth,
+                                 height: layout.totalHeight))
         isOpaque = false
         backgroundColor = .clear
     }
@@ -98,16 +107,19 @@ final class MarkdownTableView: UIView {
 
     // MARK: 生成图片
 
-    /// 画一张表格图片（attachment 直接拿它当 `NSTextAttachment.image`）
+    /// 画一张表格图片（attachment 直接拿它当 `NSTextAttachment.image`）。
+    ///
+    /// 图片的宽度是**表格自己的宽度**（`layout.totalWidth`），不是传进来的
+    /// `availableWidth` —— 后者只是「最多能用多宽」。
     static func image(data: MarkdownTableData,
                       style: MarkdownTheme.TableStyle,
                       bodyFont: UIFont,
                       textColor: UIColor,
-                      width: CGFloat) -> UIImage {
+                      availableWidth: CGFloat) -> UIImage {
         let headerFont = bodyFont.adding(.traitBold)
         let layout = makeLayout(data: data, style: style, bodyFont: bodyFont,
-                                headerFont: headerFont, width: width)
-        let size = CGSize(width: width, height: layout.totalHeight)
+                                headerFont: headerFont, availableWidth: availableWidth)
+        let size = CGSize(width: layout.totalWidth, height: layout.totalHeight)
         let format = UIGraphicsImageRendererFormat.default()
         format.opaque = false
         let table = MarkdownTableLayoutBox(layout: layout,
@@ -125,22 +137,31 @@ final class MarkdownTableView: UIView {
     static func height(data: MarkdownTableData,
                        style: MarkdownTheme.TableStyle,
                        bodyFont: UIFont,
-                       width: CGFloat) -> CGFloat {
+                       availableWidth: CGFloat) -> CGFloat {
         makeLayout(data: data, style: style, bodyFont: bodyFont,
-                   headerFont: bodyFont.adding(.traitBold), width: width).totalHeight
+                   headerFont: bodyFont.adding(.traitBold),
+                   availableWidth: availableWidth).totalHeight
     }
 
     // MARK: 量尺寸
 
     /// 算列宽和行高。
     ///
-    /// 列宽分两步：先按内容量出每列的「理想宽度」，再整体缩放到容器宽度
-    /// （不够宽就按比例放大撑满，太宽就按比例压缩 —— 和代码块背景「撑满容器」的思路一致）。
+    /// ### 列宽只缩不放（这是「列宽限制能生效」的关键）
+    /// 分三步：先按内容量出每列的「理想宽度」并夹在 `[min, max]` 之间；
+    /// 加起来**没超过**容器宽度就直接用（表格多宽由内容说了算）；
+    /// 超过了才整体等比压缩。
+    ///
+    /// 之前这里写的是「不管多窄都等比撑满容器」，结果 `min/max` 白夹：
+    /// 一个三列的小表格在宽屏上照样被拉到跟窗口一样宽 —— 正是用户报的那个 bug。
+    /// 表格图和代码块背景不一样，它不是「铺满才好看」的装饰，撑满只会让列变得又空又散。
+    ///
+    /// - parameter availableWidth: 最多能用多宽（容器宽度）。不是「必须这么宽」
     static func makeLayout(data: MarkdownTableData,
                            style: MarkdownTheme.TableStyle,
                            bodyFont: UIFont,
                            headerFont: UIFont,
-                           width: CGFloat) -> MarkdownTableLayout {
+                           availableWidth: CGFloat) -> MarkdownTableLayout {
         let columnCount = max(1, data.columnCount)
         let rowCount = max(1, data.rowCount)
         let paddingH = style.cellPaddingHorizontal * 2
@@ -161,17 +182,23 @@ final class MarkdownTableView: UIView {
             desired.append(min(max(ideal, style.minColumnWidth), style.maxColumnWidth))
         }
 
-        // 2) 整体缩放到容器宽度
+        // 2) 够宽就原样用（不放大！一放大 min/max 就白夹了）；
+        //    超了才整体等比压缩到容器宽度
+        let limit = max(availableWidth, 1)
         let total = desired.reduce(0, +)
-        let scale = total > 0 ? max(width, 1) / total : 1
-        var columnWidths = desired.map { $0 * scale }
+        var columnWidths = desired
+        if total > limit, total > 0 {
+            let scale = limit / total
+            columnWidths = desired.map { $0 * scale }
+        }
 
-        // 3) 列特别多时给每列保底宽度，再超了就整体再缩一次（宁可挤一点也不能溢出容器）
-        let floorWidth = min(style.minColumnWidth, max(width, 1) / CGFloat(columnCount))
+        // 3) 压完可能把某列压得比 minColumnWidth 还窄（列很多时尤其明显），
+        //    给每列保底宽度；保完如果又超了，再整体缩一次（宁可挤一点也不能溢出容器）
+        let floorWidth = min(style.minColumnWidth, limit / CGFloat(columnCount))
         columnWidths = columnWidths.map { max($0, floorWidth) }
         let adjusted = columnWidths.reduce(0, +)
-        if adjusted > width, adjusted > 0 {
-            let fix = width / adjusted
+        if adjusted > limit, adjusted > 0 {
+            let fix = limit / adjusted
             columnWidths = columnWidths.map { $0 * fix }
         }
 

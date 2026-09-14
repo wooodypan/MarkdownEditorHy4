@@ -97,6 +97,21 @@ struct MarkdownTheme {
     /// 同名会让代码里到处要写 `Markdown.Table`，容易看错。
     var table = TableStyle()
 
+    /// **中文的仿斜体倾斜量**（字体的仿斜矩阵系数，0.2 ≈ 11°，0 = 关闭）。
+    ///
+    /// ### 为什么需要这一项
+    /// 系统给中文回退的字体（苹方 PingFang）**没有斜体字形** —— `*斜体*` 的
+    /// 字体特征（italic trait）对汉字完全不生效，用户看起来就是「斜体没支持」。
+    /// 所以对中文要用「把字形手动掰歪」的仿斜矩阵补出来（实现见
+    /// `MarkupToAttributedRenderer.applySyntheticItalicToCJK`）。
+    ///
+    /// ### 为什么不能用 `.obliqueness` 属性
+    /// 那是 TextKit 1 的属性，TextKit 2 排版时直接忽略（实测属性挂上了、画面不动）。
+    ///
+    /// 英文不在这里处理：英文字体有真斜体，走 `visitEmphasis` 的字体特征就够了，
+    /// 再叠仿斜矩阵会歪过头。
+    var cjkItalicSlant: CGFloat = 0.2
+
     /// 任务列表（`- [x] xxx`）的样式
     var taskList = TaskListStyle()
 
@@ -322,5 +337,23 @@ extension UIFont {
     func adding(_ trait: UIFontDescriptor.SymbolicTraits) -> UIFont {
         let merged = fontDescriptor.withSymbolicTraits(fontDescriptor.symbolicTraits.union(trait))
         return UIFont(descriptor: merged ?? fontDescriptor, size: pointSize)
+    }
+
+    /// 在现有字体基础上加一个「手动掰歪」的仿斜矩阵，做出假斜体效果。
+    ///
+    /// 矩阵里的 `c` 就是倾斜系数：x' = x + c·y，y 越大（字形越靠上的部分）往右挪得越多，
+    /// 看起来就是往右倒 —— 和斜体的样子一致。
+    /// 给中文用的（中文回退字体没有真斜体），见 `MarkdownTheme.cjkItalicSlant`。
+    ///
+    /// ### 两个坑（都实测踩过，别改回去）
+    /// 1. `UIFontDescriptor.withMatrix(_:)` 在 Mac Catalyst 上不可用（编译期报错）；
+    /// 2. 不能只用 `.name: fontName` 重建描述符 —— 系统字体叫 `.SFNS-…` 这种点开头
+    ///    的内部名，按名字重建会**找不到字体**，悄悄回退成 Times。
+    ///    正确做法：把原描述符的**全部属性**抄下来、只追加矩阵，再重建。
+    func withSlant(_ slant: CGFloat) -> UIFont {
+        var attributes = fontDescriptor.fontAttributes
+        attributes[.matrix] = NSValue(cgAffineTransform:
+            CGAffineTransform(a: 1, b: 0, c: slant, d: 1, tx: 0, ty: 0))
+        return UIFont(descriptor: UIFontDescriptor(fontAttributes: attributes), size: pointSize)
     }
 }

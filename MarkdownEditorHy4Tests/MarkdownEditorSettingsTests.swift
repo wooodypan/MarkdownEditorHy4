@@ -354,6 +354,93 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertEqual(ratioSlider.value, 0.65, accuracy: 0.0001, "滑块本身也该被拉正")
     }
 
+    // MARK: - 表格列宽：配置本身
+
+    /// 默认值要和渲染层 `TableStyle` 的默认值一致（64 / 280），改了一边忘了另一边就会「没动设置也变了样」
+    func testTableColumnWidthDefaults() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        XCTAssertEqual(settings.tableMinColumnWidth, 64, accuracy: 0.0001)
+        XCTAssertEqual(settings.tableMaxColumnWidth, 280, accuracy: 0.0001)
+    }
+
+    /// 两个值都要落盘，下次启动还是用户调过的那套
+    func testTableColumnWidthsArePersisted() {
+        let url = makeTempFileURL()
+        let settings = MarkdownEditorSettings(fileURL: url)
+        settings.setTableMinColumnWidth(96)
+        settings.setTableMaxColumnWidth(400)
+
+        let reloaded = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(reloaded.tableMinColumnWidth, 96, accuracy: 0.0001)
+        XCTAssertEqual(reloaded.tableMaxColumnWidth, 400, accuracy: 0.0001)
+    }
+
+    /// 越界的值要被夹住（手改配置文件 / 传参越界两条路都得防）
+    func testTableColumnWidthsAreClamped() throws {
+        // 路径一：直接调 setter
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setTableMinColumnWidth(9999)
+        settings.setTableMaxColumnWidth(1)
+        XCTAssertEqual(settings.tableMinColumnWidth, 200, accuracy: 0.0001, "超出上限要夹回来")
+        XCTAssertEqual(settings.tableMaxColumnWidth, 80, accuracy: 0.0001, "低于下限要夹回来")
+
+        // 路径二：配置文件被手改
+        let url = makeTempFileURL()
+        try Data(#"{"tableMinColumnWidth": 5, "tableMaxColumnWidth": 9999}"#.utf8).write(to: url)
+        let reloaded = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(reloaded.tableMinColumnWidth, 32, accuracy: 0.0001)
+        XCTAssertEqual(reloaded.tableMaxColumnWidth, 600, accuracy: 0.0001)
+    }
+
+    /// 「配置 → 主题」换算：正常情况直接透传；最小 > 最大时以最大值为准把最小压回去，
+    /// 不然渲染层里「最小列宽」会悄悄失效
+    func testApplyTableColumnWidthsGuardsMinAboveMax() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+
+        // 正常：透传
+        settings.setTableMinColumnWidth(96)
+        settings.setTableMaxColumnWidth(400)
+        var theme = MarkdownTheme.default
+        settings.applyTableColumnWidths(to: &theme)
+        XCTAssertEqual(theme.table.minColumnWidth, 96, accuracy: 0.0001)
+        XCTAssertEqual(theme.table.maxColumnWidth, 400, accuracy: 0.0001)
+
+        // 交叉：最小拖得比最大还大 → 以最大为准
+        settings.setTableMinColumnWidth(200)
+        settings.setTableMaxColumnWidth(120)
+        settings.applyTableColumnWidths(to: &theme)
+        XCTAssertEqual(theme.table.minColumnWidth, 120, accuracy: 0.0001, "最小值不该大过最大值")
+        XCTAssertEqual(theme.table.maxColumnWidth, 120, accuracy: 0.0001)
+    }
+
+    // MARK: - 表格列宽：设置页控件
+
+    /// 设置页里该有「最小 / 最大列宽」两个滑块，拖动要写回配置并吸到步进上
+    func testSettingsPageHasTableColumnSlidersAndWritesBack() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let controller = SettingsViewController(settings: settings)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 1100)
+        controller.view.layoutIfNeeded()
+
+        // 两个滑块用量程上界当身份证找（200 / 600，和大纲那两个 1 / 900 不冲突）
+        let minSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 200),
+                                      "找不到「最小列宽」的滑块")
+        let maxSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 600),
+                                      "找不到「最大列宽」的滑块")
+        XCTAssertTrue(minSlider.isEnabled)
+        XCTAssertTrue(maxSlider.isEnabled, "表格列宽两项永远生效，不该被灰掉")
+
+        // 拖一下最小列宽：故意给一个不在步进上的值，该被吸到 8 的倍数上
+        minSlider.value = 70
+        minSlider.sendActions(for: .valueChanged)
+        XCTAssertEqual(settings.tableMinColumnWidth, 72, accuracy: 0.0001, "70 应该被吸到 72（步进 8）")
+
+        maxSlider.value = 333
+        maxSlider.sendActions(for: .valueChanged)
+        XCTAssertEqual(settings.tableMaxColumnWidth, 336, accuracy: 0.0001, "333 应该被吸到 336（步进 8）")
+    }
+
     /// 递归找一个开关出来（设置页把开关挂在 cell 上，只能从视图树里挖）
     private func firstSwitch(in view: UIView) -> UISwitch? {
         for subview in view.subviews {

@@ -30,11 +30,14 @@ final class SettingsViewController: UIViewController {
         case reading
         /// 大纲面板长多高
         case outlineSize
+        /// 表格画出来时的列宽限制
+        case tableLayout
 
         var title: String {
             switch self {
             case .reading: return "阅读与大纲"
             case .outlineSize: return "大纲面板高度"
+            case .tableLayout: return "表格列宽"
             }
         }
 
@@ -45,6 +48,8 @@ final class SettingsViewController: UIViewController {
             case .outlineSize:
                 // 顺序就是界面上从上到下的顺序：先选「怎么算」，再调两个数值
                 return [.outlineHeightMode, .outlineHeightRatio, .outlineMaximumHeight]
+            case .tableLayout:
+                return [.tableMinColumnWidth, .tableMaxColumnWidth]
             }
         }
     }
@@ -60,6 +65,10 @@ final class SettingsViewController: UIViewController {
         case outlineHeightRatio
         /// 固定高度上限（点）
         case outlineMaximumHeight
+        /// 表格最窄的一列（点）
+        case tableMinColumnWidth
+        /// 表格最宽的一列（点）
+        case tableMaxColumnWidth
 
         /// 主标题
         var title: String {
@@ -72,6 +81,10 @@ final class SettingsViewController: UIViewController {
                 return "高度百分比"
             case .outlineMaximumHeight:
                 return "最大高度"
+            case .tableMinColumnWidth:
+                return "最小列宽"
+            case .tableMaxColumnWidth:
+                return "最大列宽"
             }
         }
 
@@ -97,6 +110,12 @@ final class SettingsViewController: UIViewController {
                 return usesRatio
                     ? "当前用的是「按百分比」，这一项暂不生效。"
                     : "面板高度最多是多少点。窗口太小的话还会被压一道，不会盖满整屏。"
+            case .tableMinColumnWidth:
+                return "表格里再短的列也不窄于这个值，「姓名」这类两字列才不会挤成一团。"
+                    + "如果调得比「最大列宽」还大，会按最大列宽算。"
+            case .tableMaxColumnWidth:
+                return "某一列内容特别长（比如贴了长链接）时，列宽到这里就封顶，"
+                    + "多出来的文字自动换行，不把别的列挤没。"
             }
         }
 
@@ -105,6 +124,8 @@ final class SettingsViewController: UIViewController {
             switch self {
             case .outlineHeightRatio: return MarkdownEditorSettings.Limits.outlineHeightRatio
             case .outlineMaximumHeight: return MarkdownEditorSettings.Limits.outlineMaximumHeight
+            case .tableMinColumnWidth: return MarkdownEditorSettings.Limits.tableMinColumnWidth
+            case .tableMaxColumnWidth: return MarkdownEditorSettings.Limits.tableMaxColumnWidth
             default: return 0...1
             }
         }
@@ -114,6 +135,7 @@ final class SettingsViewController: UIViewController {
             switch self {
             case .outlineHeightRatio: return 0.05
             case .outlineMaximumHeight: return 20
+            case .tableMinColumnWidth, .tableMaxColumnWidth: return 8
             default: return 1
             }
         }
@@ -124,6 +146,8 @@ final class SettingsViewController: UIViewController {
             switch self {
             case .outlineHeightRatio: return settings.outlineHeightRatio
             case .outlineMaximumHeight: return settings.outlineMaximumHeight
+            case .tableMinColumnWidth: return settings.tableMinColumnWidth
+            case .tableMaxColumnWidth: return settings.tableMaxColumnWidth
             default: return 0
             }
         }
@@ -138,7 +162,7 @@ final class SettingsViewController: UIViewController {
             switch self {
             case .outlineHeightRatio:
                 return "\(Int((value * 100).rounded()))%"
-            case .outlineMaximumHeight:
+            case .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
                 return "\(Int(value.rounded())) pt"
             default:
                 return "\(value)"
@@ -231,6 +255,10 @@ final class SettingsViewController: UIViewController {
             settings.setOutlineHeightRatio(stepped)
         case .outlineMaximumHeight:
             settings.setOutlineMaximumHeight(stepped)
+        case .tableMinColumnWidth:
+            settings.setTableMinColumnWidth(stepped)
+        case .tableMaxColumnWidth:
+            settings.setTableMaxColumnWidth(stepped)
         default:
             return
         }
@@ -374,7 +402,7 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
             return makeToggleCell(for: row)
         case .outlineHeightMode:
             return makeHeightModeCell()
-        case .outlineHeightRatio, .outlineMaximumHeight:
+        case .outlineHeightRatio, .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
             return makeSliderCell(for: row)
         }
     }

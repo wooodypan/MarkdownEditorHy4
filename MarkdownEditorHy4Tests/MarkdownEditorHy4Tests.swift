@@ -596,11 +596,92 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertEqual(attachment.data.alignment(column: 1), .center)
         XCTAssertEqual(attachment.data.alignment(column: 2), .right)
 
-        // 尺寸：宽度 = 容器宽(600) - 16，高度按内容自适应
-        XCTAssertEqual(attachment.bounds.width, 584, accuracy: 1)
+        // 尺寸：宽度 = 三列按内容算出来的宽度之和（**不**撑满容器 600-16=584），高度自适应
+        XCTAssertLessThan(attachment.bounds.width, 584, "表格不该被拉到跟容器一样宽")
         XCTAssertGreaterThan(attachment.bounds.height, 60, "三行表格的高度不该只有这么点")
         XCTAssertNotNil(attachment.image, "表格要画成图片交给 TextKit")
         XCTAssertEqual(attachment.image?.size.width ?? 0, attachment.bounds.width, accuracy: 1)
+    }
+
+    /// 列宽必须受 `min/maxColumnWidth` 限制：短内容不被拉宽、长内容不被撑爆。
+    ///
+    /// ### 防的是什么回归
+    /// `makeLayout` 以前会把夹过 min/max 的列宽再整体缩放撑满容器，
+    /// 结果「列宽限制」形同虚设 —— 三列小表格在宽屏上跟窗口一样宽。
+    func testTableColumnWidthsAreClamped() throws {
+        // 容器给得很宽（模拟 Mac 全屏），三列内容都很短
+        let store = MarkdownDocumentStore()
+        store.load(markdown: "| Name | Age | City |\n| --- | ---: | --- |\n| Alice | 20 | Tokyo |\n",
+                   containerWidth: 1400)
+        let content = store.blocks[0].renderedContent
+        let attachment = try XCTUnwrap(firstTableAttachment(in: content))
+
+        let style = MarkdownTheme.default.table
+        let layout = MarkdownTableView.makeLayout(data: attachment.data,
+                                                  style: style,
+                                                  bodyFont: MarkdownTheme.default.bodyFont,
+                                                  headerFont: MarkdownTheme.default.bodyFont.adding(.traitBold),
+                                                  availableWidth: 1400)
+
+        XCTAssertEqual(layout.columnWidths.count, 3)
+        for width in layout.columnWidths {
+            XCTAssertGreaterThanOrEqual(width, style.minColumnWidth - 0.5, "列宽不该窄过最小值")
+            XCTAssertLessThanOrEqual(width, style.maxColumnWidth + 0.5, "列宽不该宽过最大值")
+        }
+        // 短内容：每列都该贴着最小值附近（内容比最小值还窄的按最小值算）
+        XCTAssertLessThan(layout.totalWidth, 300, "三列短表格的总宽不该被拉到几百点以外")
+        XCTAssertEqual(attachment.bounds.width, layout.totalWidth, accuracy: 1)
+        XCTAssertLessThan(attachment.bounds.width, 400, "三列短表格在 1400 宽的容器里依然是窄的")
+    }
+
+    /// 某一列内容特别长时，列宽封顶在 `maxColumnWidth`，总宽仍然受控
+    func testTableVeryLongCellIsCapped() throws {
+        let longText = String(repeating: "很长的单元格内容", count: 30)
+        let store = MarkdownDocumentStore()
+        store.load(markdown: "| 短 | \(longText) |\n| --- | --- |\n| a | b |\n",
+                   containerWidth: 1400)
+        let content = store.blocks[0].renderedContent
+        let attachment = try XCTUnwrap(firstTableAttachment(in: content))
+
+        let style = MarkdownTheme.default.table
+        let layout = MarkdownTableView.makeLayout(data: attachment.data,
+                                                  style: style,
+                                                  bodyFont: MarkdownTheme.default.bodyFont,
+                                                  headerFont: MarkdownTheme.default.bodyFont.adding(.traitBold),
+                                                  availableWidth: 1400)
+        XCTAssertEqual(layout.columnWidths[1], style.maxColumnWidth, accuracy: 1,
+                       "超长内容的列宽必须封顶在 maxColumnWidth")
+        XCTAssertEqual(layout.columnWidths[0], style.minColumnWidth, accuracy: 1)
+        XCTAssertEqual(layout.totalWidth, style.minColumnWidth + style.maxColumnWidth, accuracy: 1)
+    }
+
+    /// 列很多、总宽超过容器时，仍然要压回容器宽度内（不溢出）
+    func testTableTooWideShrinksToContainer() throws {
+        let header = (0..<20).map { "第\($0)列" }.joined(separator: " | ")
+        let divider = Array(repeating: "---", count: 20).joined(separator: " | ")
+        let row = (0..<20).map { "内容\($0)" }.joined(separator: " | ")
+        let store = MarkdownDocumentStore()
+        store.load(markdown: "| \(header) |\n| \(divider) |\n| \(row) |\n",
+                   containerWidth: 400)
+        let content = store.blocks[0].renderedContent
+        let attachment = try XCTUnwrap(firstTableAttachment(in: content))
+
+        XCTAssertLessThanOrEqual(attachment.bounds.width, 400 - 16 + 1,
+                                 "表格总宽不该超出容器")
+    }
+
+    /// 从渲染内容里挖出第一个表格 attachment
+    private func firstTableAttachment(in content: NSAttributedString) -> MarkdownTableAttachment? {
+        var found: MarkdownTableAttachment?
+        content.enumerateAttribute(.attachment,
+                                   in: NSRange(location: 0, length: content.length),
+                                   options: []) { value, _, stop in
+            if let table = value as? MarkdownTableAttachment {
+                found = table
+                stop.pointee = true
+            }
+        }
+        return found
     }
 
     /// 单元格里的行内语法（`**粗体**`）取出来应该是纯文本，不该带星号
@@ -865,10 +946,49 @@ final class MarkdownEditorHy4Tests: XCTestCase {
 
     // MARK: - 代码块背景（文档坐标修正）
 
-    /// 加载测试用例文档（两个代码块，第二个很长、超出好几屏）
+    /// 代码块测试文档：两个代码块，中间垫了足量正文，第二个块从 1500pt 开外才开始
+    /// （滚动用例要滚到 1500 还能看到它）。
+    ///
+    /// ### 为什么是内联字符串，不是 testcase/ 下的文件
+    /// 之前放在 `testcase/CodeBlockBackgroundTestCase.md`，目录清理时文件被删了、
+    /// 五条测试全挂。测试文档是测试自己的输入，内联进来谁也删不掉。
+    private var codeBlockTestCase: String {
+        """
+        # 代码块背景测试
+
+        第一段正文，用来把第一个代码块往下顶一点。
+
+        ```swift
+        let a = 1
+        let b = 2
+        print(a + b)
+        ```
+
+        \(Array(repeating: "这是一段垫在两个代码块之间的正文，让第二个代码块离第一屏足够远。", count: 23).joined(separator: "\\n\\n"))
+
+        ```bash
+        echo 长代码块第一行
+        for i in 1 2 3; do
+          echo "第 $i 轮"
+        done
+        until false; do
+          echo 永远走不到的分支
+          break
+        done
+        case "$1" in
+          start) echo 启动 ;;
+          stop) echo 停止 ;;
+          *) echo 用法：$0 {start|stop} ;;
+        esac
+        echo 长代码块最后一行
+        ```
+
+        结尾还有一行正文，保证代码块不是文档最后一个块。
+        """
+    }
+
     private func makeCodeBlockTestCaseEditor() throws -> MarkdownTextView {
-        let path = "/Users/pan/Project/iOSDemo/MarkdownEditorHy4/testcase/CodeBlockBackgroundTestCase.md"
-        return makeEditor(try String(contentsOfFile: path, encoding: .utf8))
+        makeEditor(codeBlockTestCase)
     }
 
     /// 扫出 textStorage 里所有代码块的字符区间
@@ -1064,6 +1184,97 @@ final class MarkdownEditorHy4Tests: XCTestCase {
                        accuracy: 2,
                        "背景没跟着滚动重新落位：\(placed.first?.origin.y ?? 0) 应该等于文档 y 减滚动量")
     }
+
+    // MARK: - 斜体 / 粗斜体
+
+    /// 渲染一段 markdown，取指定文字所在位置的字体字形特征（粗 / 斜）
+    private func fontTraits(for needle: String, in markdown: String) -> UIFontDescriptor.SymbolicTraits? {
+        let tv = makeEditor(markdown)
+        let text = tv.textStorage.string as NSString
+        let range = text.range(of: needle)
+        guard range.location != NSNotFound,
+              let font = tv.textStorage.attribute(.font, at: range.location, effectiveRange: nil) as? UIFont else {
+            return nil
+        }
+        return font.fontDescriptor.symbolicTraits
+    }
+
+    func testBoldItalicAndNestedItalic() {
+        let source = "这是 ***粗斜体***，以及 **包含 *嵌套斜体* 的粗体**。"
+
+        let boldItalic = fontTraits(for: "粗斜体", in: source)
+        XCTAssertNotNil(boldItalic, "渲染结果里找不到「粗斜体」")
+        XCTAssertTrue(boldItalic?.contains(.traitBold) == true, "***粗斜体*** 应该同时粗")
+        XCTAssertTrue(boldItalic?.contains(.traitItalic) == true, "***粗斜体*** 应该同时斜")
+
+        let nested = fontTraits(for: "嵌套斜体", in: source)
+        XCTAssertTrue(nested?.contains(.traitBold) == true, "** 里的 *嵌套斜体* 应该继承外层的粗")
+        XCTAssertTrue(nested?.contains(.traitItalic) == true, "** 里的 *嵌套斜体* 应该是斜的")
+
+        let boldOnly = fontTraits(for: "的粗体", in: source)
+        XCTAssertTrue(boldOnly?.contains(.traitBold) == true, "**包含 ... 的粗体** 整体应该是粗的")
+        XCTAssertFalse(boldOnly?.contains(.traitItalic) == true, "嵌套斜体结束后，后面的粗体不该还是斜的")
+
+        let plain = fontTraits(for: "这是", in: source)
+        XCTAssertFalse(plain?.contains(.traitBold) == true, "普通正文不该是粗的")
+        XCTAssertFalse(plain?.contains(.traitItalic) == true, "普通正文不该是斜的")
+    }
+
+    /// 斜体里的**中文**要换上带仿斜矩阵的字体（中文回退字体没有真斜体，
+    /// 不掰一下汉字歪不了），**英文**保持真斜体、不叠矩阵（叠了会歪过头）。
+    ///
+    /// ### 防的是什么回归
+    /// ① 只推了字体特征、没做中文仿斜 → 中文看起来「斜体没生效」；
+    /// ② 图省事整段加仿斜 → 英文双重倾斜。两条一起锁。
+    func testItalicSlantsCJKAndKeepsLatinUntouched() {
+        let source = "*斜体 English*"
+        let tv = makeEditor(source)
+        let text = tv.textStorage.string as NSString
+
+        let cjkRange = text.range(of: "斜体")
+        let latinRange = text.range(of: "English")
+        XCTAssertNotEqual(cjkRange.location, NSNotFound)
+        XCTAssertNotEqual(latinRange.location, NSNotFound)
+
+        let cjkFont = tv.textStorage.attribute(.font, at: cjkRange.location, effectiveRange: nil) as? UIFont
+        let latinFont = tv.textStorage.attribute(.font, at: latinRange.location, effectiveRange: nil) as? UIFont
+
+        // 英文：真斜体
+        XCTAssertTrue(latinFont?.fontDescriptor.symbolicTraits.contains(.traitItalic) == true,
+                      "英文应该用真斜体字体")
+        // 中文：字体和英文那个「真斜体」不一样 —— 说明被换成了带仿斜矩阵的版本。
+        // 没做仿斜的话，中文区间拿到的字体和英文完全相同，这条就会挂
+        XCTAssertNotEqual(cjkFont, latinFont,
+                          "中文没有被掰歪（字体和英文的真斜体一模一样），斜体对中文等于没生效")
+
+        // 两个字体应该同族（仿斜矩阵只改矩阵，不改字体名）
+        XCTAssertEqual(cjkFont?.fontName, latinFont?.fontName,
+                       "仿斜只该加矩阵，不该把中文换成别的字体")
+    }
+
+    /// 粗斜体（`***x***`）里的中文：既要保留粗，也要被掰歪。
+    ///
+    /// ### 防的是什么回归
+    /// 做仿斜时如果把整段字体重建成了「只有矩阵没有粗」的版本，
+    /// 粗斜体会退化成细斜 —— 这条锁住「粗 + 歪」两个特征同时在场。
+    func testBoldItalicCJKKeepsBoldAndSlant() throws {
+        let tv = makeEditor("***粗斜体***")
+        let text = tv.textStorage.string as NSString
+        let range = text.range(of: "粗斜体")
+        XCTAssertNotEqual(range.location, NSNotFound)
+
+        let font = try XCTUnwrap(tv.textStorage.attribute(.font, at: range.location,
+                                                          effectiveRange: nil) as? UIFont)
+        XCTAssertTrue(font.fontDescriptor.symbolicTraits.contains(.traitBold),
+                      "粗斜体的中文必须还是粗的")
+        // 普通的「粗 + 斜」字体（没矩阵）。中文现在拿到的字体应该和它不一样 —— 不一样才说明矩阵加上了
+        let plainBoldItalic = themeBodyFont.adding(.traitBold).adding(.traitItalic)
+        XCTAssertNotEqual(font, plainBoldItalic,
+                          "中文粗斜体应该带仿斜矩阵（和普通粗斜字体不同），否则汉字歪不了")
+    }
+
+    /// 测试用的正文基准字体（和 MarkdownTheme.default 里的取法保持一致）
+    private var themeBodyFont: UIFont { .preferredFont(forTextStyle: .body) }
 
     /// 背景层里实际铺上去的那些 view 的 frame（测试里用它看渲染结果对不对）
     private func backgroundFrames(of textView: MarkdownTextView) -> [CGRect] {

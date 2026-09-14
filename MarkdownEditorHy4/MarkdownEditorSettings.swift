@@ -65,6 +65,9 @@ final class MarkdownEditorSettings {
         static let outlineHeightMode: OutlineHeightMode = .percentage
         static let outlineHeightRatio: Double = 0.7
         static let outlineMaximumHeight: Double = 360
+        /// 表格列宽默认值，和渲染层 `TableStyle` 的默认值保持一致
+        static let tableMinColumnWidth: Double = 64
+        static let tableMaxColumnWidth: Double = 280
     }
 
     /// 两个高度数值的合法范围。
@@ -76,6 +79,10 @@ final class MarkdownEditorSettings {
     enum Limits {
         static let outlineHeightRatio: ClosedRange<Double> = 0.3...1.0
         static let outlineMaximumHeight: ClosedRange<Double> = 120...900
+        /// 表格「最小列宽」的合法范围
+        static let tableMinColumnWidth: ClosedRange<Double> = 32...200
+        /// 表格「最大列宽」的合法范围
+        static let tableMaxColumnWidth: ClosedRange<Double> = 80...600
     }
 
     // MARK: 落盘
@@ -105,6 +112,8 @@ final class MarkdownEditorSettings {
         var outlineHeightMode: String?
         var outlineHeightRatio: Double?
         var outlineMaximumHeight: Double?
+        var tableMinColumnWidth: Double?
+        var tableMaxColumnWidth: Double?
     }
 
     // MARK: 配置项
@@ -136,6 +145,17 @@ final class MarkdownEditorSettings {
     /// 同样是上限不是固定高度。另外为了小屏上不把整屏盖住，
     /// 实际用时还会被父视图高度压一道（见 `MarkdownOutlineView.effectiveMaximumHeight`）
     private(set) var outlineMaximumHeight: Double
+
+    /// 表格**最窄**的一列有多宽（点）。默认 `64`。
+    ///
+    /// 列内容再短，列宽也不小于这个值 —— 不然「姓名」这种两字列会挤成一团。
+    private(set) var tableMinColumnWidth: Double
+
+    /// 表格**最宽**的一列有多宽（点）。默认 `280`。
+    ///
+    /// 某一列内容特别长（贴了个长链接）时，列宽到这个值就封顶，
+    /// 多出来的文字换行，别把别的列挤没了。
+    private(set) var tableMaxColumnWidth: Double
 
     /// 改「是否记住滚动位置」。值没变就什么都不做（不发通知、不写盘）
     func setRemembersScrollPosition(_ value: Bool) {
@@ -171,6 +191,24 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「表格最小列宽」。超出 `Limits.tableMinColumnWidth` 的值会被夹到边界上
+    func setTableMinColumnWidth(_ value: Double) {
+        let clamped = clamp(value, to: Limits.tableMinColumnWidth)
+        guard clamped != tableMinColumnWidth else { return }
+        tableMinColumnWidth = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「表格最大列宽」。超出 `Limits.tableMaxColumnWidth` 的值会被夹到边界上
+    func setTableMaxColumnWidth(_ value: Double) {
+        let clamped = clamp(value, to: Limits.tableMaxColumnWidth)
+        guard clamped != tableMaxColumnWidth else { return }
+        tableMaxColumnWidth = clamped
+        save()
+        postChange()
+    }
+
     // MARK: 初始化
 
     init(fileURL: URL = MarkdownEditorSettings.defaultFileURL) {
@@ -180,6 +218,8 @@ final class MarkdownEditorSettings {
         self.outlineHeightMode = Default.outlineHeightMode
         self.outlineHeightRatio = Default.outlineHeightRatio
         self.outlineMaximumHeight = Default.outlineMaximumHeight
+        self.tableMinColumnWidth = Default.tableMinColumnWidth
+        self.tableMaxColumnWidth = Default.tableMaxColumnWidth
         load()
     }
 
@@ -206,13 +246,21 @@ final class MarkdownEditorSettings {
         if let value = payload.outlineMaximumHeight {
             outlineMaximumHeight = clamp(value, to: Limits.outlineMaximumHeight)
         }
+        if let value = payload.tableMinColumnWidth {
+            tableMinColumnWidth = clamp(value, to: Limits.tableMinColumnWidth)
+        }
+        if let value = payload.tableMaxColumnWidth {
+            tableMaxColumnWidth = clamp(value, to: Limits.tableMaxColumnWidth)
+        }
     }
 
     private func save() {
         let payload = Payload(remembersScrollPosition: remembersScrollPosition,
                               outlineHeightMode: outlineHeightMode.rawValue,
                               outlineHeightRatio: outlineHeightRatio,
-                              outlineMaximumHeight: outlineMaximumHeight)
+                              outlineMaximumHeight: outlineMaximumHeight,
+                              tableMinColumnWidth: tableMinColumnWidth,
+                              tableMaxColumnWidth: tableMaxColumnWidth)
         guard let data = try? JSONEncoder().encode(payload) else { return }
         do {
             // 目录可能还不存在（第一次跑），先建出来
@@ -259,5 +307,20 @@ extension MarkdownEditorSettings {
         case .maximumHeight:
             appearance.heightRatio = nil
         }
+    }
+
+    /// 把表格列宽的配置写进编辑器主题的表格样式里。
+    ///
+    /// ### 「最小 > 最大」怎么办
+    /// 两个滑块各自独立，用户完全可能把最小值拖到比最大值还大
+    /// （最小值量程上限 200、最大值量程下限 80，中间是重叠的）。
+    /// 不拦着的话渲染层 `min(max(理想宽, min), max)` 会拿 max 当最终结果，
+    /// 「最小列宽」悄悄失效。这里以最大值为准，把最小值压回去。
+    func applyTableColumnWidths(to theme: inout MarkdownTheme) {
+        var minValue = tableMinColumnWidth
+        let maxValue = tableMaxColumnWidth
+        if minValue > maxValue { minValue = maxValue }
+        theme.table.minColumnWidth = CGFloat(minValue)
+        theme.table.maxColumnWidth = CGFloat(maxValue)
     }
 }
