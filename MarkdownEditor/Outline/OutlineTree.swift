@@ -99,6 +99,24 @@ struct OutlineTree {
         !children[index].isEmpty
     }
 
+    /// 这一行能不能折 —— 右边的展开 / 折叠三角只画在「能折的行」上。
+    ///
+    /// 两个条件缺一不可：
+    /// 1. **层级在 H1-H5**：H6 是最深一级，不可能有下级（没有 H7）；
+    /// 2. **底下确实还有标题**：叶子行折起来不会有任何东西消失，
+    ///    画个三角在那儿，用户点了什么都不发生，反而像是坏了。
+    ///
+    /// 面板的三角显示、`toggleCollapse` 的守卫、以及标题栏那个
+    /// 「全部折叠」要折哪些行，三处都走这一个判据，免得改了一处漏另一处
+    func canCollapse(at index: Int) -> Bool {
+        items[index].level <= 5 && hasChildren(at: index)
+    }
+
+    /// 所有能折的行的下标（顺序无关，调用方多半要转成 id 集合）
+    var collapsibleIndices: [Int] {
+        items.indices.filter { canCollapse(at: $0) }
+    }
+
     /// 自底向上算出每个节点的 `subtreeEnd`。
     ///
     /// 从最后一个节点往前扫：它的整棵子树结束于「它所有孩子的 subtreeEnd 里最大的那个」，

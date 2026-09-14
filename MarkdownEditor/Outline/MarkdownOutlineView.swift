@@ -35,6 +35,8 @@ struct MarkdownOutlineAppearance {
     var rowHeight: CGFloat = 30
     /// 列表整体上下留白
     var bodyVerticalPadding: CGFloat = 4
+    /// 列表左右各留多少（行本身还会在此基础上再缩进）
+    var bodyHorizontalPadding: CGFloat = 5
     /// 每一级标题相对上一级多缩进多少（H1 不缩进，H2 缩一档……）
     var indentPerLevel: CGFloat = 10
     /// 一行的最大缩进，防止 H6 把标题挤成竖排
@@ -59,35 +61,50 @@ struct MarkdownOutlineAppearance {
 /// ### 交互
 /// - 点某一行 → 通过 `delegate` 把 `OutlineItem` 报出去（谁接、接了干什么，它不知道）；
 /// - 点一行右边的三角 → 展开 / 折叠这一节（收起来它下面的所有子标题）；
-/// - 右上角箭头 → 收起成一个小方块，再点小方块展开（长文档时把编辑区让出来）。
+/// - 点标题栏的「全部折叠 / 全部展开」→ 一刀切地折起或放出所有能折的节；
+/// - 点标题栏最右边的箭头 → 收起成一个小方块，再点小方块展开（长文档时把编辑区让出来）。
 ///
 /// ### 布局上的两个「自适应」
 /// 面板自己不指定位置（位置由外部容器用约束定），只负责自己的
 /// **宽度**和**高度**：宽度按父视图宽度的比例收窄，高度按内容算并压在上限之下。
 /// 这样它在 iPhone 竖屏和 Mac Catalyst 大窗口里都能看。
 ///
-/// ### 为什么折叠没有改用 `UICollectionView` + 系统树形数据源
-/// 曾经评估过 `UICollectionView` + `NSDiffableDataSourceSectionSnapshot`
-/// （系统专为「树状可展开列表」提供的 API，`Files.app` 用的就是它）。
-/// 结论是**不适合本项目**，原因有三，都不是「嫌麻烦」：
+/// ### 行区域为什么用 `UICollectionView`
+/// 早先用的是一个竖排 `UIStackView`，每次数据变化就把**所有**标题行整批重建一遍。
+/// 2026-09-14 实测这样做的耗时随标题数**线性增长**（宿主机 800 高、行高 30）：
 ///
-/// 1. **它最诱人的那个好处在本项目不成立**。那套 API 的价值在于「数据更新时用稳定的
-///    标识做 diff，折叠状态自然保留」。而本项目的 `OutlineItem.id` 复用
-///    `MarkdownBlock.id`，编辑器每次增量编辑都会重建受影响的块、UUID 换新 ——
-///    标识**不稳定**。所以不管用哪个 UI 控件，「折叠状态怎么跨重建活下来」这件事
-///    都得自己写（`OutlineCollapseState` 就是干这个的）。换控件换不来这个好处。
+/// | 标题行数 | 一次折叠 + 布局 |
+/// |---|---|
+/// | 30 | 27 ms |
+/// | 80 | 78 ms |
+/// | 200 | 192 ms |
+/// | 400 | **414 ms** |
+///
+/// 大约**每行 1 毫秒**，而面板一屏最多只显示十几行 —— 也就是说有一多半的钱
+/// 花在了「看不见的行」上。长文档（几百个标题）里折叠一下会明显卡手。
+///
+/// 于是换成 `UICollectionView` + `UICollectionViewDiffableDataSource` +
+/// `NSDiffableDataSourceSectionSnapshot`：**只为屏幕上那十几行创建 cell**，
+/// 折叠一次的耗时不再随文档长度涨。
+///
+/// 换控件之前评估过两个「看着更省事」的想法，都放弃了，原因记在这儿免得再试一遍：
+///
+/// 1. **不能指望系统帮我们记住折叠状态**。那套 API 的卖点是「用稳定的标识做 diff，
+///    折叠状态自然保留」，而本项目的 `OutlineItem.id` 复用 `MarkdownBlock.id`，
+///    编辑器每次增量编辑都会重建受影响的块、UUID 换新 —— 标识**不稳定**。
+///    所以「折叠状态怎么跨重建活下来」这件事不管用哪个控件都得自己写
+///    （`OutlineCollapseState` 就是干这个的）。
 /// 2. **面板高度是「算」出来的，不是「量」出来的**。这块毛玻璃卡片的高度
 ///    （`refreshPanelSize`）要跟父视图尺寸、行数一起算，并且和收起 / 展开动画联动。
-///    改成 collection view 之后，高度就得反过来问布局系统要
-///    （`collectionViewContentSize` 要等一次布局才准），
-///    「约束算高度」和「布局算高度」两套机制互相等待，在 Catalyst 拉窗口时很容易抖。
-/// 3. **行数根本不是瓶颈**。面板最高 360pt、行高 30pt，一屏最多显示十来行；
-///    标题总数通常是几十个。整批重建视图（`rebuildRows`）在这个量级上是毫秒级，
-///    换 collection view 的 cell 复用省不下什么。
+///    如果改成反过来问布局系统要高度（`collectionViewContentSize` 得等一次布局才准），
+///    「约束算高度」和「布局算高度」两套机制就会互相等待，在 Catalyst 拉窗口时很容易抖。
 ///
-/// 采用的是那套方案里真正解决问题的部分：**树结构**（`OutlineTree`）、
-/// **折叠状态独立于数据更新**（`collapsedIDs` 单独存、每次更新对账）、
-/// **高亮在折叠场景下往上找可见祖先**。这三条与用什么控件无关。
+/// 这两个结论决定了现在的两条边界：
+/// - **折叠状态的唯一出处还是 `collapsedIDs`**（不把快照当数据源）。每次更新都按
+///   `OutlineCollapseState` 把旧 id 认到新 id 上，再照着它重建快照 ——
+///   标识不稳定这件事照旧由我们处理，不指望系统 diff 帮忙；
+/// - **高度仍旧自己算**（`bodyContentHeight` 用可见行数 × 行高）。
+///   快照只负责「显示哪些行」，不参与尺寸计算，也就不会和 Auto Layout 互相等待。
 final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     // MARK: 对外
@@ -113,7 +130,7 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     // MARK: 数据
 
     /// 完整的标题列表（包含被折叠藏起来的那些）。
-    /// 显示哪些行由 `tree` + `collapsedIDs` 算出来，见 `rebuildRows()`
+    /// 显示哪些行由 `tree` + `collapsedIDs` 算出来，见 `visualSnapshot()`
     private var items: [OutlineItem] = []
     /// 由 `items` 建出来的层级树（谁是谁的子标题）
     private var tree = OutlineTree(items: [])
@@ -123,26 +140,25 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// `OutlineItem` 每次编辑都会被整份换掉（块重建 → 新 id、新实例），
     /// 状态存在里面就等于「一编辑就没」。存在这里、并且每次更新时按
     /// `OutlineCollapseState` 对账到新的 id 上，折叠状态才能跨编辑活下来。
+    ///
+    /// ⚠️ 这也是整个折叠功能的**唯一出处**：列表里显示哪些行、高亮该落在谁身上，
+    /// 全部从它算出来（`collectionView` 的快照只是它的一个「投影」，不是数据源）
     private var collapsedIDs: Set<UUID> = []
+    /// 当前能折的行（有子标题、且层级在 H1-H5）的 id 集合。
+    /// 随 `items` 一起重算，供「全部折叠」和标题栏按钮状态使用
+    private var collapsibleIDs: Set<UUID> = []
 
     /// 当前**显示出来的**行，按显示顺序。
-    /// 高亮定位、滚动定位都基于它（而不是含隐藏行的 `items`）
+    /// 高亮定位、滚动定位、面板高度都基于它（而不是含隐藏行的 `items`）
     private var visibleItems: [OutlineItem] = []
 
-    /// id → 行视图。用来做高亮定位，不用每次遍历整个栈
-    private var rows: [UUID: OutlineRowView] = [:]
-    /// 当前高亮的 id。`nil` 表示没有任何一行是高亮的。
-    /// ⚠️ 存的是「实际点亮的那一行」的 id —— 目标行被折叠藏起来时，
-    /// 这里存的是往上找到的那个可见祖先（见 `highlightOutlineItem`）
-    private var highlightedID: UUID?
-
-    /// 最近一次「要求点亮谁」的 id（协调者给的原始 id，没做折叠折算）。
+    /// 最近一次「要求点亮谁」的原始 id（协调者给的，没做折叠折算）。
     ///
-    /// ### 为什么要跟 `highlightedID` 分开存
-    /// 行是整批重建的，重建之后旧的行视图全没了。要是只记「实际点亮的那一行」，
-    /// 重建完就不知道该重新点亮谁 —— 表现是「点一下折叠三角，当前章节那行的底色也没了」。
-    /// 记着原始目标就能照它重算一遍。数据更新时这个 id 可能已经过期，
-    /// 那也没关系：协调者紧接着会用新 id 再发一次，照样覆盖
+    /// ### 为什么存「要求」而不是「实际点亮的那一行」
+    /// 实际点亮谁要现算 —— 目标行可能正被折叠藏着（光标在收起来的章节里打字），
+    /// 这时要点亮的是它往上找到的那个可见祖先。而「要求」是稳定不变的，
+    /// 行重建、折叠变化之后都能拿它重算，不会出现「折一下底色就没了」。
+    /// 见 `effectiveHighlightID`
     private var requestedHighlightID: UUID?
 
     // MARK: 子视图
@@ -152,28 +168,65 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     private let headerBar = UIView()
     private let headerIcon = UIImageView()
     private let headerLabel = UILabel()
+    /// 「全部折叠 / 全部展开」——按当前是不是已经全折了切换图标和动作
+    private let collapseAllButton = UIButton(type: .system)
     private let collapseButton = UIButton(type: .system)
-    private let scrollView = UIScrollView()
-    private let rowsStack = UIStackView()
+    /// 行区域。这里是 cell 复用真正生效的地方：只为屏幕上看得见的那十几行创建视图
+    private let collectionView: UICollectionView
+    private var dataSource: UICollectionViewDiffableDataSource<Int, UUID>!
+    /// 一条标题都没有时的占位文字（不用 collection view 的补充视图，简单些）
+    private let emptyLabel = UILabel()
     /// 收起态铺满整卡的那个按钮
     private let expandButton = UIButton(type: .system)
 
     /// 卡片宽高（收起 / 展开都靠改这两个的 constant）
     private var panelWidthConstraint: NSLayoutConstraint!
     private var panelHeightConstraint: NSLayoutConstraint!
+    /// 上一次算行宽时用的面板宽度。宽度变了得让 flow layout 重新问一遍尺寸
+    private var lastLaidOutWidth: CGFloat = 0
 
     // MARK: 初始化
 
     init(appearance: MarkdownOutlineAppearance = MarkdownOutlineAppearance()) {
         self.appearance = appearance
+        self.collectionView = Self.makeCollectionView()
         super.init(frame: .zero)
         backgroundColor = .clear
         setupSubviews()
+        setupDataSource()
+        // 刚建出来还没接到任何标题列表，先照「空的」把标题栏按钮摆好，
+        // 免得出现一个既没图标也能按的按钮
+        updateHeaderControls()
     }
 
     required init?(coder: NSCoder) {
         // 和编辑器一样，界面全部走代码，不支持 storyboard
         fatalError("MarkdownOutlineView 不支持从 coder 解档")
+    }
+
+    /// 行区域的滚动视图。
+    ///
+    /// 用 `UICollectionViewFlowLayout` 而不是方案文档里的 list configuration：
+    /// 行高固定、不需要 self-sizing，flow layout 的 inset 和尺寸都由我们自己定，
+    /// 少一层「配置对象 → 布局 → 猜尺寸」的来回。宽度在
+    /// `sizeForItemAt` 里按当前可视宽度现取
+    private static func makeCollectionView() -> UICollectionView {
+        let layout = UICollectionViewFlowLayout()
+        layout.minimumLineSpacing = 0
+        layout.minimumInteritemSpacing = 0
+        layout.estimatedItemSize = .zero
+        layout.itemSize = CGSize(width: 100, height: 30)   // 真实尺寸由 sizeForItemAt 给
+        layout.sectionInset = .zero                        // 留白交给 appearance
+        let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        view.backgroundColor = .clear
+        // 行不多时不要出现上下回弹，看着晃
+        view.alwaysBounceVertical = false
+        view.showsVerticalScrollIndicator = true
+        // 面板贴在自己算的尺寸里，不需要系统按安全区再补一层内边距
+        view.contentInsetAdjustmentBehavior = .never
+        view.register(OutlineRowCell.self,
+                      forCellWithReuseIdentifier: OutlineRowCell.reuseIdentifier)
+        return view
     }
 
     // MARK: - MarkdownOutlineDisplaying
@@ -187,30 +240,24 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
                                                     to: items)
         self.items = items
         tree = OutlineTree(items: items)
+        // 能折的行只在列表变了的时候重算一次（「全部折叠」和标题栏按钮都要用）
+        collapsibleIDs = Set(tree.collapsibleIndices.map { items[$0].id })
+        // 列表换了，里面可能已经没有原来折着的那些标题了，清一遍残留标记
+        collapsedIDs.formIntersection(collapsibleIDs)
         rebuildRows(animated: false, preserveScroll: remembersScrollPosition)
     }
 
     /// 高亮某一行；传 nil 表示取消所有高亮
     func highlightOutlineItem(_ id: UUID?) {
-        // 记下「要求点亮的是谁」—— 行整批重建之后靠它把高亮补回来
+        // 只记「要求点亮谁」。真正点亮哪一行要按当前折叠状态现算（见 effectiveHighlightID），
+        // 这样行重建、折叠变化之后都不会丢高亮
         requestedHighlightID = id
+        refreshHighlightAppearance()
 
-        // 目标行可能正被折叠藏起来（光标在某个收起来的章节里打字）——
-        // 那种情况下应该点亮「往上找到的那个可见祖先」，而不是一个用户根本看不见的行
-        let targetID = visibleRepresentativeID(for: id)
-
-        guard targetID != highlightedID else { return }
-
-        // 先把上一行熄掉。注意 highlightedID 可能是行重建前的旧 id，
-        // 那时 rows 里已经查不到了，直接忽略即可
-        if let previous = highlightedID { rows[previous]?.apply(highlighted: false) }
-        highlightedID = targetID
-
-        guard let targetID, let row = rows[targetID] else { return }
-        row.apply(highlighted: true)
         // 「记住滚动位置」关掉时不自动滚 —— 列表停在你手滚到的位置，
         // 不然一边打字一边被列表拖着跑，想把某个章节固定住看都做不到
-        if remembersScrollPosition { scrollRowIntoView(for: targetID) }
+        guard remembersScrollPosition, let target = effectiveHighlightID else { return }
+        scrollRowIntoView(for: target)
     }
 
     // MARK: - 折叠 / 展开某一行
@@ -228,9 +275,9 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     /// 切换某一行的折叠状态。
     ///
-    /// 叶子行（没有子标题）不给折 —— 折了之后没有任何东西会消失，看着像坏了
+    /// 没有子标题的行不给折 —— 折了之后没有任何东西会消失，看着像坏了
     func toggleCollapse(id: UUID) {
-        guard let index = tree.index(of: id), tree.hasChildren(at: index) else { return }
+        guard let index = tree.index(of: id), tree.canCollapse(at: index) else { return }
         if collapsedIDs.contains(id) {
             collapsedIDs.remove(id)
         } else {
@@ -240,6 +287,36 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         // 免得折叠和更新各写一份、修了这个漏了那个。
         // 滚动位置这里**一定**要保住（不受设置影响）：用户手指刚点的就是这一行
         rebuildRows(animated: true, preserveScroll: true)
+    }
+
+    /// 现在是不是「已经全部折叠」了（能折的都折了，而且至少有一个能折的）。
+    ///
+    /// 标题栏那个按钮靠它决定「下一步是折还是放」以及画哪个图标
+    var isAllCollapsed: Bool {
+        !collapsibleIDs.isEmpty && collapsibleIDs.isSubset(of: collapsedIDs)
+    }
+
+    /// 一刀切：把所有能折的节都折起来。
+    ///
+    /// 折完的结果就是「只剩最顶层那几行」。做不出可折内容的标题（叶子）不参与 ——
+    /// 它们本来就没有三角
+    func collapseAll() {
+        guard !collapsibleIDs.isEmpty, !isAllCollapsed else { return }
+        collapsedIDs = collapsibleIDs
+        // 全部折起来之后列表会很短，原来的滚动位置没有意义了，直接回顶部
+        rebuildRows(animated: true, preserveScroll: false)
+    }
+
+    /// 一刀切：全部放出来（回到「默认全展开」）
+    func expandAll() {
+        guard !collapsedIDs.isEmpty else { return }
+        collapsedIDs.removeAll()
+        rebuildRows(animated: true, preserveScroll: true)
+    }
+
+    /// 标题栏按钮的动作：现在全折着就放出来，否则全折起来
+    @objc private func toggleCollapseAll() {
+        isAllCollapsed ? expandAll() : collapseAll()
     }
 
     /// 把所有行的折叠状态清空（换文档时调，让新文档从「全部展开」开始）。
@@ -265,10 +342,14 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         refreshPanelSize(animated: animated)
     }
 
-    /// 外观参数被外部改过之后调一次，重新算宽高
+    /// 外观参数被外部改过之后调一次，重新算宽高。
+    ///
+    /// 走一遍完整重建就够了：每个 cell 都是照着 `appearance` 现配的
+    /// （复用池里那些旧 cell 会被重新配置，不会留着上一次的行高和缩进）
     func refreshAppearance() {
-        applyRowAppearance()
-        refreshPanelSize(animated: false)
+        collectionView.collectionViewLayout.invalidateLayout()
+        panel.layer.cornerRadius = appearance.cornerRadius
+        rebuildRows(animated: false, preserveScroll: remembersScrollPosition)
     }
 
     /// 面板当前的高度。
@@ -277,6 +358,31 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 而 `frame` 要等一次布局真的跑完才会更新，读到的可能还是上一轮的。
     /// 单元测试用它断言「折叠之后卡片有没有变矮」
     var panelHeight: CGFloat { panelHeightConstraint.constant }
+
+    // MARK: - 测试用的小口子
+
+    /// 当前显示出来的行的标题，按显示顺序。
+    /// 测试拿它断言「折了之后还剩哪几行」—— 比去数屏幕上的 cell 稳（屏幕外的行没有 cell）
+    var visibleTitles: [String] { visibleItems.map(\.title) }
+
+    /// 第 index 行对应的 cell。屏幕外的行还没创建，返回 nil
+    func rowCell(at index: Int) -> OutlineRowCell? {
+        collectionView.cellForItem(at: IndexPath(item: index, section: 0)) as? OutlineRowCell
+    }
+
+    /// 测试用：当前已经创建出来的行，按显示顺序。
+    ///
+    /// ⚠️ 只有**屏幕上放得下**的那些行才有 cell —— 这正是换 collection view 想要的效果
+    /// （不再为看不见的行建视图）。所以拿它断言行数时，用例里的行数得在面板高度之内
+    var createdRowCells: [OutlineRowCell] {
+        collectionView.layoutIfNeeded()
+        return (0..<visibleItems.count).compactMap { rowCell(at: $0) }
+    }
+
+    /// 模拟「用手指点了这一行」（走和真实点击同一条路：报给 delegate）
+    func simulateRowTap(at index: Int) {
+        handleRowTap(at: index)
+    }
 
     // MARK: - 界面搭建
 
@@ -307,7 +413,7 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         applyCollapseState()
     }
 
-    /// 标题栏：图标 + 「大纲 · N」+ 收起箭头，底部一条分隔线
+    /// 标题栏：图标 + 「大纲 · N」+ 全部折叠 + 收起箭头，底部一条分隔线
     private func setupHeader(in content: UIView) {
         headerBar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(headerBar)
@@ -324,6 +430,11 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         headerLabel.textColor = .secondaryLabel
         headerLabel.translatesAutoresizingMaskIntoConstraints = false
         headerBar.addSubview(headerLabel)
+
+        collapseAllButton.translatesAutoresizingMaskIntoConstraints = false
+        collapseAllButton.tintColor = .secondaryLabel
+        collapseAllButton.addTarget(self, action: #selector(toggleCollapseAll), for: .touchUpInside)
+        headerBar.addSubview(collapseAllButton)
 
         collapseButton.setImage(UIImage(systemName: "chevron.right"), for: .normal)
         collapseButton.translatesAutoresizingMaskIntoConstraints = false
@@ -353,9 +464,15 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
             headerLabel.leadingAnchor.constraint(equalTo: headerIcon.trailingAnchor, constant: 6),
             headerLabel.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
-            // 防止长文案顶到箭头下面去
-            headerLabel.trailingAnchor.constraint(lessThanOrEqualTo: collapseButton.leadingAnchor,
+            // 防止长文案顶到按钮下面去
+            headerLabel.trailingAnchor.constraint(lessThanOrEqualTo: collapseAllButton.leadingAnchor,
                                                   constant: -4),
+
+            collapseAllButton.trailingAnchor.constraint(equalTo: collapseButton.leadingAnchor,
+                                                        constant: -2),
+            collapseAllButton.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
+            collapseAllButton.widthAnchor.constraint(equalToConstant: 26),
+            collapseAllButton.heightAnchor.constraint(equalToConstant: 26),
 
             collapseButton.trailingAnchor.constraint(equalTo: headerBar.trailingAnchor, constant: -7),
             collapseButton.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
@@ -371,37 +488,29 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     /// 可滚动的行区域
     private func setupScrollArea(in content: UIView) {
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        // 行不多时不要出现上下回弹，看着晃
-        scrollView.alwaysBounceVertical = false
-        scrollView.showsVerticalScrollIndicator = true
-        content.addSubview(scrollView)
+        collectionView.translatesAutoresizingMaskIntoConstraints = false
+        collectionView.delegate = self
+        // 数据源这里不设：`UICollectionViewDiffableDataSource` 初始化时会把自己
+        // 接到 collection view 的 dataSource 上（见 `setupDataSource`）
+        content.addSubview(collectionView)
 
-        rowsStack.axis = .vertical
-        rowsStack.alignment = .fill
-        rowsStack.spacing = 0
-        rowsStack.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.addSubview(rowsStack)
+        emptyLabel.text = "（本文档没有标题）"
+        emptyLabel.font = .preferredFont(forTextStyle: .caption2)
+        emptyLabel.textColor = .tertiaryLabel
+        emptyLabel.textAlignment = .center
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(emptyLabel)
 
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: headerBar.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            collectionView.topAnchor.constraint(equalTo: headerBar.bottomAnchor),
+            collectionView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            collectionView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            collectionView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
 
-            // ### 让 ScrollView 的内容撑得开、又不会横向错位
-            // 上下左右钉到 contentLayoutGuide = 内容高度由 stack 决定；
-            // stack 宽度等于 frameLayoutGuide 宽度 = 内容不会比可视区域宽（否则能左右拖）
-            rowsStack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor,
-                                           constant: appearance.bodyVerticalPadding),
-            rowsStack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor,
-                                              constant: -appearance.bodyVerticalPadding),
-            rowsStack.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor,
-                                               constant: 5),
-            rowsStack.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor,
-                                                constant: -5),
-            rowsStack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor,
-                                             constant: -10)
+            emptyLabel.topAnchor.constraint(equalTo: headerBar.bottomAnchor),
+            emptyLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            emptyLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            emptyLabel.heightAnchor.constraint(equalToConstant: appearance.emptyStateHeight)
         ])
     }
 
@@ -421,96 +530,119 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         ])
     }
 
+    /// 配数据源。
+    ///
+    /// ### 为什么标识符用 `UUID` 而不是 `OutlineItem` 本身
+    /// diffable 的数据源要求标识符 `Hashable`，而它一旦在别处被当成「整个条目的相等性」用，
+    /// 就会出现「标题文字改了但 id 没变 → 系统以为没变，不刷新那一行」。
+    /// 这里只拿 id 当标识，条目的其他字段按 id 现查（`item(for:)`），
+    /// 所以文字 / 层级怎么变都不会漏刷新。
+    private func setupDataSource() {
+        dataSource = UICollectionViewDiffableDataSource<Int, UUID>(
+            collectionView: collectionView
+        ) { [weak self] collectionView, indexPath, id in
+            let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: OutlineRowCell.reuseIdentifier, for: indexPath
+            ) as? OutlineRowCell ?? OutlineRowCell()
+            guard let self, let index = self.tree.index(of: id) else { return cell }
+            cell.configure(item: self.items[index],
+                           appearance: self.appearance,
+                           collapsed: self.collapsedIDs.contains(id),
+                           highlighted: id == self.effectiveHighlightID,
+                           // 「这行要不要画三角」是面板算的（它才知道树），cell 自己算不出来
+                           showsDisclosure: self.tree.canCollapse(at: index))
+            cell.onDisclosureTapped = { [weak self] in self?.toggleCollapse(id: id) }
+            return cell
+        }
+
+        // 分区本身要先存在，后面才能往 0 号分区里塞快照（永远只用这一个分区）
+        var initial = NSDiffableDataSourceSnapshot<Int, UUID>()
+        initial.appendSections([0])
+        dataSource.apply(initial, animatingDifferences: false)
+    }
+
+    private func item(for id: UUID) -> OutlineItem? {
+        tree.index(of: id).map { items[$0] }
+    }
+
     // MARK: - 行的构建
 
-    /// 重建所有行。
+    /// 把当前该显示哪些行、谁被折着，一次性算出来并交给 collection view。
     ///
-    /// ### 为什么整批重建，不做增量
-    /// 一次折叠会连带显示 / 隐藏一整段连续的行，增量增删要自己算「哪些行该出现、
-    /// 插在第几个」，稍不留神就是错位。行数不多（标题撑死几十个），
-    /// 整批重建比维护复用池省心得多，也避免「某几行显示的还是旧标题」这类难查的问题。
-    /// 滚动位置在重建前后是被记下来还原的，所以用户看不出这是「全拆了重建」。
+    /// ### 为什么每次都是「整份快照重来」
+    /// 数据源那边只认 id，而 id 在每次编辑后都会换新（块重建），
+    /// 所以增量 diff 本来也命中不了几行，不如整份重算 —— 反正 collection view
+    /// 只为屏幕上那十几行创建 cell，整份快照的开销是数据层的几百次比较，很便宜。
     /// - parameter preserveScroll: 重建之后要不要把列表滚回原来的位置。
     ///   列表**被换掉**（编辑改了标题）时，由「记住滚动位置」这个设置说了算；
-    ///   用户自己在列表里**折叠**时永远要保住位置 —— 手指刚点的地方不能跑
+    ///   用户自己在列表里**折叠**时永远要保住位置 —— 手指刚点的地方不能跑。
+    ///   「全部折叠」例外：列表会缩到只剩几行，位置没有意义，直接回顶部
     private func rebuildRows(animated: Bool, preserveScroll: Bool) {
-        // 先偷偷记下现在滚到哪儿 —— 重建会把所有行视图都换掉，
+        // 先偷偷记下现在滚到哪儿 —— 快照换完内容就全变了，
         // 不还原的话列表会「唰」地跳回顶部
-        let previousScrollOffset = preserveScroll ? scrollView.contentOffset : .zero
-
-        for subview in rowsStack.arrangedSubviews {
-            rowsStack.removeArrangedSubview(subview)
-            subview.removeFromSuperview()
-        }
-        rows.removeAll()
-        // 行都是新的了，之前那个高亮 id 对应的视图已经不存在 —— 清掉。
-        // 协调者紧接着会重发一次高亮指令（它会用最新 id 重算），所以这里不会漏高亮
-        highlightedID = nil
+        let previousScrollOffset = preserveScroll ? collectionView.contentOffset : .zero
 
         // 显示哪些行 = 整棵树里「没被折叠藏起来」的那些，按文档顺序。
         // 这一步同时把被折叠的后代整段跳过，所以行数会随折叠变化
         let visibleIndices = tree.visibleIndices(collapsedIDs: collapsedIDs)
         visibleItems = visibleIndices.map { items[$0] }
 
-        if visibleIndices.isEmpty {
-            rowsStack.addArrangedSubview(makeEmptyLabel())
-        } else {
-            for index in visibleIndices {
-                let item = items[index]
-                let row = OutlineRowView(item: item, appearance: appearance)
-                // 只有「还有子标题的 H1-H5」才画三角。H6 不可能有子标题（没有 H7），
-                // 没有子标题的行折起来不会有任何变化，画个三角反而让人以为坏了
-                row.setDisclosure(visible: showsDisclosure(at: index),
-                                  collapsed: collapsedIDs.contains(item.id))
-                row.onDisclosureTapped = { [weak self, id = item.id] in
-                    self?.toggleCollapse(id: id)
-                }
-                row.addTarget(self, action: #selector(rowTapped(_:)), for: .touchUpInside)
-                row.heightAnchor.constraint(equalToConstant: appearance.rowHeight).isActive = true
-                rowsStack.addArrangedSubview(row)
-                rows[item.id] = row
-            }
-        }
+        updateHeaderControls()
+        collectionView.isHidden = items.isEmpty
+        emptyLabel.isHidden = !items.isEmpty
 
-        updateHeaderText()
+        applySnapshot(animated: animated)
         refreshPanelSize(animated: animated)
+        // 尺寸改完让布局跑一次：下面要用 contentSize 夹滚动范围，也得让新的 cell 建出来
+        layoutIfNeeded()
         applyScrollOffset(previousScrollOffset)
-        reapplyHighlight()
+        refreshHighlightAppearance()
     }
 
-    /// 这一行要不要显示展开 / 折叠三角
-    private func showsDisclosure(at index: Int) -> Bool {
-        items[index].level <= 5 && tree.hasChildren(at: index)
-    }
-
-    private func makeEmptyLabel() -> UILabel {
-        let label = UILabel()
-        label.text = "（本文档没有标题）"
-        label.font = .preferredFont(forTextStyle: .caption2)
-        label.textColor = .tertiaryLabel
-        label.textAlignment = .center
-        label.heightAnchor.constraint(equalToConstant: appearance.emptyStateHeight).isActive = true
-        return label
-    }
-
-    private func updateHeaderText() {
-        // 显示的是**全部**标题数，不是当前可见行数 —— 折叠一下数字就变小的话，
-        // 反而看不出这份文档一共有多少内容
-        headerLabel.text = items.isEmpty ? "大纲" : "大纲 · \(items.count)"
-    }
-
-    /// 外观变了之后把每一行重刷一遍（字体、缩进都跟 appearance 有关）
-    private func applyRowAppearance() {
-        for row in rows.values {
-            row.applyAppearance(appearance)
+    /// 照当前的树 + 折叠状态，生成分区快照并应用
+    private func applySnapshot(animated: Bool) {
+        var snapshot = NSDiffableDataSourceSectionSnapshot<UUID>()
+        // 先把「谁挂在谁下面」整棵树铺好，再统一标展开 / 折叠 ——
+        // 顺序反过来的话，给一个还没加进快照的父节点标展开是无效的
+        snapshot.append(tree.roots.map { items[$0].id }, to: nil)
+        let parentIndices = items.indices.filter { !tree.children[$0].isEmpty }
+        for index in parentIndices {
+            snapshot.append(tree.children[index].map { items[$0].id }, to: items[index].id)
         }
-        panel.layer.cornerRadius = appearance.cornerRadius
+
+        // ⚠️ 实测（2026-09-14）：系统这个分区快照**默认把有子项的节点当成「收起」**，
+        // 光 append 出层级，界面上只会显示最顶层那几个根，下面的全都不见。
+        // 必须显式把要展开的父节点 expand 一遍。
+        // 所以这里先「全部展开」，再照着 `collapsedIDs` 把用户折好的收起来 ——
+        // 这两步的顺序不能反（先折后展的话，用户折好的会又被展开）
+        snapshot.expand(parentIndices.map { items[$0].id })
+        snapshot.collapse(collapsedIDs.filter { collapsibleIDs.contains($0) })
+        dataSource.apply(snapshot, to: 0, animatingDifferences: animated)
     }
 
-    @objc private func rowTapped(_ sender: OutlineRowView) {
-        guard let item = sender.item else { return }
+    /// 标题栏那两处文案 / 图标。
+    ///
+    /// 左边显示的是**全部**标题数，不是当前可见行数 —— 折叠一下数字就变小的话，
+    /// 反而看不出这份文档一共有多少内容。
+    /// 右边那个按钮要跟着「现在是不是已经全折了」换图标和含义（同一个位置一按到底，
+    /// 不用记「我上一步做了什么」）
+    private func updateHeaderControls() {
+        headerLabel.text = items.isEmpty ? "大纲" : "大纲 · \(items.count)"
+
+        let allCollapsed = isAllCollapsed
+        let symbol = allCollapsed ? "rectangle.expand.vertical" : "rectangle.compress.vertical"
+        collapseAllButton.setImage(UIImage(systemName: symbol), for: .normal)
+        collapseAllButton.accessibilityLabel = allCollapsed ? "全部展开" : "全部折叠"
+        // 一条能折的都没有（比如全文只有单层标题）→ 按钮置灰，明说这儿没得可折
+        collapseAllButton.isEnabled = !collapsibleIDs.isEmpty
+        collapseAllButton.tintColor = collapsibleIDs.isEmpty ? .tertiaryLabel : .secondaryLabel
+    }
+
+    /// 第 index 行被点了（整行点击 = 跳转）
+    private func handleRowTap(at index: Int) {
+        guard visibleItems.indices.contains(index) else { return }
         // 自己不知道点了之后要干嘛，交给外面
-        delegate?.outlineView(self, didSelect: item)
+        delegate?.outlineView(self, didSelect: visibleItems[index])
     }
 
     @objc private func toggleCollapsed() {
@@ -520,7 +652,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 收起 / 展开时该显示哪些子视图
     private func applyCollapseState() {
         headerBar.isHidden = isCollapsed
-        scrollView.isHidden = isCollapsed
+        collectionView.isHidden = isCollapsed || items.isEmpty
+        emptyLabel.isHidden = isCollapsed || !items.isEmpty
         expandButton.isHidden = !isCollapsed
         // 收起态下面板只有 46x36，展开按钮的可点区域比图标大得多，用圆角示意一下
         expandButton.tintColor = .secondaryLabel
@@ -560,15 +693,17 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     private var effectiveMaximumHeight: CGFloat {
         guard let superview, superview.bounds.height > 0 else { return appearance.maximumHeight }
         let parentHeight = superview.bounds.height
-                if let ratio = appearance.heightRatio {
-                    return min(parentHeight * ratio, parentHeight - Self.topSpaceAllowance)
-                }
+        if let ratio = appearance.heightRatio {
+            return min(parentHeight * ratio, parentHeight - Self.topSpaceAllowance)
+        }
         return min(appearance.maximumHeight, parentHeight * 0.62)
     }
 
     /// 行区域的自然高度（有多少行就要多高）。
     ///
-    /// ⚠️ 行数取的是**当前可见行**：折叠之后行变少了，卡片就该跟着矮下去
+    /// ⚠️ 行数取的是**当前可见行**：折叠之后行变少了，卡片就该跟着矮下去。
+    /// 这里刻意不用 `collectionView.contentSize` —— 那是布局跑完才准的值，
+    /// 而面板高度反过来决定 collection view 的高度，用它就会绕成一个圈
     private var bodyContentHeight: CGFloat {
         guard !visibleItems.isEmpty else { return appearance.emptyStateHeight }
         return CGFloat(visibleItems.count) * appearance.rowHeight + appearance.bodyVerticalPadding * 2
@@ -597,8 +732,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         guard changed else { return }
 
         if animated {
-            // 折叠 / 展开时卡片「长高变矮」的动画由这里出。行本身是整批重建的，
-            // 不给每行单独做动画 —— 那要维护两套增删逻辑，收益也不明显
+            // 折叠 / 展开时卡片「长高变矮」的动画由这里出。行本身是交给 collection view
+            // 的（cell 复用 + 系统自己的增删动画），不再自己给每行做动画
             UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseInOut]) {
                 self.superview?.layoutIfNeeded()
             }
@@ -610,6 +745,14 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         // 父视图尺寸变了（转屏、Catalyst 拉窗口）→ 宽高跟着重算。
         // 算出来的值只依赖父视图，所以改一次就收敛，不会来回抖
         refreshPanelSize(animated: false)
+
+        // 行宽 = 可视宽度 - 左右留白。宽度变了得让 layout 重新问一遍尺寸，
+        // 否则会沿用上一次的宽度（Catalyst 拉窗口时行会「短一截」）
+        let width = effectiveWidth
+        if abs(width - lastLaidOutWidth) > 0.5 {
+            lastLaidOutWidth = width
+            collectionView.collectionViewLayout.invalidateLayout()
+        }
     }
 
     // MARK: - 滚动到指定行
@@ -623,12 +766,13 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         guard let index = visibleItems.firstIndex(where: { $0.id == id }) else { return }
         let rowHeight = appearance.rowHeight
         let top = appearance.bodyVerticalPadding + CGFloat(index) * rowHeight
-        // 目标矩形给上下各留一行，避免刚好卡在边缘反复滚
-        let rect = CGRect(x: 0,
-                          y: max(0, top - rowHeight),
-                          width: 1,
-                          height: rowHeight * 3)
-        scrollView.scrollRectToVisible(rect, animated: true)
+        // 已经看得见就别动它，否则光标一动列表就跟着抖
+        let visibleTop = collectionView.contentOffset.y
+        let visibleBottom = visibleTop + collectionView.bounds.height
+        if top >= visibleTop + 0.5, top + rowHeight <= visibleBottom - 0.5 { return }
+        // 目标矩形给上面留一行，避免刚好卡在边缘反复滚
+        let desired = max(0, top - rowHeight)
+        scrollToContentOffsetY(desired, animated: true)
     }
 
     /// 重建之后把列表滚到该在的位置。
@@ -636,51 +780,94 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 传进来的偏移是 0 有两种情况：本来就停在顶部，或者「记住滚动位置」关着
     /// （`rebuildRows` 在那种情况下记的是 `.zero`）。后者要**真的回到顶部**，
     /// 所以这里不能遇到 0 就直接 return，得主动设一次。
-    ///
-    /// 先 `layoutIfNeeded()` 让新的行算完高度，`contentSize` 才是准的 ——
-    /// 否则拿到的还是上一次的尺寸，夹范围会夹错、滚不到位。
     private func applyScrollOffset(_ offset: CGPoint) {
-        scrollView.layoutIfNeeded()
-        let maximumY = max(0, scrollView.contentSize.height - scrollView.bounds.height)
-        let y = min(max(0, offset.y), maximumY)
-        guard abs(y - scrollView.contentOffset.y) > 0.5 else { return }
-        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: y), animated: false)
+        scrollToContentOffsetY(offset.y, animated: false)
     }
 
-    /// 行整批重建之后，把「当前章节」那一行的高亮补回来。
+    /// 把纵向偏移设到 `y`（自动夹在可滚范围内）。
     ///
-    /// 数据更新那一路其实不需要它：协调者拿到新列表后会重发一次高亮（用新 id）。
-    /// 它是给**折叠**兜底的 —— 折叠不经过协调者，不补的话点一下三角，
-    /// 当前章节的底色会跟着那一行一起消失
-    private func reapplyHighlight() {
-        let target = visibleRepresentativeID(for: requestedHighlightID)
-        highlightedID = nil
-        guard let target, let row = rows[target] else { return }
-        highlightedID = target
-        row.apply(highlighted: true)
+    /// 夹范围要用**布局之后**的 `contentSize`，否则拿到的还是上一次的尺寸，
+    /// 会夹错、滚不到位
+    private func scrollToContentOffsetY(_ y: CGFloat, animated: Bool) {
+        collectionView.layoutIfNeeded()
+        let maximumY = max(0, collectionView.contentSize.height - collectionView.bounds.height)
+        let clamped = min(max(0, y), maximumY)
+        guard abs(clamped - collectionView.contentOffset.y) > 0.5 else { return }
+        collectionView.setContentOffset(CGPoint(x: 0, y: clamped), animated: animated)
     }
 
-    /// 把「要高亮的目标 id」换算成「实际点亮哪一行的 id」。
+    // MARK: - 高亮
+
+    /// 此刻真正该点亮的那一行。
     ///
     /// 目标被折叠藏起来时，往上取**最外层那个被折叠的祖先**：
     /// 光标在某个收起来的 H2 下的 H3 里打字时，界面上真正显示的是 H2 那一行，
     /// 点亮它才是用户看到的「当前章节」。
-    private func visibleRepresentativeID(for id: UUID?) -> UUID? {
-        guard let id else { return nil }
-        // 列表里找不到这条（比如是重建前的旧 id）→ 原样返回，下面 rows 查不到会自然忽略
-        guard let index = tree.index(of: id) else { return id }
+    ///
+    /// 现算而不是存起来：行重建、折叠状态变化之后拿同一个「要求」重算，
+    /// 结果自然是对的，不会出现「折一下底色就没了」
+    private var effectiveHighlightID: UUID? {
+        guard let requested = requestedHighlightID else { return nil }
+        // 列表里找不到这条（比如是重建前的旧 id）→ 原样返回，下面查不到 cell 会自然忽略
+        guard let index = tree.index(of: requested) else { return requested }
         let representative = tree.representativeIndex(of: index, collapsedIDs: collapsedIDs)
         return items[representative].id
+    }
+
+    /// 把「现在谁该亮」刷到屏幕上的 cell 上。
+    ///
+    /// 只处理可见的那些（十几行），整屏刷一遍也不贵。
+    /// 屏幕外 / 还没创建的 cell 不用管 —— 它们创建时会照 `effectiveHighlightID` 配好
+    private func refreshHighlightAppearance() {
+        let target = effectiveHighlightID
+        for indexPath in collectionView.indexPathsForVisibleItems {
+            guard let cell = collectionView.cellForItem(at: indexPath) as? OutlineRowCell else { continue }
+            cell.apply(highlighted: cell.item?.id == target)
+        }
+    }
+}
+
+// MARK: - 点击 / 尺寸（行区域交给 collection view 管）
+
+extension MarkdownOutlineView: UICollectionViewDelegateFlowLayout {
+
+    /// 点了某一行 → 跳转那一节。
+    /// ⚠️ 点右边的折叠三角**不会**走到这里：三角是个 UIButton，
+    /// 它自己把触摸吃掉，不会变成「选中 cell」
+    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        collectionView.deselectItem(at: indexPath, animated: false)
+        handleRowTap(at: indexPath.item)
+    }
+
+    /// 行宽按当前可视宽度现取，行高固定。
+    ///
+    /// 不给固定宽度是因为面板宽度会随窗口变（`effectiveWidth`），
+    /// 写死的话窗口一拉行就短一截
+    func collectionView(_ collectionView: UICollectionView,
+                        layout collectionViewLayout: UICollectionViewLayout,
+                        sizeForItemAt indexPath: IndexPath) -> CGSize {
+        CGSize(width: max(0, collectionView.bounds.width - appearance.bodyHorizontalPadding * 2),
+               height: appearance.rowHeight)
+    }
+
+    func collectionView(_ collectionView: UICollectionView,
+                        layout collectionViewLayout: UICollectionViewLayout,
+                        insetForSectionAt section: Int) -> UIEdgeInsets {
+        UIEdgeInsets(top: appearance.bodyVerticalPadding,
+                     left: appearance.bodyHorizontalPadding,
+                     bottom: appearance.bodyVerticalPadding,
+                     right: appearance.bodyHorizontalPadding)
     }
 }
 
 // MARK: - 一行
 
-/// 目录里的一行。
+/// 目录里的一行（collection view 的 cell）。
 ///
 /// 纯 UI 控件，同样不认识 markdown —— 给它一个 `OutlineItem` 它就能显示。
-/// 用 `UIControl` 是为了直接吃 `touchUpInside`，不用自己写手势识别。
-final class OutlineRowView: UIControl {
+final class OutlineRowCell: UICollectionViewCell {
+
+    static let reuseIdentifier = "OutlineRowCell"
 
     /// 这一行对应的数据（点的时候要原样报出去）
     private(set) var item: OutlineItem?
@@ -694,7 +881,7 @@ final class OutlineRowView: UIControl {
     private let titleLabel = UILabel()
     /// 右边的展开 / 折叠三角
     private let disclosureButton = UIButton(type: .system)
-    private var appearance: MarkdownOutlineAppearance
+    private var appearance = MarkdownOutlineAppearance()
     /// 是不是「当前光标所在章节」那一行（跟手指按下时的高亮是两码事）。
     /// 对外只读 —— 单元测试靠它断言「高亮到底落到哪一行了」
     private(set) var isRowHighlighted = false
@@ -712,21 +899,70 @@ final class OutlineRowView: UIControl {
     /// 测试用：这一行右边显示着展开 / 折叠三角吗
     var isDisclosureVisible: Bool { !disclosureButton.isHidden }
 
-    init(item: OutlineItem, appearance: MarkdownOutlineAppearance) {
-        self.item = item
-        self.appearance = appearance
-        super.init(frame: .zero)
+    override init(frame: CGRect) {
+        super.init(frame: frame)
         setupSubviews()
-        applyAppearance(appearance)
     }
 
     required init?(coder: NSCoder) {
-        fatalError("OutlineRowView 不支持从 coder 解档")
+        fatalError("OutlineRowCell 不支持从 coder 解档")
     }
 
-    /// 手指按下时稍微变淡一下，给出即时反馈
+    /// 手指按下时稍微变淡一下，给出即时反馈（cell 自带的 `isHighlighted` 就是干这个的）
     override var isHighlighted: Bool {
         didSet { alpha = isHighlighted ? 0.5 : 1 }
+    }
+
+    /// 重新准备复用：上一轮的状态（回调、缩进）都得清掉，
+    /// 不然复用到别的行会带着上一行的东西
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        onDisclosureTapped = nil
+        item = nil
+        isRowHighlighted = false
+        applyHighlightAppearance()
+    }
+
+    /// 把数据填进视图：标题文字、层级缩进、折叠三角、高亮。
+    ///
+    /// ### 为什么是一个方法配齐，而不是几个小方法分开设
+    /// cell 会被**复用**：从屏幕上滚走的那一行，视图对象会被拿去显示另一行。
+    /// 所以每次复用必须把所有会变的东西都重写一遍。拆成「设标题」「设三角」「设高亮」
+    /// 几个方法分别调，早晚会漏掉一个 —— 症状是「这一行显示着上一行的三角状态」，
+    /// 而且只在滚动之后才出现，极难查。
+    ///
+    /// - parameter showsDisclosure: 要不要画右边的展开 / 折叠三角。
+    ///   由面板算好传进来 —— 「这一行还有没有子标题」要看整棵树，一行自己不知道
+    func configure(item: OutlineItem,
+                   appearance: MarkdownOutlineAppearance,
+                   collapsed: Bool,
+                   highlighted: Bool,
+                   showsDisclosure: Bool) {
+        self.item = item
+        self.appearance = appearance
+
+        titleLabel.text = item.title.isEmpty ? "（空标题）" : item.title
+
+        let indent = min(appearance.maximumIndent,
+                         CGFloat(max(0, item.level - 1)) * appearance.indentPerLevel)
+        accentBarLeading.constant = 6 + indent
+        titleLabelLeading.constant = 15 + indent
+
+        // 三角只在「还有子标题、且层级在 H1-H5」的行上显示（这条规则见
+        // `OutlineTree.canCollapse`）。叶子行折起来不会有任何变化，
+        // 画个三角反而让人以为坏了
+        disclosureButton.isHidden = !showsDisclosure
+        let name = collapsed ? "chevron.right" : "chevron.down"
+        disclosureButton.setImage(UIImage(systemName: name, withConfiguration: Self.disclosureSymbol),
+                                  for: .normal)
+        disclosureButton.accessibilityLabel = showsDisclosure ? (collapsed ? "展开" : "折叠") : nil
+        disclosureButton.accessibilityValue = collapsed ? "已折叠" : "已展开"
+
+        accessibilityLabel = "\(item.level) 级标题，\(item.title)"
+        accessibilityTraits = .button
+
+        isRowHighlighted = highlighted
+        applyHighlightAppearance()
     }
 
     /// 模拟点一下右边的展开 / 折叠三角（单元测试和 VoiceOver 之外的地方想触发时用）
@@ -734,59 +970,56 @@ final class OutlineRowView: UIControl {
         disclosureButton.sendActions(for: .touchUpInside)
     }
 
-    /// 设置这一行的展开 / 折叠三角长什么样。
-    /// - parameter visible: 有没有子标题 —— 没有就只留空位、不画三角
-    /// - parameter collapsed: 当前是折着的（▶）还是开着的（▼）
-    func setDisclosure(visible: Bool, collapsed: Bool) {
-        disclosureButton.isHidden = !visible
-        let name = collapsed ? "chevron.right" : "chevron.down"
-        disclosureButton.setImage(UIImage(systemName: name, withConfiguration: Self.disclosureSymbol),
-                                  for: .normal)
-        disclosureButton.accessibilityLabel = visible ? (collapsed ? "展开" : "折叠") : nil
-        disclosureButton.accessibilityValue = collapsed ? "已折叠" : "已展开"
+    /// 设置 / 取消「当前章节」高亮。
+    func apply(highlighted: Bool) {
+        guard highlighted != isRowHighlighted else { return }
+        isRowHighlighted = highlighted
+        applyHighlightAppearance()
     }
 
     private func setupSubviews() {
-        layer.cornerRadius = 7
-        layer.cornerCurve = .continuous
+        contentView.layer.cornerRadius = 7
+        contentView.layer.cornerCurve = .continuous
 
         accentBar.translatesAutoresizingMaskIntoConstraints = false
         accentBar.layer.cornerRadius = 1.25
         accentBar.isUserInteractionEnabled = false
-        addSubview(accentBar)
+        contentView.addSubview(accentBar)
 
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.numberOfLines = 1
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.isUserInteractionEnabled = false
-        addSubview(titleLabel)
+        contentView.addSubview(titleLabel)
 
         // 三角为什么也放 `tintColor` 而不是写死颜色：跟着主题走，深色模式不用单独管
         disclosureButton.translatesAutoresizingMaskIntoConstraints = false
         disclosureButton.tintColor = .tertiaryLabel
         disclosureButton.addTarget(self, action: #selector(disclosureTapped), for: .touchUpInside)
         // 三角在整个一行里是个小目标，给一个足够大的热区（24x24，符合最小可点尺寸）
-        addSubview(disclosureButton)
+        contentView.addSubview(disclosureButton)
 
         NSLayoutConstraint.activate([
-            accentBar.centerYAnchor.constraint(equalTo: centerYAnchor),
+            accentBar.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             // 高度取行的 55% 而不是写死数值：改 `rowHeight` 时它自己跟着变
-            accentBar.heightAnchor.constraint(equalTo: heightAnchor, multiplier: 0.55),
+            accentBar.heightAnchor.constraint(equalTo: contentView.heightAnchor, multiplier: 0.55),
             accentBar.widthAnchor.constraint(equalToConstant: 2.5),
 
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             // 标题右边给三角让位。⚠️ 三角即使隐藏着也占着这块位置，
             // 所以有子标题和没子标题的行，标题文字右边界是对齐的
             titleLabel.trailingAnchor.constraint(equalTo: disclosureButton.leadingAnchor),
 
-            disclosureButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            disclosureButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            disclosureButton.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            disclosureButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -2),
             disclosureButton.widthAnchor.constraint(equalToConstant: Self.disclosureSide),
             disclosureButton.heightAnchor.constraint(equalToConstant: Self.disclosureSide)
         ])
 
-        accentBarLeading = accentBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6)
-        titleLabelLeading = titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 15)
+        accentBarLeading = accentBar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor,
+                                                             constant: 6)
+        titleLabelLeading = titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor,
+                                                               constant: 15)
         accentBarLeading.isActive = true
         titleLabelLeading.isActive = true
     }
@@ -795,47 +1028,15 @@ final class OutlineRowView: UIControl {
         onDisclosureTapped?()
     }
 
-    /// 把数据填进视图：标题文字、层级缩进、字体粗细、无障碍描述
-    private func applyItem() {
-        guard let item else { return }
-        titleLabel.text = item.title.isEmpty ? "（空标题）" : item.title
-        titleLabel.font = Self.font(forLevel: item.level)
-
-        let indent = min(appearance.maximumIndent,
-                         CGFloat(max(0, item.level - 1)) * appearance.indentPerLevel)
-        accentBarLeading.constant = 6 + indent
-        titleLabelLeading.constant = 15 + indent
-
-        accessibilityLabel = "\(item.level) 级标题，\(item.title)"
-        accessibilityTraits = .button
-    }
-
-    /// 外观参数变了，重刷
-    func applyAppearance(_ appearance: MarkdownOutlineAppearance) {
-        self.appearance = appearance
-        applyItem()
-        applyHighlightAppearance()
-    }
-
-    /// 设置 / 取消「当前章节」高亮。
-    ///
-    /// 这里刻意**不发** `UIAccessibility.layoutChanged` 通知 —— 光标一边打字一边移动，
-    /// 每动一下就抢一次 VoiceOver 焦点会让读屏用户完全没法用。
-    func apply(highlighted: Bool) {
-        guard highlighted != isRowHighlighted else { return }
-        isRowHighlighted = highlighted
-        applyHighlightAppearance()
-    }
-
     private func applyHighlightAppearance() {
         if isRowHighlighted {
-            backgroundColor = tintColor.withAlphaComponent(0.13)
+            contentView.backgroundColor = tintColor.withAlphaComponent(0.13)
             accentBar.backgroundColor = tintColor
             accentBar.isHidden = false
             titleLabel.textColor = .label
             titleLabel.font = Self.font(forLevel: item?.level ?? 1, emphasized: true)
         } else {
-            backgroundColor = .clear
+            contentView.backgroundColor = .clear
             accentBar.backgroundColor = .clear
             accentBar.isHidden = true
             titleLabel.textColor = .secondaryLabel

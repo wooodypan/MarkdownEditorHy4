@@ -236,7 +236,7 @@ final class MarkdownOutlineFoldTests: XCTestCase {
         XCTAssertTrue(delegate.selected.isEmpty, "点折叠三角不该触发跳转")
 
         // 而点整行仍然是跳转（别顺手把原来的功能弄坏了）
-        rowViews(in: view)[0].sendActions(for: .touchUpInside)
+        view.simulateRowTap(at: 0)
         XCTAssertEqual(delegate.selected.map(\.title), ["第一章"])
     }
 
@@ -342,6 +342,119 @@ final class MarkdownOutlineFoldTests: XCTestCase {
         return makeItems(specs)
     }
 
+    // MARK: - 「全部折叠 / 全部展开」
+
+    /// 默认是全部展开的：一上来六行都在，按钮的含义是「全部折叠」
+    func testStartsFullyExpanded() {
+        let (view, host) = makeOutlineView()
+        view.updateOutlineItems(makeItems(treeSpecs))
+        host.layoutIfNeeded()
+
+        XCTAssertEqual(view.visibleTitles.count, 6, "冷启动应该是全部展开（默认）")
+        XCTAssertFalse(view.isAllCollapsed, "还没折过，不该认为「已经全折了」")
+    }
+
+    /// 全部折叠：能折的都折起来，结果就是「只剩最顶层那几个根标题」
+    func testCollapseAllLeavesOnlyRoots() {
+        let (view, host) = makeOutlineView()
+        let items = makeItems(treeSpecs)
+        view.updateOutlineItems(items)
+        host.layoutIfNeeded()
+
+        view.collapseAll()
+        host.layoutIfNeeded()
+
+        // A 折起来藏掉了 A1/A2/A2a，B 折起来藏掉了 B1 —— 只剩两个 H1
+        XCTAssertEqual(view.visibleTitles, ["第一章", "第二章"])
+        XCTAssertTrue(view.isAllCollapsed)
+        // 被藏起来的行要报「隐藏」，高亮逻辑靠它往上找可见祖先
+        XCTAssertTrue(view.isHidden(id: items[1].id), "A1 应该被藏起来了")
+        XCTAssertFalse(view.isHidden(id: items[0].id), "根标题自己必须还在")
+        // 卡片也要跟着变矮（行少了高度不变的话下面会多一片空白）
+        XCTAssertLessThan(view.panelHeight, heightThatFits(rows: 6))
+    }
+
+    /// 再点一次（全部展开）→ 六行全回来
+    func testExpandAllBringsEverythingBack() {
+        let (view, host) = makeOutlineView()
+        view.updateOutlineItems(makeItems(treeSpecs))
+        host.layoutIfNeeded()
+
+        view.collapseAll()
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles.count, 2)
+
+        view.expandAll()
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles.count, 6, "全部展开之后应该一行不少")
+        XCTAssertFalse(view.isAllCollapsed)
+    }
+
+    /// 「能折的才折」：没有下级标题的行本来就折不动，不能被算进「已全部折叠」里，
+    /// 也不能被藏起来（否则那一行就永远消失了）
+    func testCollapseAllSkipsLeafRows() {
+        let (view, host) = makeOutlineView()
+        // 第一章 / 第一章第一节（H1 带一个 H2）；第二章底下什么都没有
+        let items = makeItems([(1, "第一章"), (2, "第一章第一节"), (1, "第二章")])
+        view.updateOutlineItems(items)
+        host.layoutIfNeeded()
+
+        view.collapseAll()
+        host.layoutIfNeeded()
+
+        XCTAssertEqual(view.visibleTitles, ["第一章", "第二章"],
+                       "「第二章」没有下级，但它自己必须还在（它只是折不动，不是被藏）")
+        XCTAssertFalse(view.isCollapsed(id: items[2].id),
+                       "叶子行不该被标成「已折叠」—— 标了的话它会被当成折过的行")
+        XCTAssertTrue(view.isAllCollapsed)
+    }
+
+    /// 全文只有一层标题（没有任何能折的）→ 「全部折叠」是个空操作，不能崩、也不能
+    /// 谎报「已经全折了」（那会让按钮下一步显示成「全部展开」，点了却什么也不变）
+    func testCollapseAllWithNothingFoldable() {
+        let (view, host) = makeOutlineView()
+        let items = makeItems([(1, "甲"), (1, "乙"), (1, "丙")])
+        view.updateOutlineItems(items)
+        host.layoutIfNeeded()
+
+        XCTAssertFalse(view.isAllCollapsed, "一条能折的都没有，不该说自己「已经全折了」")
+        view.collapseAll()
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles.count, 3, "什么都不该变")
+        XCTAssertFalse(view.isAllCollapsed)
+    }
+
+    /// 标题栏那个按钮真的接着活儿：点一下全折，再点一下全张开，
+    /// 而且按钮的文案会跟着当前状态换（同一个位置一按到底，不用记上一步干了什么）
+    func testHeaderButtonTogglesCollapseAll() throws {
+        let (view, host) = makeOutlineView()
+        view.updateOutlineItems(makeItems(treeSpecs))
+        host.layoutIfNeeded()
+
+        let button = try XCTUnwrap(headerToggleButton(in: view), "标题栏里找不到「全部折叠」按钮")
+        XCTAssertEqual(button.accessibilityLabel, "全部折叠", "默认全展开时它的含义是「全部折叠」")
+
+        button.sendActions(for: .touchUpInside)
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles, ["第一章", "第二章"], "点一下应该全折起来")
+        XCTAssertEqual(button.accessibilityLabel, "全部展开", "折完之后按钮该变成「全部展开」")
+
+        button.sendActions(for: .touchUpInside)
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles.count, 6, "再点一下应该全张开")
+        XCTAssertEqual(button.accessibilityLabel, "全部折叠")
+    }
+
+    /// 全文没有标题时按钮要置灰 —— 点了没有任何反应，还不如明说「这儿没得可折」
+    func testHeaderButtonDisabledWhenNothingToFold() throws {
+        let (view, host) = makeOutlineView()
+        view.updateOutlineItems(makeItems([(1, "甲")]))
+        host.layoutIfNeeded()
+
+        let button = try XCTUnwrap(headerToggleButton(in: view))
+        XCTAssertFalse(button.isEnabled, "只有一层标题，没东西可折，按钮该置灰")
+    }
+
     // MARK: - 第 3 层补测：列表滚动位置
 
     /// 列表被换掉之后要保持滚动位置（「记住滚动位置」打开时，默认就是开的）
@@ -408,8 +521,13 @@ final class MarkdownOutlineFoldTests: XCTestCase {
     /// ### 为什么单测里 `sendActions` 还不够
     /// `sendActions(for: .touchUpInside)` 是**直接**把事件发给那个按钮，绕过了命中测试。
     /// 所以就算三角被什么挡住、或者热区其实是整行在吃点击，那些用例照样绿。
-    /// 这条改成直接问 `hitTest`：「按在这个坐标上，事件会落到谁手里」——
-    /// 落到按钮上才是真的能点。
+    /// 这条改成直接问 `hitTest`：「按在这个坐标上，事件会落到谁手里」。
+    ///
+    /// ### 判据为什么是「落到按钮上 / 落不到按钮上」
+    /// 行现在是个 `collectionViewCell` —— 它自己的 `hitTest` 会一路往里钻，
+    /// 返回 `contentView` 而不是 cell 本身，所以不能像以前那样断言「落在行上」。
+    /// 真正决定行为的是「有没有落在三角那个 `UIButton` 上」：
+    /// 落在按钮上 → 走「折叠」；没落在按钮上 → 事件冒泡给 collection view → 走「跳转」
     func testDisclosureButtonActuallyReceivesTaps() throws {
         let (view, host) = makeOutlineView()
         view.updateOutlineItems(makeItems(treeSpecs))
@@ -418,18 +536,18 @@ final class MarkdownOutlineFoldTests: XCTestCase {
         let row = try XCTUnwrap(rowViews(in: view).first)
         XCTAssertGreaterThan(row.bounds.width, 0, "测试前提：行得真的排过版")
 
-        // 右边那一条（三角所在的 24pt 热区）→ 不该落到整行上
+        // 右边那一条（三角所在的 24pt 热区）→ 必须落到三角按钮上
         for offset in [6.0, 14.0] {
             let point = CGPoint(x: row.bounds.maxX - offset, y: row.bounds.midY)
-            let hit = row.hitTest(point, with: nil)
-            XCTAssertFalse(hit === row,
-                           "点 x=\(point.x) 落到了整行上（走的是「跳转」那条路），三角点不到")
+            XCTAssertTrue(row.hitTest(point, with: nil) is UIButton,
+                          "点 x=\(point.x) 没落到三角上，折叠点不到")
         }
 
-        // 左边那块（标题文字一带）→ 仍然要落到整行上，跳转功能别被挤掉
+        // 左边那块（标题文字一带）→ 不能落到三角上，否则点了就不跳转了
         let titlePoint = CGPoint(x: 20, y: row.bounds.midY)
-        XCTAssertTrue(row.hitTest(titlePoint, with: nil) === row,
-                      "标题那一段应该还是整行吃点击（点了要能跳转）")
+        XCTAssertNotNil(row.hitTest(titlePoint, with: nil), "标题那一段总得有视图接住点击")
+        XCTAssertFalse(row.hitTest(titlePoint, with: nil) is UIButton,
+                       "标题那一段被三角按钮吃掉了，点标题就跳不了")
     }
 
     // MARK: - 小工具
@@ -464,21 +582,38 @@ final class MarkdownOutlineFoldTests: XCTestCase {
         return (view, host)
     }
 
-    /// 按显示顺序取出界面上的所有行
-    private func rowViews(in view: UIView) -> [OutlineRowView] {
-        guard let stack = firstVerticalStack(in: view) else { return [] }
-        return stack.arrangedSubviews.compactMap { $0 as? OutlineRowView }
+    /// 按显示顺序取出界面上已经创建的行。
+    ///
+    /// 行现在装在 collection view 里（cell 复用），屏幕外的行不建视图 ——
+    /// 所以拿它断言行数时，用例里的行数要落在面板高度之内（下面都是几行的小列表）。
+    /// 只关心「显示了几行」的话，用 `view.visibleTitles` 更稳
+    private func rowViews(in view: MarkdownOutlineView) -> [OutlineRowCell] {
+        view.createdRowCells
     }
 
     /// 当前高亮的那几行（正常应该正好 0 或 1 行）的标题
-    private func highlightedTitles(in view: UIView) -> [String] {
+    private func highlightedTitles(in view: MarkdownOutlineView) -> [String] {
         rowViews(in: view).filter(\.isRowHighlighted).compactMap { $0.item?.title }
     }
 
-    private func firstVerticalStack(in view: UIView) -> UIStackView? {
+    /// n 行都显示出来，卡片至少该有这么高（标题栏 + n 行 + 上下留白）。
+    /// 用来断言「折叠之后确实矮下去了」——拿它当参照，不去猜具体数值
+    private func heightThatFits(rows: Int) -> CGFloat {
+        let appearance = MarkdownOutlineAppearance()
+        return appearance.headerHeight
+            + CGFloat(rows) * appearance.rowHeight
+            + appearance.bodyVerticalPadding * 2
+    }
+
+    /// 从视图树里挖出标题栏那个「全部折叠 / 全部展开」按钮（面板没把它暴露出来，
+    /// 靠无障碍文案认）
+    private func headerToggleButton(in view: UIView) -> UIButton? {
         for subview in view.subviews {
-            if let stack = subview as? UIStackView, stack.axis == .vertical { return stack }
-            if let found = firstVerticalStack(in: subview) { return found }
+            if let button = subview as? UIButton,
+               button.accessibilityLabel == "全部折叠" || button.accessibilityLabel == "全部展开" {
+                return button
+            }
+            if let found = headerToggleButton(in: subview) { return found }
         }
         return nil
     }

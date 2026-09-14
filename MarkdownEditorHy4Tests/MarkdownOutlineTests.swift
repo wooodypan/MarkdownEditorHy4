@@ -410,7 +410,7 @@ final class MarkdownOutlineTests: XCTestCase {
                      makeItem(level: 2, title: "B", offset: 10)]
         view.updateOutlineItems(items)
 
-        rowViews(in: view)[1].sendActions(for: .touchUpInside)
+        view.simulateRowTap(at: 1)
         XCTAssertEqual(delegate.selected.count, 1)
         XCTAssertEqual(delegate.selected.first?.id, items[1].id,
                        "报出去的必须是那一行对应的原始数据")
@@ -463,9 +463,11 @@ final class MarkdownOutlineTests: XCTestCase {
         let rows = rowViews(in: outlineView)
         XCTAssertEqual(rows.count, 6, "装配完之后目录应该有 6 行")
 
-        // 点最后一行（H6），光标应该跳到它的源码位置
+        // 点最后一行（H6），光标应该跳到它的源码位置。
+        // 用 `simulateRowTap` 而不是 cell 的 `sendActions`：cell 没有 touchUpInside，
+        // 真实点击走的是 collection view 的选中回调，这个口子走的正是同一条路
         let target = coordinator.items[5]
-        rows[5].sendActions(for: .touchUpInside)
+        outlineView.simulateRowTap(at: 5)
         XCTAssertEqual(editor.cursorSourceOffset, target.sourceOffset)
     }
 
@@ -513,8 +515,8 @@ final class MarkdownOutlineTests: XCTestCase {
                        "正文里打字顶移了下游标题，目录却还拿着旧偏移（过期快照）")
 
         // 模仿「用户点最后一行目录」，光标必须落在「三级」上
-        let rows = rowViews(in: outlineView)
-        rows[2].sendActions(for: .touchUpInside)
+        XCTAssertEqual(outlineView.visibleTitles.count, 3, "测试前提：目录里该有三行")
+        outlineView.simulateRowTap(at: 2)
 
         XCTAssertEqual(editor.cursorSourceOffset, fresh[2].sourceOffset,
                        "点了「三级」，光标却落在源码第 \(editor.cursorSourceOffset) 位"
@@ -618,6 +620,17 @@ final class MarkdownOutlineTests: XCTestCase {
             return XCTFail("ViewController 的视图树里找不到 MarkdownOutlineView —— 装配漏了")
         }
 
+        // 面板默认是**收起**的（冷启动只显示右上角那个小方块），先按用户的真实操作展开。
+        // ⚠️ 这一步不能省：行是按需创建的（cell 复用），面板收着的时候一个行视图都没有 ——
+        // 以前用 UIStackView 时行视图一直都在（只是藏起来），所以这里少这一步也能「过」，
+        // 但那是在断言一堆看不见的视图
+        outline.setCollapsed(false, animated: false)
+        // 改宽高改的是面板自己的约束，光让 `controller.view` 跑布局不会把面板内部的行列表重排一遍
+        // （行列表的 frame 是在面板自己的 `layoutSubviews` 里摆的）。
+        // 面板收着的时候它内部的行列表高度是 0 —— 不重排就一行都建不出来。
+        outline.setNeedsLayout()
+        outline.layoutIfNeeded()
+
         let rows = rowViews(in: outline)
         XCTAssertGreaterThanOrEqual(rows.count, 5,
                                     "示例文档里有一级 + 七个小节标题，目录不该只有 \(rows.count) 行")
@@ -626,7 +639,7 @@ final class MarkdownOutlineTests: XCTestCase {
                       "所有行的层级都必须在 1...6 之间")
 
         // 点第一行不能崩，而且应该能顺着「面板 → 协调者 → 编辑器」把光标送过去
-        rows[0].sendActions(for: .touchUpInside)
+        outline.simulateRowTap(at: 0)
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
 
         XCTAssertEqual(rowViews(in: outline).filter(\.isRowHighlighted).count, 1,
@@ -698,21 +711,13 @@ final class MarkdownOutlineTests: XCTestCase {
         return view
     }
 
-    /// 按「数据顺序」取到界面上的所有行视图。
+    /// 按「显示顺序」取到界面上的所有行。
     ///
-    /// 所有行都装在同一个垂直栈里，所以先找到那个栈，再按栈里的排列顺序读 ——
-    /// 这样断言时的次序和数据次序一致，失败信息也好读
-    private func rowViews(in view: UIView) -> [OutlineRowView] {
-        guard let stack = firstVerticalStack(in: view) else { return [] }
-        return stack.arrangedSubviews.compactMap { $0 as? OutlineRowView }
-    }
-
-    private func firstVerticalStack(in view: UIView) -> UIStackView? {
-        for subview in view.subviews {
-            if let stack = subview as? UIStackView, stack.axis == .vertical { return stack }
-            if let found = firstVerticalStack(in: subview) { return found }
-        }
-        return nil
+    /// 行现在装在 collection view 里（cell 复用），所以只能取到**屏幕上已创建**的那些 ——
+    /// 下面这些用例都是三五行的小列表，面板高度足够，全部都会创建出来。
+    /// 断言「显示了几行」这类和数据有关的事，用 `view.visibleTitles` 更稳
+    private func rowViews(in view: MarkdownOutlineView) -> [OutlineRowCell] {
+        view.createdRowCells
     }
 
     /// 递归找界面上的目录面板（`ViewController` 里它是私有属性，只能从视图树里挖）
@@ -727,10 +732,11 @@ final class MarkdownOutlineTests: XCTestCase {
     /// 一行的左缩进，取的是标题文字那条 leading 约束的 constant。
     ///
     /// 不去读 frame —— 那要求 Auto Layout 已经跑过；直接读约束值跟布局时机无关，
-    /// 断言更稳，也不会因为宿主视图换了尺寸而漂
-    private func indent(of row: OutlineRowView) -> CGFloat {
-        for subview in row.subviews where subview is UILabel {
-            for constraint in row.constraints
+    /// 断言更稳，也不会因为宿主视图换了尺寸而漂。
+    /// 标题挂在 cell 的 `contentView` 上（cell 复用的规矩），所以约束要去那儿找
+    private func indent(of row: OutlineRowCell) -> CGFloat {
+        for subview in row.contentView.subviews where subview is UILabel {
+            for constraint in row.contentView.constraints
             where constraint.firstItem === subview && constraint.firstAttribute == .leading {
                 return constraint.constant
             }
