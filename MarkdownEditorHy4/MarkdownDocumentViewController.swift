@@ -1,16 +1,50 @@
 //
-//  ViewController.swift
+//  MarkdownDocumentViewController.swift
 //  MarkdownEditorHy4
 //
-//  Demo 界面：一个 markdown 编辑器 + 右上角「⋯」弹出菜单（重载 / 分块 / 源码 / 校验）
-//  Mac 上另有菜单栏：文件 > 新建 / 打开 / 存储
+//  「一份文档」这一页：markdown 编辑器 + 悬浮目录 + 右上角「⋯」菜单
+//  （重载 / 分块 / 源码 / 校验 / 导出成图片 / 设置）。
+//  Mac 上另有菜单栏：文件 > 新建 / 打开 / 存储。
+//
+//  ### 它是右侧多 Tab 里的**内容页**
+//  自己不决定「我是第几个 Tab、什么时候被关掉」——那些由 `MultiTabController` 的
+//  详情宿主（`DetailHostViewController`）管。它只需要满足库要求的 `PPContentDisplaying`：
+//  能被一份内容项配置（`configure(with:)`）、能拿到一个上报通道（`contentHost`）。
+//
+//  ### 它同时是「Command 键命令」的落点
+//  ⌘N / ⌘O / ⌘S 都是靠响应链找到当前这一页的：**哪个 Tab 在前台，命令就作用在它身上** ——
+//  这正是多 Tab 编辑该有的行为，不需要额外写「当前 Tab 是哪个」的分发逻辑。
 //
 
 import UIKit
 // 菜单里的「打开」要判断哪些文件可选，用到 UTType.markdown
 import UniformTypeIdentifiers
+import MultiTabController
 
-final class ViewController: UIViewController {
+/// ⚠️ `PPContentDisplaying` 必须写在类型声明上，不能只写个 extension：内容页工厂的闭包
+/// 声明成「返回 `PPContentDisplaying`」，少了这一致性，闭包体里那个 `MarkdownDocumentViewController()`
+/// 就转换不过去 —— 编译器报的却是一句很难懂的
+/// `unable to infer closure type without a type annotation`（指着一整个闭包，看不出真正的问题）。
+final class MarkdownDocumentViewController: UIViewController, PPContentDisplaying {
+
+    // MARK: 与多 Tab 宿主的连接
+
+    /// 宿主注入的上报通道。
+    ///
+    /// ⚠️ 必须 `weak`：宿主强引用着每一个 Tab 的内容页（这是「保活」的实现方式），
+    /// 这里再强引用回去就成了循环引用，Tab 关掉也放不掉。
+    weak var contentHost: PPContentHosting?
+
+    /// 有人在我还是「预览 Tab」的时候改了我 → 告诉宿主把我固定成正式 Tab。
+    ///
+    /// 只报一次，也**只报 true**：宿主那边的约定是「收到 true 就把这一页固定下来，
+    /// 收到 false 就把预览标记还回去」。如果保存之后顺手报一个 false，
+    /// 用户双击开出来的那个正式 Tab 会被降级回预览，被下一次单击顶掉 —— 那就反了。
+    private var didReportEdited = false
+
+    /// 内容项可能在 `viewDidLoad` **之前**就送到了（宿主要先建好 Tab 才会显示它）。
+    /// 先存下来，等界面搭好再套用 —— 这也是库在 `PPContentDisplaying` 里写明的约定
+    private var pendingItem: PPContentItem?
 
     // MARK: 子视图
 
@@ -28,7 +62,11 @@ final class ViewController: UIViewController {
     private let scrollMemory = DocumentScrollMemory.shared
     private var bottomConstraint: NSLayoutConstraint?
 
-    /// 当前打开的文件。nil 表示在看内置示例文档，这类内容不能保存回磁盘
+    /// 当前这一页对应磁盘上的哪个文件 —— 也就是 ⌘S 要写回哪里。
+    ///
+    /// 正常情况下一定有值（每个 Tab 都是被某一份文件开出来的）。为 nil 只有一种情形：
+    /// 宿主没送内容项就直接把我显示出来了（不该发生），这时按「未命名」对待、
+    /// ⌘S 会提示没有可保存的文件。
     private var openedFileURL: URL?
     /// 上次打开/保存时的源码快照，和它比对就知道有没有改动
     private var savedSource = ""
@@ -36,12 +74,7 @@ final class ViewController: UIViewController {
     private var isDirty: Bool { editor.markdownSource != savedSource }
     /// 临时提示（比如「已保存」）显示完要恢复成常规状态栏
     private var statusResetWork: DispatchWorkItem?
-    /// 是不是「新建」出来的空白草稿。用来区分它和内置示例文档 —— 两者都没有关联文件，
-    /// 但标题该显示「未命名」还是「示例文档」不一样
-    private var isNewDraft = false
-    /// 当前弹出的文件选择器是不是「另存为」（导出）用途，回调里要靠它区分两种面板
-    private var isExportingDocument = false
-    /// 当前弹出的文件选择器是不是「导出成图片」用途（Mac），和上面那个互斥
+    /// 当前弹出的文件选择器是不是「导出成图片」用途（Mac）
     private var isExportingImage = false
 
     override func viewDidLoad() {
@@ -52,19 +85,16 @@ final class ViewController: UIViewController {
         setupMenuButton()
         setupEditor()
         setupStatusLabel()
-        // 冷启动时文件 URL 已经在 MarkdownDocumentOpener 里等着了，先取出来用；
-        // 没有外部文件才退回到内置示例文档
-        if let url = MarkdownDocumentOpener.shared.takePendingURL() {
-            openDocument(at: url)
-        } else {
-            loadSampleDocument()
+        // 套用宿主送来的内容项。到这一步才做，是因为下面的界面这时才建好 ——
+        // 而且大纲的「初次拉取」也依赖文档已经装进去了
+        if let item = pendingItem {
+            apply(item)
         }
         // 放在文档加载**之后**：装配时的「初次拉取」才能真正拉到标题。
         // 放前面也能跑（编辑器那次 push 会被忽略），但会白拉一次空列表
         applyTableStyle()
         setupOutline()
         observeKeyboard()
-        observeDocumentOpenRequests()
         observeEditorChanges()
         observeSettingsChanges()
         // 离开前台时把「读到哪儿」记一笔（用户常常是随手切走、再也没回来）
@@ -187,8 +217,8 @@ final class ViewController: UIViewController {
     private func makeActionMenu() -> UIMenu {
         let actions: [UIAction] = [
             UIAction(title: "重载", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
-                // 回到内置示例文档，重新渲染一遍
-                self?.reloadSample()
+                // 丢掉未保存的改动，从磁盘把这份文件重新读一遍
+                self?.reloadFromDisk()
             },
             UIAction(title: "分块", image: UIImage(systemName: "square.grid.2x2")) { [weak self] _ in
                 // 弹窗列出当前所有块的源码 / 渲染区间
@@ -270,14 +300,12 @@ final class ViewController: UIViewController {
 
     // MARK: 记住「这份文档读到哪儿了」
 
-    /// 这份文档在「阅读位置」里的钥匙。
+    /// 这份文档在「阅读位置」里的钥匙 —— 就是文件路径。
     ///
-    /// - 打开的磁盘文件 → 用文件路径（同一个文件重开回到原处）；
-    /// - 内置示例文档 → 一个固定字符串（内容每次都一样，记得住就有意义）；
-    /// - 新建的空白草稿 → `nil`，不记。它每次都是新的，记了也没下一次。
+    /// 现在每一页都对应磁盘上一份文件，所以不再有「内置示例 / 空白草稿」那两种
+    /// 没有文件可记的情形。真没有文件就返回 nil，等于不记。
     private var documentScrollKey: String? {
-        if let url = openedFileURL { return url.path }
-        return isNewDraft ? nil : "<sample>"
+        openedFileURL?.path
     }
 
     /// 离开当前文档之前，把它读到哪儿记下来。
@@ -314,71 +342,78 @@ final class ViewController: UIViewController {
         rememberCurrentScrollPosition()
     }
 
-    // MARK: 载入示例文档
+    // MARK: - PPContentDisplaying（宿主 → 内容页）
 
-    private func loadSampleDocument() {
-        let text = loadSampleMarkdown() ?? """
-        # 找不到示例文档
+    /// 宿主送来一份内容项：把这一页换成那份文档。
+    ///
+    /// ⚠️ 宿主**可能在我的界面还没建好时就调用**（Tab 是先创建、后显示）。
+    /// 所以这里只把内容存下来，真正的加载留给 `viewDidLoad`
+    func configure(with item: PPContentItem) {
+        pendingItem = item
+        guard isViewLoaded else { return }
+        // 界面已经在了（比如同一个预览 Tab 被复用成另一份文档）→ 当场换
+        apply(item)
+    }
 
-        `Resources/sample.md` 没被打包进 App，先看这段兜底内容。
+    /// 把一份内容项装进编辑器。
+    ///
+    /// 文本是从内容项里取的（`item.body`），不再自己去读盘：
+    /// 「读文件」那一步在左侧栏做完，读失败在那里就被拦住了 ——
+    /// 不然这里拿到空内容、用户一按 ⌘S 就把原文件清空了。
+    private func apply(_ item: PPContentItem) {
+        let url = URL(fileURLWithPath: item.id)
+        let isSameDocument = openedFileURL == url
 
-        - 列表项一
-        - 列表项二
+        // 换文档 = 换一把「阅读位置」的钥匙。必须在改 openedFileURL 之前记，
+        // 那之后 documentScrollKey 就已经指向新文档了
+        if !isSameDocument { rememberCurrentScrollPosition() }
 
-        ![示例图片](sample.png)
-        """
-        isNewDraft = false
-        openedFileURL = nil
-        savedSource = text
-        editor.imageBaseURL = FileManager.default.urls(for: .documentDirectory,
-                                                       in: .userDomainMask).first
-        editor.setMarkdown(text)
+        openedFileURL = url
+        savedSource = item.body
+        // 换了一份文档 → 「我改过了」这件事重新从零算（新 Tab 该有新的机会被固定）
+        didReportEdited = false
+        // md 里的图片多是相对路径，基准目录要指向文件所在目录，否则图片全裂
+        editor.imageBaseURL = url.deletingLastPathComponent()
+        editor.setMarkdown(item.body)
+
         refreshStatus()
         updateWindowTitle()
         // 换文档 → 大纲从「全部展开」开始（上一份文档折过什么，跟这一份没关系）
         outlineView.resetFolding()
-        restoreScrollPositionIfNeeded()
+        // 同一份文档被重新配置（预览 Tab 复用回它自己）就别乱滚，免得跳走
+        if !isSameDocument { restoreScrollPositionIfNeeded() }
     }
 
     // MARK: 新建 / 打开（Mac 菜单入口）
 
     /// ⌘N：新建一份空白文档。
-    /// 这时还没有对应的磁盘文件，第一次按 ⌘S 会弹「另存为」让你挑保存位置
+    ///
+    /// 这个动作**不在这一页里完成** —— 它只是把「想新建」这件事报出去，
+    /// 由左侧栏（它管着文档目录和路由）去磁盘上建文件、并在右侧开一个新 Tab。
+    ///
+    /// ### 为什么绕这一圈
+    /// 新架构下每一份文档都是目录里的一个真文件。如果在这里就地清空当前 Tab，
+    /// 会先把用户正在看的那份文件从界面上顶掉、而新文档又没有落盘，
+    /// 左侧栏和右侧就对不上了。
     @objc func newDocument() {
-        confirmDiscardIfNeeded { [weak self] canContinue in
-            guard let self, canContinue else { return }
-            // 换文档 = 换一把「阅读位置」的钥匙。必须在改 openedFileURL / isNewDraft 之前记，
-            // 那之后 documentScrollKey 就已经指向新文档了
-            self.rememberCurrentScrollPosition()
-            self.isNewDraft = true
-            self.openedFileURL = nil
-            self.savedSource = ""
-            // 新文档还没存到磁盘，粘贴的图片先放 Documents，等另存为之后不影响
-            self.editor.imageBaseURL = FileManager.default.urls(for: .documentDirectory,
-                                                               in: .userDomainMask).first
-            self.editor.setMarkdown("")
-            self.refreshStatus()
-            self.updateWindowTitle()
-            self.outlineView.resetFolding()
-            self.flashStatus("已新建空白文档")
-        }
+        NotificationCenter.default.post(name: DocumentsWorkspace.newDocumentRequestedNotification,
+                                        object: nil)
     }
-
-    /// ⌘O：弹系统文件选择器，挑一个 .md / .txt 打开
+    /// ⌘O：弹系统文件选择器，挑一个 .md / .txt 打开 —— **在新 Tab 里开**，
+    /// 不会把当前这一页顶掉。
+    ///
+    /// 这里不像以前那样先问「当前这份改了还没存要不要放弃」：打开新 Tab 根本
+    /// 不动当前这一份，没什么可放弃的。
     @objc func openDocumentFromPanel() {
-        confirmDiscardIfNeeded { [weak self] canContinue in
-            guard let self, canContinue else { return }
-            self.isExportingDocument = false
-            // UTType 里没有预置的 markdown 常量，只能按扩展名推一个；
-            // 推不出来就退回纯文本 —— md 本来就是纯文本，还能正常选到
-            let markdownType = UTType(filenameExtension: "md") ?? .plainText
-            // asCopy: false = 原地打开、不复制副本，这样 ⌘S 才能写回原文件
-            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [markdownType, .plainText],
-                                                        asCopy: false)
-            picker.delegate = self
-            picker.allowsMultipleSelection = false
-            self.present(picker, animated: true)
-        }
+        // UTType 里没有预置的 markdown 常量，只能按扩展名推一个；
+        // 推不出来就退回纯文本 —— md 本来就是纯文本，还能正常选到
+        let markdownType = UTType(filenameExtension: "md") ?? .plainText
+        // asCopy: false = 原地打开、不复制副本，这样 ⌘S 才能写回原文件
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [markdownType, .plainText],
+                                                    asCopy: false)
+        picker.delegate = self
+        picker.allowsMultipleSelection = false
+        present(picker, animated: true)
     }
 
     /// 接管系统菜单自带的「文件 > 打开…」(⌘O)。
@@ -391,14 +426,13 @@ final class ViewController: UIViewController {
         openDocumentFromPanel()
     }
 
-    /// 新建 / 打开都会顶掉当前内容，有未保存改动就先问一句。
-    /// 回调传 true 表示可以继续，false 表示用户选了取消
+    /// 有未保存改动时先问一句。回调传 true 表示可以继续，false 表示用户选了取消
     private func confirmDiscardIfNeeded(_ completion: @escaping (Bool) -> Void) {
         guard isDirty else {
             completion(true)
             return
         }
-        let name = openedFileURL?.lastPathComponent ?? (isNewDraft ? "未命名文档" : "示例文档")
+        let name = openedFileURL?.lastPathComponent ?? "未命名文档"
         let alert = UIAlertController(title: "还有改动没保存",
                                       message: "「\(name)」改了还没存，继续的话这部分改动就丢了。",
                                       preferredStyle: .alert)
@@ -407,77 +441,25 @@ final class ViewController: UIViewController {
         present(alert, animated: true)
     }
 
-    /// 没有关联文件时（刚「新建」的草稿）走「另存为」：把内容导出到用户挑的位置。
-    /// 导出面板必须给一个真实文件，所以先把内容写到临时目录再交给系统复制过去
-    private func presentSaveAsPanel() {
-        let name = openedFileURL?.lastPathComponent ?? "未命名.md"
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-        do {
-            try editor.markdownSource.write(to: tempURL, atomically: true, encoding: .utf8)
-        } catch {
-            showAlert(title: "保存失败", message: error.localizedDescription)
-            return
-        }
-        isExportingDocument = true
-        // asCopy: true = 复制过去，临时文件留着也无所谓
-        let picker = UIDocumentPickerViewController(forExporting: [tempURL], asCopy: true)
-        picker.delegate = self
-        present(picker, animated: true)
-    }
+    // MARK: 保存
 
-    // MARK: 打开 / 保存外部 .md 文件
-
-    /// 打开 Finder 传进来的文件（右键「打开方式」、双击、拖到 Dock 图标都走这里）
-    private func openDocument(at url: URL) {
-        do {
-            let text = try loadText(from: url)
-            // 读出来了才记「上一份文档读到哪儿」；读失败就当作没换过文档，别把记录搅乱。
-            // 同样要在改 openedFileURL 之前调用（那之后 documentScrollKey 就指向新文档了）
-            rememberCurrentScrollPosition()
-            isNewDraft = false
-            openedFileURL = url
-            savedSource = text
-            // 关键：md 里的图片多是相对路径，基准目录要指向文件所在目录，否则图片全裂
-            editor.imageBaseURL = url.deletingLastPathComponent()
-            editor.setMarkdown(text)
-            refreshStatus()
-            updateWindowTitle()
-            // 换文档 → 大纲从「全部展开」开始，别继承上一份文档的折叠
-            outlineView.resetFolding()
-            // 换完内容再滚回这个文件上次读到的位置
-            restoreScrollPositionIfNeeded()
-        } catch {
-            showAlert(title: "打不开文件",
-                      message: "\(url.lastPathComponent)\n\n\(error.localizedDescription)")
-        }
-    }
-
-    private func loadText(from url: URL) throws -> String {
-        let data = try Data(contentsOf: url)
-        // 按 UTF-8 解码。遇到不合法的字节会换成替换字符，总比整篇打不开强
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    /// ⌘S：写回原文件。
-    /// 没有关联文件时（内置示例文档 / 刚「新建」的草稿）分两条路走：
-    ///   - Mac：弹「另存为」面板，让新建的草稿能落地成文件
-    ///   - iOS：弹个提示，说明得先从外部打开一个文件
+    /// ⌘S：写回这个 Tab 对应的文件。
+    ///
+    /// 正常一定有文件可写（每个 Tab 都是被一份文件开出来的）。真没有的话
+    /// 只弹个提示 —— 不再有「另存为」那条路：新文档是左侧栏先在磁盘上建好的，
+    /// 也就不存在「草稿没有文件」这种中间态。
     /// 这里刻意不加 private —— 菜单栏的「存储」项要引用它的 selector，
     /// 修饰符是 private 的话，AppDelegate 里 `#selector(...)` 取不到
     @objc func saveDocument() {
         guard let url = openedFileURL else {
-            #if targetEnvironment(macCatalyst)
-            presentSaveAsPanel()
-            #else
             showAlert(title: "没有可保存的文件",
-                      message: "现在看的是内置示例文档。在 Finder 里右键 .md 文件 →「打开方式」→ 选本 App，打开后就能用 ⌘S 存回原文件。")
-            #endif
+                      message: "这一页没有对应到磁盘上的文件，没法保存。在左侧栏点一份文档，或者在「文件」App 里把 .md 放进来。")
             return
         }
 
         let source = editor.markdownSource
         do {
-            try source.write(to: url, atomically: true, encoding: .utf8)
+            try DocumentsWorkspace.write(source, to: url)
             savedSource = source
             // 存盘是个天然的「我读到这儿了」的时间点，顺手记一次
             rememberCurrentScrollPosition()
@@ -515,33 +497,21 @@ final class ViewController: UIViewController {
     }
     #endif
 
-    /// 界面上要显示的名字：有文件就用文件名；没有文件则区分「新建的草稿」和「内置示例」
+    /// 界面上要显示的名字：文件名**去掉扩展名**（满屏 `.md` 后缀看着很吵）。
+    /// 没有对应文件时（不该发生）叫「未命名」
     private var documentDisplayName: String {
-        if let url = openedFileURL { return url.lastPathComponent }
-        return isNewDraft ? "未命名" : "示例文档"
+        guard let url = openedFileURL else { return "未命名" }
+        return DocumentsWorkspace.displayName(for: url)
     }
 
     private func updateWindowTitle() {
         let name = documentDisplayName
         let suffix = isDirty ? " — 已修改" : ""
         title = name
-        // Mac Catalyst：windowScene.title 就是窗口标题栏上显示的文字
+        // Mac Catalyst：windowScene.title 就是窗口标题栏上显示的文字。
+        // 多个 Tab 时只有**当前**那一页会写它（藏着的那几页不会触发这里），
+        // 所以窗口标题永远跟着前台 Tab 走
         view.window?.windowScene?.title = name + suffix
-    }
-
-    private func observeDocumentOpenRequests() {
-        // 热启动：App 已经在跑，用户又双击了一个 md 文件
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(documentOpenRequested(_:)),
-            name: .markdownDocumentOpenRequested,
-            object: nil
-        )
-    }
-
-    @objc private func documentOpenRequested(_ notification: Notification) {
-        guard let url = notification.object as? URL else { return }
-        openDocument(at: url)
     }
 
     private func observeEditorChanges() {
@@ -556,11 +526,16 @@ final class ViewController: UIViewController {
 
     @objc private func editorContentChanged() {
         updateWindowTitle()
+        reportEditedStateIfNeeded()
     }
 
-    private func loadSampleMarkdown() -> String? {
-        guard let url = Bundle.main.url(forResource: "sample", withExtension: "md") else { return nil }
-        return try? String(contentsOf: url, encoding: .utf8)
+    /// 「我改过了」这件事只上报一次，让宿主把这一页从「预览 Tab」固定成正式 Tab。
+    ///
+    /// 只报一次、也只报 true，原因见 `didReportEdited` 的注释。
+    private func reportEditedStateIfNeeded() {
+        guard isDirty, !didReportEdited else { return }
+        didReportEdited = true
+        contentHost?.contentViewController(self, didChangeEditedState: true)
     }
 
     private func refreshStatus() {
@@ -639,8 +614,33 @@ final class ViewController: UIViewController {
         present(alert, animated: true)
     }
 
-    @objc private func reloadSample() {
-        loadSampleDocument()
+    /// 「重载」：丢掉未保存的改动，从磁盘把这份文件重新读一遍。
+    ///
+    /// ### 为什么这个动作要有
+    /// 这份文件可能被别的程序改过（用户自己用别的编辑器存过、iCloud 同步下来新版本），
+    /// 而编辑器手里还是打开那一刻的内容。重载就是「以磁盘上的为准，重新读一遍」。
+    ///
+    /// ### 为什么要先确认
+    /// 它会盖掉当前未保存的改动 —— 不是「刷新」，是「丢弃并重读」，所以必须先问一句。
+    @objc private func reloadFromDisk() {
+        guard let url = openedFileURL else {
+            showAlert(title: "没有可重载的文件", message: "这一页没有对应到磁盘上的文件。")
+            return
+        }
+        confirmDiscardIfNeeded { [weak self] canContinue in
+            guard let self, canContinue else { return }
+            guard let text = DocumentsWorkspace.read(url) else {
+                self.showAlert(title: "重载失败",
+                               message: "「\(url.lastPathComponent)」读不出来，可能被移走或者没有访问权限。")
+                return
+            }
+            // 走和「换文档」同一条路：图片基准目录、大纲重置、滚动位置都一并处理
+            self.apply(PPContentItem(id: url.path,
+                                     title: DocumentsWorkspace.displayName(for: url),
+                                     body: text,
+                                     category: "Documents"))
+            self.flashStatus("已重载 \(url.lastPathComponent)")
+        }
     }
 
     @objc private func dismissPresented() {
@@ -760,12 +760,14 @@ final class ViewController: UIViewController {
 
 // MARK: 文件选择器回调
 //
-// 「打开」和「另存为」用的是同一个 UIDocumentPickerViewController，
-// 靠 isExportingDocument 区分这次弹的是哪一种，回调里分开处理。
+// 这个代理现在只服务两种面板：
+//   - 「打开」（⌘O）→ 挑一份文件，交给左侧栏在新 Tab 里打开；
+//   - 「导出成图片」→ 挑个位置存 PNG。
+// 以前还有「另存为」，现在没了 —— 新文档是左侧栏先在磁盘上建好的，不需要它。
 
-extension ViewController: UIDocumentPickerDelegate {
+extension MarkdownDocumentViewController: UIDocumentPickerDelegate {
 
-    /// 用户挑完了（打开：挑中的文件；另存为/导出图片：挑中的保存位置）
+    /// 用户挑完了（挑中的是文件，还是图片的保存位置，靠 isExportingImage 区分）
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
 
@@ -773,24 +775,18 @@ extension ViewController: UIDocumentPickerDelegate {
             // 「导出成图片」：系统已经把 PNG 副本复制到这个位置了，提示一下就完事
             isExportingImage = false
             flashStatus("图片已存储到 \(url.deletingLastPathComponent().path)")
-        } else if isExportingDocument {
-            // 「另存为」：系统已经把临时文件复制到这个位置了，把它记成当前文件
-            isExportingDocument = false
-            isNewDraft = false
-            openedFileURL = url
-            savedSource = editor.markdownSource
-            refreshStatus()
-            updateWindowTitle()
-            flashStatus("已保存 \(url.lastPathComponent)")
         } else {
-            // 「打开」：走正常的读文件流程（换基准目录、重建分块那些都在里面）
-            openDocument(at: url)
+            // 「打开」：把 URL 交给统一的入口。
+            // 走 MarkdownDocumentOpener 而不是自己去读，是为了顺带申请一次安全作用域
+            // （文件在工作目录之外时，不申请就写不回去），
+            // 它会把通知发出去、由左侧栏在**新 Tab** 里打开这份文件 ——
+            // 当前这一页不动
+            MarkdownDocumentOpener.shared.handle(url: url)
         }
     }
 
     /// 用户点了取消：什么都不改，保持原样，顺手把导出标记清掉
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        isExportingDocument = false
         isExportingImage = false
     }
 }

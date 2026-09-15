@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3B1B7821305990CB0021A784 /* MultiTabController in Frameworks */ = {isa = PBXBuildFile; productRef = 3B1B7820305990CB0021A784 /* MultiTabController */; };
 		AA0000000000000000000004 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000003 /* Markdown */; };
 /* End PBXBuildFile section */
 
@@ -28,14 +29,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		3B0EB4DC304F23B900409432 /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
-		3B0EB5E23051BA0F00409432 /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
-		3B2DBA4D304B0DCB00C262A1 /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
 		3B41EA4A304497FB00F4E5EA /* MarkdownEditorHy4.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MarkdownEditorHy4.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B41EA60304497FD00F4E5EA /* MarkdownEditorHy4Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MarkdownEditorHy4Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B41EA6A304497FD00F4E5EA /* MarkdownEditorHy4UITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MarkdownEditorHy4UITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		3B4395D330542F8C00DE450C /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
-		3BF4A7D930559F3200FE03AD /* MarkdownEditorHy4.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = MarkdownEditorHy4.xcodeproj; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -79,6 +75,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3B1B7821305990CB0021A784 /* MultiTabController in Frameworks */,
 				AA0000000000000000000004 /* Markdown in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -100,21 +97,6 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		3B0EB4DF304F23B900409432 /* Products */ = {
-			isa = PBXGroup;
-			name = Products;
-			sourceTree = "<group>";
-		};
-		3B0EB5E53051BA0F00409432 /* Products */ = {
-			isa = PBXGroup;
-			name = Products;
-			sourceTree = "<group>";
-		};
-		3B2DBA50304B0DCB00C262A1 /* Products */ = {
-			isa = PBXGroup;
-			name = Products;
-			sourceTree = "<group>";
-		};
 		3B41EA41304497FB00F4E5EA = {
 			isa = PBXGroup;
 			children = (
@@ -133,16 +115,6 @@
 				3B41EA60304497FD00F4E5EA /* MarkdownEditorHy4Tests.xctest */,
 				3B41EA6A304497FD00F4E5EA /* MarkdownEditorHy4UITests.xctest */,
 			);
-			name = Products;
-			sourceTree = "<group>";
-		};
-		3B4395D630542F8C00DE450C /* Products */ = {
-			isa = PBXGroup;
-			name = Products;
-			sourceTree = "<group>";
-		};
-		3BF4A7DC30559F3200FE03AD /* Products */ = {
-			isa = PBXGroup;
 			name = Products;
 			sourceTree = "<group>";
 		};
@@ -168,6 +140,7 @@
 			name = MarkdownEditorHy4;
 			packageProductDependencies = (
 				AA0000000000000000000003 /* Markdown */,
+				3B1B7820305990CB0021A784 /* MultiTabController */,
 			);
 			productName = MarkdownEditorHy4;
 			productReference = 3B41EA4A304497FB00F4E5EA /* MarkdownEditorHy4.app */;
@@ -250,35 +223,13 @@
 				Base,
 			);
 			mainGroup = 3B41EA41304497FB00F4E5EA;
-			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */,
+				3B1B781F305990CB0021A784 /* XCRemoteSwiftPackageReference "iOSDemoHub" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3B41EA4B304497FB00F4E5EA /* Products */;
 			projectDirPath = "";
-			projectReferences = (
-				{
-					ProductGroup = 3B0EB5E53051BA0F00409432 /* Products */;
-					ProjectRef = 3B0EB5E23051BA0F00409432 /* MarkdownEditorHy4.xcodeproj */;
-				},
-				{
-					ProductGroup = 3B2DBA50304B0DCB00C262A1 /* Products */;
-					ProjectRef = 3B2DBA4D304B0DCB00C262A1 /* MarkdownEditorHy4.xcodeproj */;
-				},
-				{
-					ProductGroup = 3BF4A7DC30559F3200FE03AD /* Products */;
-					ProjectRef = 3BF4A7D930559F3200FE03AD /* MarkdownEditorHy4.xcodeproj */;
-				},
-				{
-					ProductGroup = 3B0EB4DF304F23B900409432 /* Products */;
-					ProjectRef = 3B0EB4DC304F23B900409432 /* MarkdownEditorHy4.xcodeproj */;
-				},
-				{
-					ProductGroup = 3B4395D630542F8C00DE450C /* Products */;
-					ProjectRef = 3B4395D330542F8C00DE450C /* MarkdownEditorHy4.xcodeproj */;
-				},
-			);
 			projectRoot = "";
 			targets = (
 				3B41EA49304497FB00F4E5EA /* MarkdownEditorHy4 */,
@@ -362,7 +313,6 @@
 				INFOPLIST_FILE = MarkdownEditorHy4/Info.plist;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
-				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -396,7 +346,6 @@
 				INFOPLIST_FILE = MarkdownEditorHy4/Info.plist;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
-				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -667,6 +616,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		3B1B781F305990CB0021A784 /* XCRemoteSwiftPackageReference "iOSDemoHub" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/wooodypan/iOSDemoHub.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.1;
+			};
+		};
 		AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/swiftlang/swift-markdown.git";
@@ -678,6 +635,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		3B1B7820305990CB0021A784 /* MultiTabController */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3B1B781F305990CB0021A784 /* XCRemoteSwiftPackageReference "iOSDemoHub" */;
+			productName = MultiTabController;
+		};
 		AA0000000000000000000003 /* Markdown */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */;

@@ -12,6 +12,8 @@
 
 import XCTest
 @testable import MarkdownEditorHy4
+// 内容页要用来喂内容的模型（`PPContentItem`）来自这个库
+import MultiTabController
 
 /// app target 开了 `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`，
 /// 里面所有类型都默认是 @MainActor 的，测试类也要标 @MainActor 才能直接调用。
@@ -604,20 +606,38 @@ final class MarkdownOutlineTests: XCTestCase {
 
     // MARK: - 第 4 层：真实界面装配
 
-    /// 起一个真的 `ViewController`，验证三个组件在真实界面里确实接上了。
+    /// 起一个真的 `MarkdownDocumentViewController`，验证三个组件在真实界面里确实接上了。
     ///
     /// ### 为什么值得单独测这一条
     /// 前面所有用例都是「自己手动 new 出三个对象再接起来」，
-    /// 万一 `ViewController.setupOutline()` 里漏了一行（比如忘了设 `editor.outlineEventSink`），
-    /// 那些用例照样全绿，但真机上目录就是死的。这条测的是**装配本身**。
+    /// 万一 `MarkdownDocumentViewController.setupOutline()` 里漏了一行（比如忘了设
+    /// `editor.outlineEventSink`），那些用例照样全绿，但真机上目录就是死的。这条测的是**装配本身**。
+    ///
+    /// 注意：改成左右分栏架构后，这一页不再是窗口的根控制器（根是分栏容器 / 导航控制器），
+    /// 但它自己仍然把大纲面板挂在自己的视图树里，所以单独 new 出来测装配依然成立。
+    ///
+    /// 另外内容也不再由这一页自己去读示例文件了 —— 改成**宿主把内容喂进来**
+    /// （`configure(with:)`），所以这里也得按宿主的做法喂一份。
     func testViewControllerWiresOutlineToEditor() {
-        let controller = ViewController()
+        // 直接从 App 包里取真那份 sample.md：它正是「首启复制到 Documents」要用的那份，
+        // 顺带就把「示例确实打进包里了」一起验了（打不进去的话首启就是空目录）
+        guard let sampleURL = Bundle.main.url(forResource: "sample", withExtension: "md"),
+              let sampleText = try? String(contentsOf: sampleURL, encoding: .utf8) else {
+            return XCTFail("App 包里找不到 sample.md —— 首启的那份示例会复制不出来")
+        }
+
+        let controller = MarkdownDocumentViewController()
+        // 内容页的契约是「先 configure、后显示」，宿主就是这么用的
+        controller.configure(with: PPContentItem(id: "/tmp/sample.md",
+                                                 title: "sample",
+                                                 body: sampleText,
+                                                 category: "Documents"))
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 800, height: 900)
         controller.view.layoutIfNeeded()
 
         guard let outline = firstOutlineView(in: controller.view) else {
-            return XCTFail("ViewController 的视图树里找不到 MarkdownOutlineView —— 装配漏了")
+            return XCTFail("MarkdownDocumentViewController 的视图树里找不到 MarkdownOutlineView —— 装配漏了")
         }
 
         // 面板默认是**收起**的（冷启动只显示右上角那个小方块），先按用户的真实操作展开。
@@ -720,7 +740,7 @@ final class MarkdownOutlineTests: XCTestCase {
         view.createdRowCells
     }
 
-    /// 递归找界面上的目录面板（`ViewController` 里它是私有属性，只能从视图树里挖）
+    /// 递归找界面上的目录面板（`MarkdownDocumentViewController` 里它是私有属性，只能从视图树里挖）
     private func firstOutlineView(in view: UIView) -> MarkdownOutlineView? {
         for subview in view.subviews {
             if let outline = subview as? MarkdownOutlineView { return outline }

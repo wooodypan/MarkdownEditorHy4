@@ -566,7 +566,7 @@ final class MarkdownOutlineFoldTests: XCTestCase {
     /// 硬给外层视图设一个 300 高的 frame，等于再加一条「高度必须 300」的硬约束
     /// 去跟面板的约束打架，Auto Layout 会丢掉一条 —— 于是出现「折叠之后卡片高度不变」
     /// 这种像是 bug 的现象，其实是测试挂法不对
-    /// （真实界面里 `ViewController.setupOutline` 也只给它定位、不给尺寸）。
+    /// （真实界面里 `MarkdownDocumentViewController.setupOutline` 也只给它定位、不给尺寸）。
     private func makeOutlineView() -> (view: MarkdownOutlineView, host: UIWindow) {
         let host = UIWindow(frame: CGRect(x: 0, y: 0, width: 700, height: 800))
         let view = MarkdownOutlineView()

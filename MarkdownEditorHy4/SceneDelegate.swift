@@ -11,14 +11,33 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     var window: UIWindow?
 
+    /// 整个工作区（左栏文档列表 + 右栏多 Tab 编辑器）的装配器。
+    ///
+    /// 由场景持有而不是让某个控制器持有：它搭出来的那棵树（分栏容器 / 导航栈）
+    /// 才是窗口的根，让它跟着场景一起活着最自然
+    private var workspace: WorkspaceCoordinator?
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
-        // Use this method to optionally configure and attach the UIWindow `window` to the provided UIWindowScene `scene`.
-        // If using a storyboard, the `window` property will automatically be initialized and attached to the scene.
-        // This delegate does not imply the connecting scene or session are new (see `application:configurationForConnectingSceneSession` instead).
-        guard let _ = (scene as? UIWindowScene) else { return }
+        guard let windowScene = scene as? UIWindowScene else { return }
 
-        // 冷启动：App 没在跑时用户双击 md 文件，URL 从这里进来
+        // ### 界面全部走代码搭，不再有 Main.storyboard
+        // 工程里给 scene 的配置（Info.plist 的 UISceneStoryboardFile）也去掉了，
+        // 系统不会再替我们造窗口 —— 所以下面这三行必须自己写。
+        //
+        // 顺带一提：不做 storyboard 也少一个坑 —— storyboard 里那个自定义类
+        // 写的是旧名字 ViewController，改名之后它会变成「不认识的类」，
+        // 只在控制台留一句警告、界面却是空的，很难查。
+        let workspace = WorkspaceCoordinator()
+        self.workspace = workspace
+
+        let window = UIWindow(windowScene: windowScene)
+        window.rootViewController = workspace.rootViewController
+        self.window = window
+        window.makeKeyAndVisible()
+
+        // 冷启动：App 没在跑时用户双击 md 文件，URL 从这里进来。
+        // 它只把 URL 存进 MarkdownDocumentOpener，等左栏那份文件列表出现之后
+        // 自己去取、在新 Tab 里打开
         handleURLContexts(connectionOptions.urlContexts)
     }
 

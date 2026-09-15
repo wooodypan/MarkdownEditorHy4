@@ -1,6 +1,15 @@
 {
-  "originHash" : "6cd735889f74f7bdfaeb767144364160e04db981e53c431b819f5e9ada31d734",
+  "originHash" : "8fb09276796bf820de5a9e20f6a0a2871257e103ce4668cbb9a276c697aa12ba",
   "pins" : [
+    {
+      "identity" : "iosdemohub",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/wooodypan/iOSDemoHub.git",
+      "state" : {
+        "revision" : "bbd7ebe2f53d4644da723a4dd287623b35ef39b8",
+        "version" : "1.0.1"
+      }
+    },
     {
       "identity" : "swift-cmark",
       "kind" : "remoteSourceControl",

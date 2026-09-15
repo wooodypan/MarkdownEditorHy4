@@ -176,9 +176,9 @@ final class MarkdownOutlineHeightTests: XCTestCase {
     /// 需求：默认不展开，只显示那个展开小方块。
     ///
     /// 这条断言的是**主控制器装配后的真实状态** —— 面板自己没法知道「启动时该不该
-    /// 展开」，那是 `ViewController.setupOutline` 里定的
+    /// 展开」，那是 `MarkdownDocumentViewController.setupOutline` 里定的
     func testEditorScreenStartsWithCollapsedOutline() throws {
-        let controller = ViewController()
+        let controller = MarkdownDocumentViewController()
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 700, height: 900)
         controller.view.layoutIfNeeded()
@@ -195,7 +195,7 @@ final class MarkdownOutlineHeightTests: XCTestCase {
     /// 面板拿到的初始高度配置，要和当前设置一致
     /// （不能出现「设置里选了按最大高度，启动后却按百分比算」这种脱节）
     func testOutlineAppearanceMatchesCurrentSettings() throws {
-        let controller = ViewController()
+        let controller = MarkdownDocumentViewController()
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 700, height: 900)
         controller.view.layoutIfNeeded()

@@ -27,17 +27,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         guard builder.system == .main else { return }
 
         let newDoc = UIKeyCommand(title: "新建",
-                                  action: #selector(ViewController.newDocument),
+                                  action: #selector(MarkdownDocumentViewController.newDocument),
                                   input: "n",
                                   modifierFlags: .command)
         // ⚠️ 这里**故意不放**「打开…」。
         // Catalyst 会为所有 App 自动提供一个「文件 > 打开…」(⌘O)，藏在系统菜单的子分组里：
         // 再自己加一条同快捷键的项，UIKit 会直接抛
         // NSInvalidArgumentException: Replacement elements contain duplicates 崩溃。
-        // 所以改成「接管」系统那一条 —— ViewController 实现 open(_:) 后，
+        // 所以改成「接管」系统那一条 —— MarkdownDocumentViewController 实现 open(_:) 后，
         // 系统菜单的「打开…」就会调到我们的实现，菜单位置和快捷键都是原生的。
         let save = UIKeyCommand(title: "存储",
-                                action: #selector(ViewController.saveDocument),
+                                action: #selector(MarkdownDocumentViewController.saveDocument),
                                 input: "s",
                                 modifierFlags: .command)
 
@@ -75,7 +75,32 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
     #endif
 
+    // MARK: ⌘N 的兜底落点
+
+    /// 「新建文档」的**兜底实现**，只为让菜单项在没有 Tab 的时候也亮着。
+    ///
+    /// ### 为什么要放在这儿
+    /// 菜单里的「新建」是靠响应链找实现的：右侧有 Tab 时由那个 Tab 的
+    /// `MarkdownDocumentViewController` 接住；但**一个 Tab 都没有**（刚启动、右栏空空）
+    /// 时，响应链上没人实现它，菜单项就会变灰 —— ⌘N 也就按不动了。
+    /// App 委托是响应链的最后一站（窗口 → 场景 → 应用 → 委托），放在这里必然找得到。
+    ///
+    /// 具体干活的不在这儿：它只把「想新建」这件事报出去，由左侧栏去磁盘上建文件、
+    /// 再在右侧开个新 Tab（消息名跟 `MarkdownDocumentViewController.newDocument` 用的是同一个）。
+    @objc func newDocument() {
+        NotificationCenter.default.post(name: DocumentsWorkspace.newDocumentRequestedNotification,
+                                        object: nil)
+    }
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        // ### 启动先把「文档目录」准备好
+        // 第一次装完 App、Documents 里一份文档都没有时，把 App 包里的 sample.md
+        // 复制进去 —— 否则左侧栏是空的，新用户打开只看到一片白，不知道该干什么。
+        //
+        // 放在这里（而不是某个页面里）是因为它属于「启动时的数据准备」：
+        // 左栏那份列表一起来就要读到内容，不能等到它出现才发现目录是空的。
+        DocumentsWorkspace.installSampleIfNeeded()
+
         // 兜底：个别系统版本冷启动时只把文件 URL 放在 launchOptions 里，不派发给 scene
         if let url = launchOptions?[.url] as? URL {
             MarkdownDocumentOpener.shared.handle(url: url)

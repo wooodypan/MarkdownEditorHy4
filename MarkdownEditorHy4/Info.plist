@@ -15,8 +15,10 @@
 					<string>Default Configuration</string>
 					<key>UISceneDelegateClassName</key>
 					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
-					<key>UISceneStoryboardFile</key>
-					<string>Main</string>
+					<!-- 这里**故意没有** UISceneStoryboardFile：
+					     界面全部由 SceneDelegate 用代码搭（见 WorkspaceCoordinator）。
+					     留着它的话，系统会先按 storyboard 造一个根控制器 ——
+					     而 storyboard 里写的还是改名前的旧类名，界面会是空的 -->
 				</dict>
 			</array>
 		</dict>
