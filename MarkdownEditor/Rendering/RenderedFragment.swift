@@ -157,6 +157,10 @@ struct RenderedFragment {
     /// 只补「还没有的属性」，已有的保持不动。
     ///
     /// 用在 Emphasis / Strong 这类嵌套语法上：外层样式不该把内层行内代码的等宽字体覆盖掉。
+    ///
+    /// ⚠️ 凡是「必须盖掉正文色」的样式都不能用它（链接就是典型，见 `visitLink` 的注释）：
+    /// 叶子节点的文字早就带上了 `.foregroundColor: textColor`，用这个函数上色等于没上。
+    /// 这种情况要用 `setAttributes`。
     mutating func addAttributesIfAbsent(_ attributes: [NSAttributedString.Key: Any]) {
         guard text.length > 0, !attributes.isEmpty else { return }
         let full = NSRange(location: 0, length: text.length)

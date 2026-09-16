@@ -4,8 +4,11 @@
 //
 //  用户配置：一个很小的键值存储，落盘到沙盒里
 //
+//  这一层只做「存 / 取 / 夹范围 / 发通知」，自己不碰界面。
+//  这里用 `import UIKit` 而不是 `import Foundation`，是因为有几个默认值是
+//  **从渲染层主题里读**的（正文字号、行高、段间距），而主题里的字体是 `UIFont`。
 
-import Foundation
+import UIKit
 
 /// 大纲面板的高度按什么算。
 ///
@@ -68,9 +71,27 @@ final class MarkdownEditorSettings {
         /// 表格列宽默认值，和渲染层 `TableStyle` 的默认值保持一致
         static let tableMinColumnWidth: Double = 64
         static let tableMaxColumnWidth: Double = 280
+
+        /// 渲染层主题里的那套默认排版。
+        ///
+        /// 下面「正文排版」那几个默认值**都从它取**，不在这里写死第二份数字 ——
+        /// 同一件事写两份，改了一边忘了另一边，用户就会遇到
+        /// 「我什么都没调，外观怎么变了」。只构造一次，别在下面反复访问。
+        static let theme = MarkdownTheme.default
+
+        /// 正文字号默认 = 主题里那个正文大小（系统 body，通常是 17）
+        static let bodyFontSize = Double(theme.bodyFont.pointSize)
+        /// 行高默认 1 倍：就是字体自带的自然行高，等于没有这一项
+        static let lineHeightMultiple = Double(theme.lineHeightMultiple)
+        /// 段落间距默认 = 主题里的值（列表项段落也读同一个数）
+        static let paragraphSpacing = Double(theme.paragraphSpacing)
+        /// 段落首行缩进默认 **0**：不缩进。中文排版习惯是缩 2 个字，但那是偏好，不该替用户决定
+        static let paragraphIndentCharacters: Double = 0
+        /// 行宽默认「不限」—— 就是量程上限那个值，正文照旧铺满窗口宽度
+        static let bodyContentWidth = Limits.bodyContentWidth.upperBound
     }
 
-    /// 两个高度数值的合法范围。
+    /// 各项数值的合法范围。
     ///
     /// ### 为什么要在这里夹一道，而不是只靠设置页的滑块
     /// 配置是**落盘**的，能被手改、能被更早的版本写坏、也许多年以后换了套界面。
@@ -83,6 +104,19 @@ final class MarkdownEditorSettings {
         static let tableMinColumnWidth: ClosedRange<Double> = 32...200
         /// 表格「最大列宽」的合法范围
         static let tableMaxColumnWidth: ClosedRange<Double> = 80...600
+
+        /// 正文字号的合法范围（点）。下限 12 再小就难认，上限 28 再大一行放不下几个字
+        static let bodyFontSize: ClosedRange<Double> = 12...28
+        /// 行高倍数的合法范围。下限 1 表示「不松」，上限 2 倍已经相当松了
+        static let lineHeightMultiple: ClosedRange<Double> = 1.0...2.0
+        /// 段落间距的合法范围（点）。0 = 段与段贴在一起
+        static let paragraphSpacing: ClosedRange<Double> = 0...40
+        /// 段落首行缩进的合法范围（**字符数**，不是点）。
+        /// 中文排版的习惯值是 2，所以上限给到 4 足够
+        static let paragraphIndentCharacters: ClosedRange<Double> = 0...4
+        /// 正文栏宽上限的合法范围（点）。
+        /// ⚠️ 拖到**上限值**表示「不限」—— 见 `MarkdownEditorSettings.bodyContentWidthLimit`
+        static let bodyContentWidth: ClosedRange<Double> = 320...1200
     }
 
     // MARK: 落盘
@@ -114,6 +148,12 @@ final class MarkdownEditorSettings {
         var outlineMaximumHeight: Double?
         var tableMinColumnWidth: Double?
         var tableMaxColumnWidth: Double?
+        /// 正文排版那一组。同样都写成可选的，老配置文件里没有就各自退默认
+        var bodyFontSize: Double?
+        var lineHeightMultiple: Double?
+        var paragraphSpacing: Double?
+        var paragraphIndentCharacters: Double?
+        var bodyContentWidth: Double?
     }
 
     // MARK: 配置项
@@ -156,6 +196,49 @@ final class MarkdownEditorSettings {
     /// 某一列内容特别长（贴了个长链接）时，列宽到这个值就封顶，
     /// 多出来的文字换行，别把别的列挤没了。
     private(set) var tableMaxColumnWidth: Double
+
+    // MARK: 正文排版
+
+    /// 正文字号（点）。默认取系统 body 的大小（通常 17）。
+    ///
+    /// 注意它改的不只是正文：等宽字体（行内代码、代码块）和各级标题都是
+    /// 「从这个数推出来的」，一起跟着变。换算见 `MarkdownTheme.applyBodyFontSize`。
+    private(set) var bodyFontSize: Double
+
+    /// 行高倍数。默认 `1`（= 用字体自带的自然行高）。
+    ///
+    /// `1.5` 表示行与行之间比自然值多出 50%。只作用于**文字**段落，
+    /// 图片、表格、分隔线那些整块内容不跟着变松。
+    private(set) var lineHeightMultiple: Double
+
+    /// 段落之间的间距（点）。默认取主题里的值。
+    ///
+    /// 正文段落、标题、列表项都读这一个数 —— 它是全局的段间距。
+    private(set) var paragraphSpacing: Double
+
+    /// 正文段落**首行**缩进几个**字符**。默认 `0`（不缩进）。
+    ///
+    /// ### 为什么单位是「字符」而不是「点」
+    /// 用户想的是「缩进两格」，而不是「缩进 34 点」。存字符数、用时再乘正文字号，
+    /// 这样把字号从 17 调到 24，缩进会自己跟着变宽，「两个汉字」始终是两个字宽。
+    private(set) var paragraphIndentCharacters: Double
+
+    /// 正文**栏宽上限**（点）。默认取量程上限，也就是「不限」。
+    ///
+    /// ⚠️ 这个值和 `bodyContentWidthLimit` 不是一回事：这里存的是滑块上的数，
+    /// 拖到最右端（量程上限）表示「不限宽」，真正的上限要看
+    /// `bodyContentWidthLimit`（它会返回 `nil`）。
+    private(set) var bodyContentWidth: Double
+
+    /// 正文栏宽上限（点）。**`nil` = 不限**，正文铺满整个编辑器宽度。
+    ///
+    /// ### 为什么用「量程上限」表示「不限」
+    /// 滑块只有一根，得让「不限」也有个位置。放在最右端的好处是：
+    /// 默认值就是「跟随窗口」，谁都不会因为多了这一项而发现自己排版变了；
+    /// 想收窄就往左拖，拖到底看到「不限」两个字也一眼明白是什么意思。
+    var bodyContentWidthLimit: Double? {
+        bodyContentWidth >= Limits.bodyContentWidth.upperBound ? nil : bodyContentWidth
+    }
 
     /// 改「是否记住滚动位置」。值没变就什么都不做（不发通知、不写盘）
     func setRemembersScrollPosition(_ value: Bool) {
@@ -209,6 +292,53 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    // MARK: 改正文排版
+
+    /// 改「正文字号」
+    func setBodyFontSize(_ value: Double) {
+        let clamped = clamp(value, to: Limits.bodyFontSize)
+        guard clamped != bodyFontSize else { return }
+        bodyFontSize = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「行高倍数」
+    func setLineHeightMultiple(_ value: Double) {
+        let clamped = clamp(value, to: Limits.lineHeightMultiple)
+        guard clamped != lineHeightMultiple else { return }
+        lineHeightMultiple = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「段落间距」
+    func setParagraphSpacing(_ value: Double) {
+        let clamped = clamp(value, to: Limits.paragraphSpacing)
+        guard clamped != paragraphSpacing else { return }
+        paragraphSpacing = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「段落首行缩进」（单位是字符数，不是点）
+    func setParagraphIndentCharacters(_ value: Double) {
+        let clamped = clamp(value, to: Limits.paragraphIndentCharacters)
+        guard clamped != paragraphIndentCharacters else { return }
+        paragraphIndentCharacters = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「正文栏宽上限」。拖到量程上限就是「不限」
+    func setBodyContentWidth(_ value: Double) {
+        let clamped = clamp(value, to: Limits.bodyContentWidth)
+        guard clamped != bodyContentWidth else { return }
+        bodyContentWidth = clamped
+        save()
+        postChange()
+    }
+
     // MARK: 初始化
 
     init(fileURL: URL = MarkdownEditorSettings.defaultFileURL) {
@@ -220,6 +350,11 @@ final class MarkdownEditorSettings {
         self.outlineMaximumHeight = Default.outlineMaximumHeight
         self.tableMinColumnWidth = Default.tableMinColumnWidth
         self.tableMaxColumnWidth = Default.tableMaxColumnWidth
+        self.bodyFontSize = Default.bodyFontSize
+        self.lineHeightMultiple = Default.lineHeightMultiple
+        self.paragraphSpacing = Default.paragraphSpacing
+        self.paragraphIndentCharacters = Default.paragraphIndentCharacters
+        self.bodyContentWidth = Default.bodyContentWidth
         load()
     }
 
@@ -252,6 +387,21 @@ final class MarkdownEditorSettings {
         if let value = payload.tableMaxColumnWidth {
             tableMaxColumnWidth = clamp(value, to: Limits.tableMaxColumnWidth)
         }
+        if let value = payload.bodyFontSize {
+            bodyFontSize = clamp(value, to: Limits.bodyFontSize)
+        }
+        if let value = payload.lineHeightMultiple {
+            lineHeightMultiple = clamp(value, to: Limits.lineHeightMultiple)
+        }
+        if let value = payload.paragraphSpacing {
+            paragraphSpacing = clamp(value, to: Limits.paragraphSpacing)
+        }
+        if let value = payload.paragraphIndentCharacters {
+            paragraphIndentCharacters = clamp(value, to: Limits.paragraphIndentCharacters)
+        }
+        if let value = payload.bodyContentWidth {
+            bodyContentWidth = clamp(value, to: Limits.bodyContentWidth)
+        }
     }
 
     private func save() {
@@ -260,7 +410,12 @@ final class MarkdownEditorSettings {
                               outlineHeightRatio: outlineHeightRatio,
                               outlineMaximumHeight: outlineMaximumHeight,
                               tableMinColumnWidth: tableMinColumnWidth,
-                              tableMaxColumnWidth: tableMaxColumnWidth)
+                              tableMaxColumnWidth: tableMaxColumnWidth,
+                              bodyFontSize: bodyFontSize,
+                              lineHeightMultiple: lineHeightMultiple,
+                              paragraphSpacing: paragraphSpacing,
+                              paragraphIndentCharacters: paragraphIndentCharacters,
+                              bodyContentWidth: bodyContentWidth)
         guard let data = try? JSONEncoder().encode(payload) else { return }
         do {
             // 目录可能还不存在（第一次跑），先建出来
@@ -322,5 +477,31 @@ extension MarkdownEditorSettings {
         if minValue > maxValue { minValue = maxValue }
         theme.table.minColumnWidth = CGFloat(minValue)
         theme.table.maxColumnWidth = CGFloat(maxValue)
+    }
+}
+
+// MARK: - 套到编辑器的正文字体 / 段落样式上
+
+extension MarkdownEditorSettings {
+
+    /// 把「正文排版」这一组的配置写进编辑器主题。
+    ///
+    /// ### 为什么这几个值不直接写进 `MarkdownTheme.default`
+    /// 主题是**渲染层**的样式表，它只该描述「长什么样」，不该认识「用户存了什么」。
+    /// 依赖方向保持「App 层 → 组件」，组件才能被单独拿走复用 ——
+    /// 和上面那两个 `apply...` 是同一个理由。
+    ///
+    /// ### 调用之后必须重新渲染
+    /// 字号、行高、段间距、首行缩进全都是**渲染时**烙进字体和 `NSParagraphStyle` 里的，
+    /// 只改主题里的数值，屏幕上那篇文字纹丝不动。改完要调
+    /// `MarkdownTextView.refreshTheme()` 整篇重排一遍。
+    func applyTypography(to theme: inout MarkdownTheme) {
+        // 字号放最前面：下面的首行缩进要按**新字号**换算
+        theme.applyBodyFontSize(CGFloat(bodyFontSize))
+        theme.lineHeightMultiple = CGFloat(lineHeightMultiple)
+        theme.paragraphSpacing = CGFloat(paragraphSpacing)
+        // 用户选的是「缩几个字」，这里乘上字号换成点 ——
+        // 字号调大以后「缩进两格」还是两格，不会变成一格半
+        theme.paragraphIndent = CGFloat(paragraphIndentCharacters) * theme.bodyFont.pointSize
     }
 }

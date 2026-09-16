@@ -1,0 +1,10 @@
+# fastlane 插件清单
+#
+# 这里声明跑 Fastfile 需要哪些插件。fastlane 启动时会读这个文件，
+# 把列出来的 gem 当作插件加载。
+#
+# 当前用到的插件：
+#   fastlane-plugin-appicon —— 提供 appicon 这个 action，
+#   把一张 1024x1024 以上的方图自动裁剪成 iOS 需要的各种尺寸。
+
+gem "fastlane-plugin-appicon"

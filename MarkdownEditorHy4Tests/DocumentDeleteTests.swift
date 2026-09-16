@@ -87,4 +87,48 @@ final class DocumentDeleteTests: XCTestCase {
         XCTAssertEqual(menu.title, "示例文档",
                        "菜单标题该用文件名（去掉 .md），好让用户确认右键点的是哪一份")
     }
+
+    // MARK: - 确认框里点了「删除」之后
+
+    /// ⚠️ 回归测试：**右键菜单那条路（不传 completion）也必须真把文件删掉。**
+    ///
+    /// 这里曾经有个非常隐蔽的 bug：确认框里写的是
+    /// `completion?(self?.performDelete(url) ?? false)` ——
+    /// 而 `completion` 是 nil 时，Swift 的 `?()` 会**把括号里的参数一起跳过不求值**，
+    /// 于是 `performDelete` 一次都没跑过，点完「删除」文件原地不动。
+    ///
+    /// 偏偏右键菜单就是不传 completion 的那条路（只有左滑需要知道结果），
+    /// 所以症状是：**Mac 右键删除没反应，iPhone 左滑却好使。**
+    ///
+    /// 修法是先把删除单独执行完再回调（见 `handleDeleteConfirmation`）。
+    /// 这条测试就用 `completion: nil` 把那个写法钉死。
+    func testDeleteWorksWhenCompletionIsNil() throws {
+        let directory = try makeTempDirectory()
+        let url = try writeDocument("右键删除.md", in: directory)
+
+        let controller = DocumentListViewController()
+        // 换成「直接删」的版本：测试不想往用户的废纸篓里丢东西
+        controller.deleteFile = { try FileManager.default.removeItem(at: $0) }
+
+        // 不传 completion —— 这正是右键菜单那条路的样子
+        controller.handleDeleteConfirmation(url, completion: nil)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path),
+                       "completion 为 nil 时删除被跳过了 —— 右键菜单会点了没反应")
+    }
+
+    /// 左滑那条路要靠回调知道「删没删掉」，才决定这一行收不收回原位
+    func testDeleteReportsResultToCompletion() throws {
+        let directory = try makeTempDirectory()
+        let url = try writeDocument("滑动删除.md", in: directory)
+
+        let controller = DocumentListViewController()
+        controller.deleteFile = { try FileManager.default.removeItem(at: $0) }
+
+        var reported: Bool?
+        controller.handleDeleteConfirmation(url) { reported = $0 }
+
+        XCTAssertEqual(reported, true, "删成功了却没告诉左滑那一边，行会一直挂着")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
 }

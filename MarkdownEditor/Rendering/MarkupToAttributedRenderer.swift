@@ -266,12 +266,23 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
 
     func visitLink(_ link: Link) -> RenderedFragment {
         var out = defaultVisit(link)
-        // 链接正文上色；如果是能点开的 URL，顺便挂上 link 属性
-        var attributes = theme.linkAttributes
+
+        // ⚠️ 这里必须用 `setAttributes`（强制覆盖），不能用 `addAttributesIfAbsent`。
+        //
+        // `addAttributesIfAbsent` 的语义是「**已有属性优先**，新属性只填空」，
+        // 而链接里的文字在 `visitText` 阶段就已经拿到 `bodyAttributes` 了
+        // （里面含 `.foregroundColor: textColor`）。也就是说 `foregroundColor` 早就存在，
+        // 用 addAttributesIfAbsent 的话 linkColor 会被正文色挤掉 ——
+        // 表现就是「在 MarkdownTheme 里改 linkColor 一点反应都没有」。
+        //
+        // 有这个坑是因为 addAttributesIfAbsent 本来是给 Emphasis / Strong 这类嵌套语法用的
+        // （外层不该把内层行内代码的等宽字体盖掉），链接套用同一套逻辑就不对了。
+        out.setAttributes(theme.linkAttributes)
+
+        // 能点开的 URL 顺便挂上 link 属性（这是新 key，add / set 都一样）
         if let destination = link.destination, let url = URL(string: destination) {
-            attributes[.link] = url
+            out.setAttributes([.link: url])
         }
-        out.addAttributesIfAbsent(attributes)
         return out
     }
 
@@ -325,7 +336,17 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         var out = defaultVisit(paragraph)
         // 列表项内部的段落样式由列表项统一设置，这里不要覆盖
         if !wasInsideListItem {
-            out.addAttributesIfAbsent([.paragraphStyle: theme.paragraphStyle(indent: indent)])
+            // 「段落首行缩进」只给**普通正文段落**，两种情况排除掉：
+            // 1. 列表项里的段落 —— 第一行是圆点/序号，缩了会顶歪（上面那个分支已经跳过）；
+            // 2. 引用块里的段落 —— 整块已经往右内缩了一道，左边还有一条竖条，
+            //    再缩首行会让文字越过竖条、看着像没对齐。
+            //    `quoteChain` 在 `visitBlockQuote` 里进块**之前**就已经挂上了，
+            //    所以这里读到非空就说明自己在引用里。
+            let wantsFirstLineIndent = quoteChain.ids.isEmpty
+            out.addAttributesIfAbsent([.paragraphStyle: theme.paragraphStyle(
+                indent: indent,
+                firstLineIndentExtra: wantsFirstLineIndent ? theme.paragraphIndent : 0
+            )])
         }
         return out
     }
@@ -773,13 +794,18 @@ extension MarkdownTheme {
          .paragraphStyle: paragraphStyle(indent: 0)]
     }
 
-    /// 列表项的悬挂缩进段落样式
+    /// 列表项的悬挂缩进段落样式。
+    ///
+    /// 段落间距和行高都跟着主题走（和正文用同一套）—— 设置页上那个「段落间距」
+    /// 是全局的，列表项要是不跟，调完就会看到「正文松了、列表还是挤的」。
+    /// 首行缩进则**不给**：列表项第一行是圆点或序号，再往里缩会顶歪。
     func listItemParagraphStyle(markerIndent: CGFloat, contentIndent: CGFloat) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         // 第一行从标记位置开始（这样圆点能顶到外层缩进），换行后对齐到内容位置
         style.firstLineHeadIndent = markerIndent
         style.headIndent = contentIndent
-        style.paragraphSpacing = 0
+        style.paragraphSpacing = paragraphSpacing
+        applyLineHeight(to: style)
         return style
     }
 }

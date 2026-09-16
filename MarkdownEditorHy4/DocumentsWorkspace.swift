@@ -104,24 +104,105 @@ enum DocumentsWorkspace {
         }
     }
 
-    // MARK: - 新建 / 读写
+    // MARK: - 新建 / 起名 / 读写
+
+    /// 新建文档时用的**占位名**。
+    ///
+    /// 新建的文档先顶着这个名字落到磁盘上（`未命名.md`、`未命名 2.md`……），
+    /// 等用户第一次按 ⌘S 时再请他起个正式名字（判据见 `isUntitled`）。
+    static let untitledBaseName = "未命名"
 
     /// 造一个还没被占用的文件名：`未命名.md`、`未命名 2.md`、`未命名 3.md`……
-    static func uniqueFileURL(baseName: String = "未命名") -> URL {
+    static func uniqueFileURL(baseName: String? = nil) -> URL {
+        let base = baseName ?? untitledBaseName
         let manager = FileManager.default
-        var candidate = folderURL.appendingPathComponent("\(baseName).md")
+        var candidate = folderURL.appendingPathComponent("\(base).md")
         var sequence = 2
         while manager.fileExists(atPath: candidate.path) {
-            candidate = folderURL.appendingPathComponent("\(baseName) \(sequence).md")
+            candidate = folderURL.appendingPathComponent("\(base) \(sequence).md")
             sequence += 1
         }
         return candidate
+    }
+
+    /// 这份文档是不是**还顶着占位名** —— 也就是「新建出来、用户还没给它起过名字」。
+    ///
+    /// ### 为什么只看文件名，不额外记一个状态
+    /// 记状态就得多存一份数据、还得跟着文件的生命周期同步（改名、删除、
+    /// 从「文件」App 里手动改过名……），任何一处漏了就会错。
+    /// 文件名本身就是最可靠的那份状态：App 重启过、文件被重新打开，
+    /// 这个判断的结果依然是对的。
+    ///
+    /// 认这三种：`未命名`、`未命名 2`、`未命名 12`（`uniqueFileURL` 造出来的那些）；
+    /// 不认 `未命名abc`、`未命名 2 副本` 这类用户自己起的名字。
+    static func isUntitled(_ url: URL) -> Bool {
+        let name = displayName(for: url)
+        if name == untitledBaseName { return true }
+        let prefix = untitledBaseName + " "
+        guard name.hasPrefix(prefix),
+              let sequence = Int(name.dropFirst(prefix.count)) else { return false }
+        return sequence > 0
+    }
+
+    /// 把用户敲进来的一串字，收拾成能当文件名用的样子。
+    ///
+    /// 用户是随手输的，这里得宽容一点，别动不动就甩一句「含非法字符」：
+    /// - **前后空白去掉**：手滑多敲的空格不该进文件名；
+    /// - **结尾的 `.md` 去掉一层**：用户常顺手把后缀也打上，不去掉会变成 `笔记.md.md`；
+    /// - **`/` 和 `:` 换成 `-`**：这两个在 Mac 的文件名里不合法
+    ///   （Finder 里输 `/` 会被它悄悄换成 `:`），与其让文件建不出来，不如替用户换掉；
+    /// - **开头的 `.` 去掉**：`.` 开头的文件在 Mac 上是隐藏文件，用户建完就找不到它了。
+    static func sanitizedFileName(_ raw: String) -> String {
+        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if name.lowercased().hasSuffix(".md") {
+            name = String(name.dropLast(3))
+        }
+        name = name.replacingOccurrences(of: "/", with: "-")
+        name = name.replacingOccurrences(of: ":", with: "-")
+        // 去掉后缀后可能又露出尾随空格（比如用户输的是「笔记 .md」），再收一次
+        name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        while name.hasPrefix(".") {
+            name.removeFirst()
+        }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 把一份文档改成另一个名字（同目录内移动，内容跟着走）。
+    ///
+    /// ### 为什么用 `moveItem` 而不是「新建 + 复制内容 + 删旧的」
+    /// 移动是文件系统层面的一个动作，要么成功要么没动过；
+    /// 复制那条路中途失败会留下半份文件，用户看到两个都像真的。
+    ///
+    /// - Returns: 改名后的新地址。名字没变时原样返回（不白跑一趟移动）。
+    /// - Throws: 名字是空的时候抛 `.emptyName`；目标同名文件已存在时抛 `.nameTaken`。
+    @discardableResult
+    static func rename(_ url: URL, toBaseName rawName: String) throws -> URL {
+        let name = sanitizedFileName(rawName)
+        guard !name.isEmpty else { throw WorkspaceError.emptyName }
+
+        // 一律以 .md 结尾：这个 App 管的都是 markdown 文档
+        let destination = url.deletingLastPathComponent().appendingPathComponent("\(name).md")
+        // 名字没变（用户直接点了「保存」，接受了占位名）→ 什么都不用做
+        guard destination.path != url.path else { return url }
+
+        // ⚠️ 重名要**报错**，不能悄悄覆盖：用户以为在「另存」却把别人那份抹了，
+        // 是这个功能最容易出的严重事故
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw WorkspaceError.nameTaken(name)
+        }
+
+        try FileManager.default.moveItem(at: url, to: destination)
+        return destination
     }
 
     /// 新建一份空白文档。
     ///
     /// 先在磁盘上把文件建出来（而不是先摆一份内存里的草稿）：
     /// 这样左侧栏立刻就能看到它，⌘S 也就永远有地方可写。
+    ///
+    /// 建出来的是**占位名**（`未命名.md`）—— 用户第一次按 ⌘S 时，
+    /// 编辑页会请他起个正式名字，那时调 `rename(_:toBaseName:)`。
     @discardableResult
     static func createEmptyDocument() throws -> URL {
         let url = uniqueFileURL()
@@ -180,4 +261,25 @@ enum DocumentsWorkspace {
 
     /// 有人请求「新建一份文档」（object 无）→ 由左侧栏建文件、开新 Tab
     static let newDocumentRequestedNotification = Notification.Name("MarkdownNewDocumentRequested")
+}
+
+/// 文档工作区里能出的那几种错。
+///
+/// 定义成 `LocalizedError` 而不是随手抛一个 `NSError`：界面是把
+/// `error.localizedDescription` 直接显示给用户看的，
+/// 这里写好的话术就是用户最终读到的那句话，不该是一串英文系统错误。
+enum WorkspaceError: LocalizedError, Equatable {
+    /// 名字是空的（用户把输入框清空了）
+    case emptyName
+    /// 文档目录里已经有同名的文档了
+    case nameTaken(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyName:
+            return "名字不能是空的，给这份文档起个名字吧。"
+        case .nameTaken(let name):
+            return "文档目录里已经有一份叫「\(name)」的文档了，换个名字吧。"
+        }
+    }
 }

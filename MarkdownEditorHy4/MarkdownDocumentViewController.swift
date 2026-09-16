@@ -91,8 +91,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             apply(item)
         }
         // 放在文档加载**之后**：装配时的「初次拉取」才能真正拉到标题。
-        // 放前面也能跑（编辑器那次 push 会被忽略），但会白拉一次空列表
-        applyTableStyle()
+        // 放前面也能跑（编辑器那次 push 会被忽略），但会白拉一次空列表。
+        // 这里也顺带把用户存过的字号 / 行高 / 段间距套上去 —— 文档刚才是用默认主题
+        // 渲进去的，不补这一下，改过设置的人下次启动会看到「开头那几秒是默认字号」
+        applyEditorStyle()
         setupOutline()
         observeKeyboard()
         observeEditorChanges()
@@ -237,7 +239,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
                 self?.exportEditorAsImage()
             },
             UIAction(title: "设置", image: UIImage(systemName: "gearshape")) { [weak self] _ in
-                // 弹出设置页（目前就一行：是否记住目录大纲滚动位置）
+                // 弹出设置页（正文排版、大纲、表格列宽都在那儿）
                 self?.showSettings()
             }
         ]
@@ -268,18 +270,28 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     @objc private func settingsDidChange() {
         applyScrollSetting()
         applyOutlineAppearance()
-        applyTableStyle()
+        applyEditorStyle()
     }
 
-    /// 把「表格列宽」的配置同步给编辑器主题。
+    /// 把「正文排版」和「表格列宽」两组配置一起写进编辑器主题，再整篇重排一遍。
     ///
-    /// ### 为什么要整篇重渲染
-    /// 表格是**渲染时画成的一张图**，列宽在画的那一刻就定死了；
-    /// 只改主题里的数值、不重新渲染的话，画面上的表格纹丝不动。
-    /// 拖滑块是低频操作，整篇重渲染一遍完全没问题。
-    private func applyTableStyle() {
+    /// ### 为什么这两组合成一个方法
+    /// 它们走的是同一条路：改主题里的数值 → **必须重渲染才生效**
+    /// （字号、行高、段间距、首行缩进是渲染时烙进段落样式的；表格是渲染时画成图的）。
+    /// 各写一个方法、各排一遍的话，用户在设置页拖一下滑块会白排两遍。
+    ///
+    /// ### 为什么非得重排
+    /// 只改主题里的数值、不重新渲染，屏幕上那篇文字纹丝不动。好在这套渲染是幂等的：
+    /// 同一份源码 + 同一套主题永远得到同一个结果，所以拖滑块时每动一下就重排一遍
+    /// 也扛得住 —— 而且它保着光标位置（见 `MarkdownTextView.refreshTheme`），
+    /// 不会拖两下就跳回文首。
+    private func applyEditorStyle() {
+        settings.applyTypography(to: &editor.renderer.theme)
         settings.applyTableColumnWidths(to: &editor.renderer.theme)
-        editor.setMarkdown(editor.markdownSource)
+        // 行宽是**编辑器自己的布局参数**，不走主题 ——
+        // 主题管「文字长什么样」，行宽取决于窗口有多宽，是布局的事
+        editor.maxContentWidth = settings.bodyContentWidthLimit.map { CGFloat($0) }
+        editor.refreshTheme()
     }
 
     /// 把「是否记住滚动位置」同步给大纲面板
@@ -446,8 +458,15 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// ⌘S：写回这个 Tab 对应的文件。
     ///
     /// 正常一定有文件可写（每个 Tab 都是被一份文件开出来的）。真没有的话
-    /// 只弹个提示 —— 不再有「另存为」那条路：新文档是左侧栏先在磁盘上建好的，
+    /// 只弹个提示 —— 新建的文档是左侧栏先在磁盘上建好的，
     /// 也就不存在「草稿没有文件」这种中间态。
+    ///
+    /// ### 新建的文档会先问一句名字
+    /// 从「＋」/ ⌘N 建出来的文档，磁盘上先是 `未命名.md` 之类的**占位名**。
+    /// 在它上面第一次按 ⌘S，会弹个输入框请用户起名字 —— 这是 Mac 上
+    /// 「新文档第一次保存要问文件名」的老规矩，也是别让用户的文稿堆里
+    /// 攒下一串「未命名 7.md」的唯一时机。起过名字之后 ⌘S 就直接写回，不再打扰。
+    ///
     /// 这里刻意不加 private —— 菜单栏的「存储」项要引用它的 selector，
     /// 修饰符是 private 的话，AppDelegate 里 `#selector(...)` 取不到
     @objc func saveDocument() {
@@ -457,18 +476,141 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             return
         }
 
+        // 还顶着占位名 → 先请用户起名字，别把一堆「未命名 5.md」留给用户
+        guard !needsFileNameBeforeSaving else {
+            promptForFileName(startingFrom: url)
+            return
+        }
+
+        writeCurrentSource(to: url)
+    }
+
+    /// 「这一页是不是还没起过名字、保存前得先问一句」。
+    ///
+    /// 判断本身在 `DocumentsWorkspace.isUntitled` 里（纯文件名判断），
+    /// 这里多包一层是为了**能单测** —— 弹框那一步在单测里走不起来，
+    /// 但「该不该弹」这条逻辑值得单独钉住。
+    var needsFileNameBeforeSaving: Bool {
+        guard let url = openedFileURL else { return false }
+        return DocumentsWorkspace.isUntitled(url)
+    }
+
+    /// 把编辑器里的内容写进指定文件。
+    ///
+    /// - Returns: 写成功了回 true。失败会弹提示，让用户知道「没存上」
+    @discardableResult
+    private func writeCurrentSource(to url: URL) -> Bool {
         let source = editor.markdownSource
         do {
             try DocumentsWorkspace.write(source, to: url)
-            savedSource = source
-            // 存盘是个天然的「我读到这儿了」的时间点，顺手记一次
-            rememberCurrentScrollPosition()
-            refreshStatus()
-            updateWindowTitle()
-            flashStatus("已保存 \(url.lastPathComponent)")
         } catch {
-            showAlert(title: "保存失败", message: "\(url.lastPathComponent)\n\n\(error.localizedDescription)")
+            showAlert(title: "保存失败",
+                      message: "\(url.lastPathComponent)\n\n\(error.localizedDescription)")
+            return false
         }
+
+        savedSource = source
+        // 存盘是个天然的「我读到这儿了」的时间点，顺手记一次
+        rememberCurrentScrollPosition()
+        refreshStatus()
+        updateWindowTitle()
+        flashStatus("已保存 \(url.lastPathComponent)")
+        return true
+    }
+
+    /// 弹「给文档起个名字」的输入框。
+    ///
+    /// ### 为什么是 UIAlertController + 输入框，而不是系统存储面板
+    /// Mac 上做这件事的正经办法是 `NSSavePanel`，但 Catalyst 把它标成了 unavailable
+    /// （编译器直接拦）。退而求其次就是这个「一个输入框 + 保存 / 取消」的对话框 ——
+    /// 该有的都有了：预填名字、能改、能取消。
+    ///
+    /// - Parameter suggested: 预填进输入框的名字。第一次弹时是占位名（「未命名」），
+    ///   用户因为重名被打回来重弹时，就填他上一次输的名字，好改一个字接着来
+    private func promptForFileName(startingFrom url: URL, suggested: String? = nil) {
+        let defaultName = suggested ?? DocumentsWorkspace.displayName(for: url)
+
+        let alert = UIAlertController(
+            title: "保存文档",
+            message: "给这份文档起个名字，它会存在 App 的文档目录里。\n"
+                   + "直接点「保存」也行，那就还叫「\(defaultName)」。",
+            preferredStyle: .alert)
+
+        alert.addTextField { field in
+            field.text = defaultName
+            field.placeholder = "文件名"
+            field.clearButtonMode = .whileEditing
+            field.returnKeyType = .done
+        }
+
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            // 取消 = 这一下不存。正文还在编辑器里、标题上的「已修改」也还在，
+            // 但得说一声，免得用户以为刚才那一下存过了
+            self?.flashStatus("已取消保存")
+        })
+        // `weak alert`：UIAlertController 持有 action、action 持有这个闭包，
+        // 闭包里再强引用 alert 就绕成一个圈，弹框关了也放不掉
+        alert.addAction(UIAlertAction(title: "保存", style: .default) { [weak self, weak alert] _ in
+            guard let self else { return }
+            self.save(from: url, as: alert?.textFields?.first?.text ?? "")
+        })
+
+        // 顺带把预填的名字整条选中：用户直接打字就等于「改掉它」，
+        // 不用先自己全选删一遍。
+        // 放在 present 的 completion 里做：弹框还没上屏时输入框不是第一响应者，
+        // 那会儿设选中会被系统清掉
+        present(alert, animated: true) {
+            alert.textFields?.first?.selectAll(nil)
+        }
+    }
+
+    /// 用户在命名框里点了「保存」之后真正要做的事：**改名 + 把内容写进去**。
+    ///
+    /// 抽成独立方法（而不是直接写在弹框的闭包体里）有两个原因：
+    /// 1. **能单测** —— `UIAlertController` 那一步在单测里走不起来，
+    ///    而「改名 + 写盘 + 更新本页状态」才是真会出错的地方；
+    /// 2. 失败提示要分得清是「名字不行」还是「写不进去」，两者的下一步动作不一样。
+    ///
+    /// - Returns: 存成功了回新的文件地址；名字是空的 / 被占用了则回 nil
+    @discardableResult
+    func save(from url: URL, as rawName: String) -> URL? {
+        let newURL: URL
+        do {
+            newURL = try DocumentsWorkspace.rename(url, toBaseName: rawName)
+        } catch {
+            showNameRejectedAlert(error, from: url, triedName: rawName)
+            return nil
+        }
+
+        // 改完名，这一页从此就认新路径了 —— 之后的 ⌘S、窗口标题、
+        // 「读到哪儿」的记录全都跟着走
+        openedFileURL = newURL
+        // 旧路径那条阅读位置的记录留着没用了（而且文件名以后可能被重新用上，
+        // 那时候不该莫名跳到文档中间）
+        DocumentScrollMemory.shared.forget(key: url.path)
+        // 说一声，让左侧栏重新扫一遍目录 —— 照旧走通知，别在这儿直接刷
+        NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
+
+        // 顺序是**先改名、后写内容**：改名最可能因为重名失败，那时宁可什么都还没动
+        // （文件还在原来的占位名下，用户换个名字接着存）
+        writeCurrentSource(to: newURL)
+        return newURL
+    }
+
+    /// 名字用不了（空的 / 重名）时的提示，带一个「重新起名」的入口。
+    ///
+    /// 单独写一个而不是复用 `showAlert`：只丢一句「保存失败」的话，
+    /// 用户得自己再按一次 ⌘S 才能重新输名字，白多两步。
+    private func showNameRejectedAlert(_ error: Error, from url: URL, triedName: String) {
+        let alert = UIAlertController(title: "这个名字用不了",
+                                      message: error.localizedDescription,
+                                      preferredStyle: .alert)
+        // 预填的是用户上一次输入的那个名字，改一个字就能接着来
+        alert.addAction(UIAlertAction(title: "重新起名", style: .default) { [weak self] _ in
+            self?.promptForFileName(startingFrom: url, suggested: triedName)
+        })
+        alert.addAction(UIAlertAction(title: "好", style: .cancel))
+        present(alert, animated: true)
     }
 
     #if targetEnvironment(macCatalyst)

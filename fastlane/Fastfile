@@ -1,0 +1,121 @@
+# ============================================================================
+# fastlane 配置
+#
+# 当前只负责一件事：把根目录的 appicon.png 生成 Xcode 需要的全套 App Icon。
+# 打包 / 签名 / 上传相关的配置暂时不在这里（按需求「暂时不需要打包配置」）。
+#
+# 怎么跑（注意先把 brew 和 rbenv 的 ruby 加进 PATH，它们不在默认 PATH 里）：
+#   export PATH="/opt/homebrew/bin:/Users/pan/.rbenv/versions/3.3.0/bin:$PATH"
+#   cd <项目根目录>
+#   fastlane ios icons
+#
+# 对源图 appicon.png 的要求（三条都满足就能直接跑，不需要任何预处理）：
+#   1. 正方形，边长至少 1024 像素（1024x1024 正好）
+#   2. 铺满整张图，不要自己画圆角 —— 圆角是系统裁的
+#   3. 不带 alpha 通道 —— 带透明像素的话 iOS 会把透明区渲染成黑色，
+#      而且上传 App Store 时会被直接拒绝
+# 第 1、2 条插件自己会检查并报错；第 3 条插件不管，所以下面 check_source_icon 里补了一道。
+#
+# 关于 Mac Catalyst：
+#   Catalyst 的 App Icon **不需要单独一套**。它直接复用 iOS 的 AppIcon 资源，
+#   系统会自己按 macOS 需要的尺寸（最长边 1024）缩放，所以下面的 lane 里
+#   只生成 iOS 的尺寸就够覆盖 iOS + Catalyst 两个平台。
+# ============================================================================
+
+default_platform(:ios)
+
+# 项目根目录的绝对路径。
+#
+# ⚠️ 这里必须用绝对路径，不能写 "appicon.png" 这种相对路径。
+# 原因：fastlane 是先把 Fastfile 的内容 eval 一遍，而 eval 之前它执行了
+#   Dir.chdir(FastlaneCore::FastlaneFolder.path)
+# 也就是**把当前目录切到了 fastlane/ 子目录**（源码注释写着 "context: fastlane subfolder"）。
+# 所以写成 "appicon.png" 实际找的是 fastlane/appicon.png，会报
+# No such file or directory - appicon.png。
+#
+# `FastlaneCore::FastlaneFolder.path` 是 fastlane 官方常量，返回 fastlane/ 目录的绝对路径，
+# 往上一层就是项目根。
+FASTLANE_DIR = FastlaneCore::FastlaneFolder.path || Dir.pwd
+PROJECT_ROOT = File.expand_path("..", FASTLANE_DIR)
+
+# 源图：项目根目录的 appicon.png（这是唯一需要人维护的图，改了它重跑命令即可）
+ICON_SOURCE = File.join(PROJECT_ROOT, "appicon.png")
+# 目标资源目录（AppIcon.appiconset 的上一级）
+ASSETS_PATH = File.join(PROJECT_ROOT, "MarkdownEditorHy4", "Assets.xcassets")
+
+platform :ios do
+  # --------------------------------------------------------------------------
+  # lane: icons
+  # 把 appicon.png 生成 iOS / Mac Catalyst 需要的全套 App Icon
+  # --------------------------------------------------------------------------
+  desc "把根目录 appicon.png 生成 iOS / Mac Catalyst 需要的全套 App Icon"
+  lane :icons do
+    # 先体检源图，不合格就当场报错，别等到生成了坏图才发现
+    check_source_icon
+
+    appicon(
+      appicon_image_file: ICON_SOURCE,
+
+      # 生成哪几套尺寸：
+      #   :iphone        -> 20/29/40/60 pt 的 @2x @3x
+      #   :ipad          -> 20/29/40/76/83.5 pt 的 @1x @2x
+      #   :ios_marketing -> 1024x1024（上架用的那张，Catalyst 也会用它）
+      # 这里没有 :macos：Catalyst 复用 iOS 这套资源，不需要额外的 macOS 尺寸。
+      appicon_devices: [:iphone, :ipad, :ios_marketing],
+
+      # 目标资源目录（同样用绝对路径，原因见上面 PROJECT_ROOT 的注释）
+      appicon_path: ASSETS_PATH,
+      appicon_name: "AppIcon.appiconset"
+    )
+
+    UI.success("App Icon 已生成：#{File.join(ASSETS_PATH, 'AppIcon.appiconset')}")
+  end
+
+  # --------------------------------------------------------------------------
+  # private_lane: check_source_icon
+  # 体检源图：确认存在、是正方形、边长够、并且不带 alpha 通道
+  # --------------------------------------------------------------------------
+  #
+  # 为什么只补检查 alpha：
+  #   「是正方形」「边长至少 1024」这两条 appicon 插件自己会检查并报错
+  #   （源码里是 Helper::AppiconHelper.check_input_image_size），这里不重复写。
+  #   但 **alpha 通道插件完全不检查** —— 它会安安静静生成一张带透明的图，
+  #   问题要等到 iOS 上看到黑角、或者上架被拒时才发现，返工成本很高。
+  private_lane :check_source_icon do
+    unless File.exist?(ICON_SOURCE)
+      UI.user_error!("找不到源图：#{ICON_SOURCE}\n请把源图放在这个路径，或者改 Fastfile 里的 ICON_SOURCE。")
+    end
+
+    if png_has_alpha?(ICON_SOURCE)
+      UI.user_error!(
+        "源图带 alpha 通道：#{ICON_SOURCE}\n" \
+        "App Icon 必须是满幅不透明图（圆角由系统裁），带透明像素会变成黑角、且无法上架。\n" \
+        "修复办法：用不透明的图重新导出，或者用 ImageMagick 去掉透明通道：\n" \
+        "  magick appicon.png -background '#RRGGBB' -alpha remove -alpha off appicon.png"
+      )
+    end
+  end
+
+  # --------------------------------------------------------------------------
+  # png_has_alpha?(path) -> true / false
+  # 只读 PNG 文件头判断有没有 alpha 通道，不需要解压整张图
+  # --------------------------------------------------------------------------
+  #
+  # PNG 的文件结构是「8 字节固定签名 + 若干个数据块」，第一个块一定是 IHDR。
+  # IHDR 块从头开始排下来的字节位置是固定的：
+  #   0..7    8 字节   固定的 PNG 签名（\x89PNG\r\n\x1a\n）
+  #   8..11   4 字节   块长度
+  #   12..15  4 字节   块类型，固定是 "IHDR"
+  #   16..19  4 字节   宽
+  #   20..23  4 字节   高
+  #   24      1 字节   位深
+  #   25      1 字节   颜色类型   ← 我们只要看这一个字节
+  # 颜色类型的取值里，4 = 灰度 + alpha、6 = 真彩 + alpha，这两种带透明通道。
+  # （0 = 灰度、2 = 真彩、3 = 索引色，都不带 alpha）
+  def png_has_alpha?(path)
+    color_type = File.binread(path, 26)[25]
+    return false if color_type.nil? # 文件太小，不是合法 PNG，交给插件去报错
+
+    [4, 6].include?(color_type.ord)
+  end
+end

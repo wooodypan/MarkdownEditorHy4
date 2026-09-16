@@ -81,5 +81,12 @@
 	<!-- 允许直接编辑原文件（配合安全作用域书签），而不是先拷一份副本 -->
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+
+	<!-- 把 App 的 Documents 目录摆到「文件」App 里（iPhone / iPad 上的
+	     「我的 iPhone → MarkdownEditorHy4」）。
+	     开了沙盒之后，往容器里放文件 / 取文件都得有个正经入口，这就是那个入口。
+	     Mac 上没有「文件」App 这一套，这一项对 Mac 不起作用。 -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
 </dict>
 </plist>

@@ -25,8 +25,17 @@ final class MarkdownDocumentOpener {
     /// 界面还没起来时先攒着的 URL，被取走后清空
     private(set) var pendingURL: URL?
 
-    /// 当前正在访问的安全作用域 URL（用过必须配对释放，否则系统会一直留着授权）
-    private var accessedURL: URL?
+    /// 已经申请到「安全作用域」授权的外部文件。
+    ///
+    /// ### 为什么是一批，不是「只记最后一个」
+    /// 沙盒没开的时候，这个集合写什么都无所谓 —— 反正整个硬盘都能读写。
+    /// 开了沙盒就不一样了：右侧可以同时开着好几份**容器外**的文档（⌘O 挑的、
+    /// Finder 双击进来的），每一份都得留着它自己那张通行证。
+    /// 只记最后一个的话，用户回头在**较早打开**那份上按 ⌘S 就会写不进去。
+    ///
+    /// 授权用过要配对释放，否则系统会一直替这个文件开着口子。这里统一在
+    /// `stopAccessing()` 里还（退出时调用）。
+    private var accessedURLs: Set<URL> = []
 
     private init() {}
 
@@ -52,22 +61,23 @@ final class MarkdownDocumentOpener {
 
     /// 退出 / 关窗口时释放授权
     func stopAccessing() {
-        accessedURL?.stopAccessingSecurityScopedResource()
-        accessedURL = nil
+        for url in accessedURLs {
+            url.stopAccessingSecurityScopedResource()
+        }
+        accessedURLs.removeAll()
     }
 
     // MARK: - 安全作用域
 
     private func beginAccessing(_ url: URL) {
-        // 换文件了：先把上一个的授权还回去
-        if let previous = accessedURL, previous != url {
-            previous.stopAccessingSecurityScopedResource()
-            accessedURL = nil
-        }
-        guard accessedURL == nil else { return }
+        // 同一个文件申请过就别再申请一次 —— 申请两次要还两次，很容易记漏一半
+        guard !accessedURLs.contains(url) else { return }
 
+        // 返回 false 不代表「没戏」：
+        //   - 从 Finder 双击进来的文件，系统在启动时就把权限给足了，这里本来就会返回 false；
+        //   - 真拿不到权限的话，后面读文件就会失败，用户会看到「打不开文件」的提示。
         if url.startAccessingSecurityScopedResource() {
-            accessedURL = url
+            accessedURLs.insert(url)
         }
     }
 }

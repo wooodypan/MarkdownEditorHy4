@@ -55,6 +55,29 @@ struct MarkdownTheme {
     var paragraphSpacing: CGFloat
     /// 标题上方的额外间距
     var headingSpacing: CGFloat
+
+    /// 行高倍数。
+    ///
+    /// ### 怎么理解这个数
+    /// 字体自己带一个「自然行高」（body 字体大约 1.2 倍字号），这里给的是**再乘几倍**：
+    /// - `1.0`（默认）：一行都不多，完全用字体自带的自然行高 —— 也就是和没有这一项时一模一样；
+    /// - `1.5`：行与行之间比自然值再多出 50%，读起来更松。
+    ///
+    /// 小于等于 1 的时候**不往段落样式里写**（`NSParagraphStyle.lineHeightMultiple`
+    /// 默认是 0，0 和 1 都是「照自然行高来」）。不写的好处是默认状态下排版结果
+    /// 和以前逐点一致，不会因为多挂一个属性而出现亚像素级的行高变化。
+    var lineHeightMultiple: CGFloat = 1.0
+
+    /// 正文段落**首行**额外缩进多少点（换行后的第二行不缩）。
+    ///
+    /// ### 为什么只给正文段落用
+    /// 标题、列表项、代码块、图片/表格这些整块内容的首行本来就有标记、序号或者
+    /// 就是一整张图，再往里缩会歪掉。所以这个值只在渲染普通段落时才用得上，
+    /// 具体在 `MarkupToAttributedRenderer.visitParagraph` 里决定给不给。
+    ///
+    /// 中文排版的习惯是首行缩进两个汉字宽 —— 那是 `bodyFont.pointSize × 2`，
+    /// App 层的设置页就是按「几个字」让用户选的（见 `MarkdownEditorSettings.applyTypography`）。
+    var paragraphIndent: CGFloat = 0
     /// 图片最大高度（防止一张长图撑爆屏幕）
     var imageMaxHeight: CGFloat
     /// 代码块矩形背景的圆角
@@ -129,11 +152,11 @@ struct MarkdownTheme {
         return MarkdownTheme(
             bodyFont: body,
             codeFont: code,
-            headingFonts: Self.makeHeadingFonts(base: body),
+            headingFonts: Self.makeHeadingFonts(baseSize: body.pointSize),
             textColor: text,
             markerColor: marker,
             orderedListMarkerColor: UIColor(red: 0.26, green: 0.72, blue: 0.51, alpha: 1.00),
-            linkColor: UIColor(red: 0.26, green: 0.72, blue: 0.51, alpha: 1.00), //#42b883
+            linkColor: UIColor(red: 0.16, green: 0.59, blue: 0.39, alpha: 1.00), //#42b883
             inlineCodeColor: UIColor(red: 0.28, green: 0.40, blue: 0.51, alpha: 1.00),
             inlineCodeBackground: UIColor(red: 0.95, green: 0.95, blue: 0.95, alpha: 1.00),
             codeBlockBackground: UIColor.secondarySystemBackground,
@@ -143,7 +166,7 @@ struct MarkdownTheme {
             bulletDiameter: 9,
             listIndent: 22,
             quoteIndent: 16,
-            paragraphSpacing: 6,
+            paragraphSpacing: 12,
             headingSpacing: 14,
             imageMaxHeight: 420,
             codeBlockCornerRadius: 8,
@@ -160,8 +183,7 @@ struct MarkdownTheme {
     }
 
     /// 生成 1~6 级标题字体：级别越高字越大，统一加粗
-    private static func makeHeadingFonts(base: UIFont) -> [Int: UIFont] {
-        let baseSize = base.pointSize
+    static func makeHeadingFonts(baseSize: CGFloat) -> [Int: UIFont] {
         // 依次是 H1 ~ H6 的字号增量
         let deltas: [CGFloat] = [10, 6, 3, 1, 0, -1]
         var result: [Int: UIFont] = [:]
@@ -170,6 +192,24 @@ struct MarkdownTheme {
             result[level] = UIFont.boldSystemFont(ofSize: baseSize + delta)
         }
         return result
+    }
+
+    /// 换一个正文字号，并把跟着它派生出来的字体一起换掉。
+    ///
+    /// ### 为什么必须整组换
+    /// 主题里只有「正文字号」这一个源头：等宽字体取 `正文 - 1`，各级标题取
+    /// `正文 + 10/6/3/1/0/-1`。设置页上用户拖的是正文字号，要是这里只改
+    /// `bodyFont`，标题就会留在原来的大小上 —— 字号调大以后正文比 H2 还大。
+    ///
+    /// ### 说明一下和「动态字体」的关系
+    /// 这是**用户手动指定**的字号，用的是 `systemFont(ofSize:)` 而不是
+    /// `preferredFont(forTextStyle:)`，所以系统的「文字大小」设置不再作用于正文
+    /// （用户既然自己拖了滑块，就该听滑块的）。默认值是从主题原来的字号取的，
+    /// 所以没动过设置的人看到的大小和以前完全一样。
+    mutating func applyBodyFontSize(_ size: CGFloat) {
+        bodyFont = UIFont.systemFont(ofSize: size)
+        codeFont = UIFont.monospacedSystemFont(ofSize: max(9, size - 1), weight: .regular)
+        headingFonts = Self.makeHeadingFonts(baseSize: size)
     }
 
     // MARK: 派生的属性字典
@@ -222,13 +262,31 @@ struct MarkdownTheme {
 
     // MARK: 段落样式
 
-    /// 普通段落
-    func paragraphStyle(indent: CGFloat, extraSpacingBefore: CGFloat = 0) -> NSParagraphStyle {
+    /// 把「行高倍数」写进段落样式。
+    ///
+    /// ⚠️ 只有大于 1 才写：`NSParagraphStyle.lineHeightMultiple` 默认是 0，
+    /// 而 0 和 1 是同一个意思（照字体的自然行高来）。默认状态下干脆不碰这个属性，
+    /// 免得「什么都没调」的时候行高却和以前差一丝。
+    ///
+    /// 不是 private：列表项的段落样式在 `MarkupToAttributedRenderer` 那个文件里，
+    /// 跨文件拿不到 private 成员。
+    func applyLineHeight(to style: NSMutableParagraphStyle) {
+        guard lineHeightMultiple > 1 else { return }
+        style.lineHeightMultiple = lineHeightMultiple
+    }
+
+    /// 普通段落。
+    /// - parameter firstLineIndentExtra: 首行比其余行多缩进多少点（段落首行缩进）。
+    ///   只有正文段落才传非 0 —— 见 `paragraphIndent` 的说明
+    func paragraphStyle(indent: CGFloat,
+                        extraSpacingBefore: CGFloat = 0,
+                        firstLineIndentExtra: CGFloat = 0) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.headIndent = indent
-        style.firstLineHeadIndent = indent
+        style.firstLineHeadIndent = indent + firstLineIndentExtra
         style.paragraphSpacingBefore = extraSpacingBefore
         style.paragraphSpacing = paragraphSpacing
+        applyLineHeight(to: style)
         return style
     }
 
@@ -239,6 +297,7 @@ struct MarkdownTheme {
         style.firstLineHeadIndent = indent
         style.paragraphSpacingBefore = headingSpacing
         style.paragraphSpacing = paragraphSpacing
+        applyLineHeight(to: style)
         return style
     }
 
@@ -250,10 +309,14 @@ struct MarkdownTheme {
         style.tailIndent = -codeBlockTextInset
         style.paragraphSpacingBefore = paragraphSpacing
         style.paragraphSpacing = paragraphSpacing
+        applyLineHeight(to: style)
         return style
     }
 
-    /// 图片 / 分隔线独占一行的段落样式
+    /// 图片 / 分隔线独占一行的段落样式。
+    ///
+    /// 这里**故意不套行高倍数**：这一段的「内容」是一张图或一条线，
+    /// 把字号那套行高乘上去只会给图片上下平白多垫空白，跟用户调「行高」的本意对不上。
     func blockAttachmentParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.headIndent = indent
@@ -273,7 +336,7 @@ extension MarkdownTheme {
     /// 所以颜色、边距这些只能在绘制时读，套不到 UIKit 的 view 层级上去。
     struct TableStyle {
         /// 表头行的底色
-        var headerBackground: UIColor = .secondarySystemBackground
+        var headerBackground: UIColor = UIColor(red: 0.95, green: 0.96, blue: 0.97, alpha: 1.00)
         /// 表格线和外框的颜色
         var borderColor: UIColor = .separator
         /// 表格线宽度（1 就是一条细线）

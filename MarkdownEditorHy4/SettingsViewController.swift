@@ -2,7 +2,11 @@
 //  SettingsViewController.swift
 //  MarkdownEditorHy4
 //
-//  简易设置页：阅读相关 + 大纲面板高度，后面还会往里加
+//  简易设置页：正文排版 + 阅读相关 + 大纲面板高度 + 表格列宽，后面还会往里加
+//
+//  这一页改了之后要「当场生效」的那几项（字号、行高、段间距、首行缩进、表格列宽），
+//  是由内容页监听 `MarkdownEditorSettings.didChangeNotification` 后重新渲染实现的，
+//  设置页自己只负责把值写回配置 —— 它不认识编辑器，也不需要认识。
 //
 
 import UIKit
@@ -26,6 +30,8 @@ final class SettingsViewController: UIViewController {
     // MARK: 分组
 
     private enum Section: Int, CaseIterable {
+        /// 正文字体与段落排版。放最上面：这是用户最常进来改的一组
+        case typography
         /// 阅读与大纲（开关类）
         case reading
         /// 大纲面板长多高
@@ -35,6 +41,7 @@ final class SettingsViewController: UIViewController {
 
         var title: String {
             switch self {
+            case .typography: return "正文排版"
             case .reading: return "阅读与大纲"
             case .outlineSize: return "大纲面板高度"
             case .tableLayout: return "表格列宽"
@@ -43,6 +50,11 @@ final class SettingsViewController: UIViewController {
 
         var rows: [Row] {
             switch self {
+            case .typography:
+                // 顺序就是界面上从上到下的顺序：
+                // 先定字号，再定行与行、段与段、段首，最后是整行的宽度
+                return [.bodyFontSize, .lineHeightMultiple, .paragraphSpacing,
+                        .paragraphIndentCharacters, .bodyContentWidth]
             case .reading:
                 return [.remembersScrollPosition]
             case .outlineSize:
@@ -58,6 +70,18 @@ final class SettingsViewController: UIViewController {
 
     /// 设置页上的行。加新设置就先在这里加一个 case
     private enum Row: Int, CaseIterable {
+        // 正文排版
+        /// 正文字号（点）
+        case bodyFontSize
+        /// 行高倍数
+        case lineHeightMultiple
+        /// 段落之间的间距（点）
+        case paragraphSpacing
+        /// 段落首行缩进（字符数）
+        case paragraphIndentCharacters
+        /// 正文栏宽上限（点），拖到最右端 = 不限
+        case bodyContentWidth
+        // 阅读与大纲
         case remembersScrollPosition
         /// 高度按什么算（百分比 / 固定最大高度）
         case outlineHeightMode
@@ -73,6 +97,16 @@ final class SettingsViewController: UIViewController {
         /// 主标题
         var title: String {
             switch self {
+            case .bodyFontSize:
+                return "正文字号"
+            case .lineHeightMultiple:
+                return "行高"
+            case .paragraphSpacing:
+                return "段落间距"
+            case .paragraphIndentCharacters:
+                return "段落首行缩进"
+            case .bodyContentWidth:
+                return "行宽上限"
             case .remembersScrollPosition:
                 return "记住目录大纲滚动位置"
             case .outlineHeightMode:
@@ -94,6 +128,23 @@ final class SettingsViewController: UIViewController {
         func detail(in settings: MarkdownEditorSettings) -> String {
             let usesRatio = settings.outlineHeightMode == .percentage
             switch self {
+            case .bodyFontSize:
+                return "正文的字号。标题、行内代码、代码块都是从这个数推出来的"
+                    + "（标题更大、代码略小），会跟着一起变。"
+            case .lineHeightMultiple:
+                return "行与行之间的距离。「1.00 倍」就是字体自带的松紧度，"
+                    + "中文正文调到 1.40～1.60 读起来最省力。"
+                    + "只影响文字，图片、表格、分隔线不跟着变松。"
+            case .paragraphSpacing:
+                return "上下两段之间空多少。正文、标题、列表项用的是同一个值，"
+                    + "调大一点段落之间就分得清楚。"
+            case .paragraphIndentCharacters:
+                return "每个自然段**第一行**往右缩进几个字（后面的行不缩），"
+                    + "中文排版习惯是缩 2 个字。标题、列表项、引用块、代码块都不缩。"
+            case .bodyContentWidth:
+                return "一行最多排多宽。窗口比它宽时正文居中、两边留白"
+                    + "（一行拉太长，读到行尾容易串行）；拖到最右边显示「不限」，"
+                    + "正文就铺满整个窗口。"
             case .remembersScrollPosition:
                 return "打开：大纲跟着光标所在章节自动滚动，关闭文件时记住读到哪里，"
                     + "下次打开同一个文件回到原处。关闭：大纲只在你手动滚动时才动，"
@@ -122,6 +173,12 @@ final class SettingsViewController: UIViewController {
         /// 这一项的滑块值范围
         var sliderRange: ClosedRange<Double> {
             switch self {
+            case .bodyFontSize: return MarkdownEditorSettings.Limits.bodyFontSize
+            case .lineHeightMultiple: return MarkdownEditorSettings.Limits.lineHeightMultiple
+            case .paragraphSpacing: return MarkdownEditorSettings.Limits.paragraphSpacing
+            case .paragraphIndentCharacters:
+                return MarkdownEditorSettings.Limits.paragraphIndentCharacters
+            case .bodyContentWidth: return MarkdownEditorSettings.Limits.bodyContentWidth
             case .outlineHeightRatio: return MarkdownEditorSettings.Limits.outlineHeightRatio
             case .outlineMaximumHeight: return MarkdownEditorSettings.Limits.outlineMaximumHeight
             case .tableMinColumnWidth: return MarkdownEditorSettings.Limits.tableMinColumnWidth
@@ -133,6 +190,11 @@ final class SettingsViewController: UIViewController {
         /// 拖动时的步进：一档一档地吸，免得停在 63.7% 这种数上
         var sliderStep: Double {
             switch self {
+            case .bodyFontSize: return 1
+            case .lineHeightMultiple: return 0.05
+            case .paragraphSpacing: return 2
+            case .paragraphIndentCharacters: return 0.5
+            case .bodyContentWidth: return 20
             case .outlineHeightRatio: return 0.05
             case .outlineMaximumHeight: return 20
             case .tableMinColumnWidth, .tableMaxColumnWidth: return 8
@@ -144,6 +206,11 @@ final class SettingsViewController: UIViewController {
         /// 配置里这一项现在的值
         func currentValue(in settings: MarkdownEditorSettings) -> Double {
             switch self {
+            case .bodyFontSize: return settings.bodyFontSize
+            case .lineHeightMultiple: return settings.lineHeightMultiple
+            case .paragraphSpacing: return settings.paragraphSpacing
+            case .paragraphIndentCharacters: return settings.paragraphIndentCharacters
+            case .bodyContentWidth: return settings.bodyContentWidth
             case .outlineHeightRatio: return settings.outlineHeightRatio
             case .outlineMaximumHeight: return settings.outlineMaximumHeight
             case .tableMinColumnWidth: return settings.tableMinColumnWidth
@@ -160,6 +227,20 @@ final class SettingsViewController: UIViewController {
         /// 数值怎么显示给用户看
         func formatted(_ value: Double) -> String {
             switch self {
+            case .bodyFontSize:
+                return "\(Int(value.rounded())) pt"
+            case .lineHeightMultiple:
+                // 1 倍就是「什么都没加」，写个数字反而不如直接说清楚
+                return value <= 1.001 ? "默认" : String(format: "%.2f 倍", value)
+            case .paragraphSpacing:
+                return "\(Int(value.rounded())) pt"
+            case .paragraphIndentCharacters:
+                return Self.formatCharacters(value)
+            case .bodyContentWidth:
+                // 量程最右端是「不限」—— 和 `MarkdownEditorSettings.bodyContentWidthLimit` 保持一致
+                return value >= sliderRange.upperBound
+                    ? "不限"
+                    : "\(Int(value.rounded())) pt"
             case .outlineHeightRatio:
                 return "\(Int((value * 100).rounded()))%"
             case .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
@@ -167,6 +248,16 @@ final class SettingsViewController: UIViewController {
             default:
                 return "\(value)"
             }
+        }
+
+        /// 「缩进几个字」的显示：0 说「不缩进」，半个字也照实写出来
+        private static func formatCharacters(_ value: Double) -> String {
+            if value < 0.01 { return "不缩进" }
+            let rounded = (value * 2).rounded() / 2
+            let number = rounded == rounded.rounded()
+                ? "\(Int(rounded))"
+                : String(format: "%.1f", rounded)
+            return "\(number) 字符"
         }
     }
 
@@ -251,6 +342,16 @@ final class SettingsViewController: UIViewController {
         let stepped = row.steppedValue(Double(sender.value))
 
         switch row {
+        case .bodyFontSize:
+            settings.setBodyFontSize(stepped)
+        case .lineHeightMultiple:
+            settings.setLineHeightMultiple(stepped)
+        case .paragraphSpacing:
+            settings.setParagraphSpacing(stepped)
+        case .paragraphIndentCharacters:
+            settings.setParagraphIndentCharacters(stepped)
+        case .bodyContentWidth:
+            settings.setBodyContentWidth(stepped)
         case .outlineHeightRatio:
             settings.setOutlineHeightRatio(stepped)
         case .outlineMaximumHeight:
@@ -259,7 +360,11 @@ final class SettingsViewController: UIViewController {
             settings.setTableMinColumnWidth(stepped)
         case .tableMaxColumnWidth:
             settings.setTableMaxColumnWidth(stepped)
-        default:
+        case .remembersScrollPosition, .outlineHeightMode:
+            // 这两行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
+            // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
+            // 编译器会直接报「switch must be exhaustive」逼你回来接上 ——
+            // 少了这层保护就会出现「滑块能拖、但拖了什么都没发生」这种静默失效。
             return
         }
 
@@ -350,8 +455,10 @@ final class SettingsViewController: UIViewController {
         valueLabel.textColor = .secondaryLabel
         valueLabel.textAlignment = .right
         valueLabel.tag = Self.valueLabelTag
-        // 固定宽度 + 等宽数字：拖动时数字变化不会把滑块挤来挤去
-        valueLabel.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        // 固定宽度 + 等宽数字：拖动时数字变化不会把滑块挤来挤去。
+        // ⚠️ 宽度要放得下最长的那几个值：「1200 pt」7 个等宽字符 ≈ 55pt、
+        // 「1.5 字符」还带两个汉字 ≈ 57pt —— 56 就正好卡在边界上会截字，所以给 68
+        valueLabel.widthAnchor.constraint(equalToConstant: 68).isActive = true
 
         let affectsHeight = isEffective(row)
         slider.isEnabled = affectsHeight
@@ -402,7 +509,10 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
             return makeToggleCell(for: row)
         case .outlineHeightMode:
             return makeHeightModeCell()
-        case .outlineHeightRatio, .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
+        case .bodyFontSize, .lineHeightMultiple, .paragraphSpacing, .paragraphIndentCharacters,
+             .bodyContentWidth,
+             .outlineHeightRatio, .outlineMaximumHeight,
+             .tableMinColumnWidth, .tableMaxColumnWidth:
             return makeSliderCell(for: row)
         }
     }

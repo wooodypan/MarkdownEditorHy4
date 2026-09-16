@@ -40,6 +40,14 @@ final class DocumentListViewController: UIViewController {
     /// 冷启动时那个「该不该自动打开第一份文档」只做一次
     private var didOpenInitialDocument = false
 
+    /// 真正动手「把一个文件删掉」的那一下。默认走 `DocumentsWorkspace.delete`
+    /// （Mac 上先进系统废纸篓，手机上直接删）。
+    ///
+    /// **这是给测试留的替换口**：测试里会换成「直接删临时目录里的文件」，
+    /// 免得跑一次测试就往用户的废纸篓里丢一个文件（`DocumentsWorkspace.delete`
+    /// 的注释里有同样的警告）。
+    var deleteFile: (URL) throws -> Void = { try DocumentsWorkspace.delete($0) }
+
     // MARK: - 生命周期
 
     override func viewDidLoad() {
@@ -89,9 +97,20 @@ final class DocumentListViewController: UIViewController {
     }
 
     /// 一份文件都没有时的说明文字 —— 空白列表很容易被当成「卡住了」
+    ///
+    /// ### 为什么两个平台要分开写
+    /// 开了 App 沙盒之后，这个文档目录藏在 App 自己的容器里，两个平台「把文件弄进来」
+    /// 的办法也就不一样了：
+    /// - Mac 上 Finder 里不方便直接拖到容器里，教用户走「文件 > 打开…」（⌘O）；
+    /// - iPhone / iPad 上靠 Info.plist 的 `UIFileSharingEnabled` 把这个目录露在
+    ///   「文件」App 里，直接往里丢就行。
     private func setupEmptyLabel() {
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        #if targetEnvironment(macCatalyst)
+        emptyLabel.text = "这个目录里还没有文档\n\n用「文件 > 打开…」把硬盘上的 .md 打开，\n或者点右上角的「+」新建一份。"
+        #else
         emptyLabel.text = "这个目录里还没有文档\n\n把 .md 文件放进「文件」App\n的 MarkdownEditorHy4 文件夹，\n或者点右上角的「+」新建一份。"
+        #endif
         emptyLabel.numberOfLines = 0
         emptyLabel.textAlignment = .center
         emptyLabel.font = .preferredFont(forTextStyle: .footnote)
@@ -218,6 +237,9 @@ final class DocumentListViewController: UIViewController {
     ///
     /// 文件是**先落到磁盘**的，所以左侧栏立刻就能看到 ——
     /// 不搞「内存里的草稿」那种中间态，⌘S 也就永远有地方写。
+    ///
+    /// 这会儿它还顶着「未命名」这个占位名；等用户在右栏第一次按 ⌘S，
+    /// 编辑页会弹框请他起个正式名字（见 `MarkdownDocumentViewController.saveDocument`）。
     @objc private func createNewDocument() {
         do {
             let url = try DocumentsWorkspace.createEmptyDocument()
@@ -275,9 +297,31 @@ final class DocumentListViewController: UIViewController {
                                       preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in completion?(false) })
         alert.addAction(UIAlertAction(title: "删除", style: .destructive) { [weak self] _ in
-            completion?(self?.performDelete(url) ?? false)
+            // ⚠️ 删除这一步必须**先单独执行完**，再回头调 completion。
+            //
+            // 千万别图省事写成 `completion?(self?.performDelete(url) ?? false)` ——
+            // `completion` 是 nil 时，Swift 的 `?()` 会把**括号里的参数一起跳过不求值**，
+            // 于是 `performDelete` 根本不会跑。右键菜单那条路恰恰就是不传 completion 的
+            // （只有左滑需要知道结果），所以点完「删除」文件会原地不动。
+            self?.handleDeleteConfirmation(url, completion: completion)
         })
         present(alert, animated: true)
+    }
+
+    /// 用户在确认框里点了「删除」之后真正要做的事。
+    ///
+    /// 单独抽出来有三个原因：
+    /// 1. **它必须无条件执行** —— 理由见上面那段警告，一旦写进 `completion?(...)`
+    ///    的参数位置，就会被 optional chaining 短路掉；
+    /// 2. 能单测：`completion` 传 nil（也就是右键菜单那条路的样子）时，
+    ///    文件也必须真的被删掉；
+    /// 3. 提醒后来的人别把它挪回闭包的参数里。
+    ///
+    /// - Parameter completion: 真删掉了回 true；滑动手势靠它决定「这一行收不收回原位」。
+    func handleDeleteConfirmation(_ url: URL, completion: ((Bool) -> Void)? = nil) {
+        // 先删，再回调 —— 顺序反了就又回到原来那个坑里
+        let didDelete = performDelete(url)
+        completion?(didDelete)
     }
 
     /// 确认框里那两句话：一句说「文件去哪儿了」，一句说「删完右侧那个标签页怎么办」
@@ -302,7 +346,8 @@ final class DocumentListViewController: UIViewController {
     @discardableResult
     private func performDelete(_ url: URL) -> Bool {
         do {
-            try DocumentsWorkspace.delete(url)
+            // 走 deleteFile 而不是直接调 DocumentsWorkspace：测试要能换成「直接删」
+            try deleteFile(url)
         } catch {
             showAlert(title: "删不掉",
                       message: "「\(url.lastPathComponent)」没能删掉：\(error.localizedDescription)")

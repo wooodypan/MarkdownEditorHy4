@@ -152,6 +152,12 @@ final class MarkdownEditorSettingsTests: XCTestCase {
 
     // MARK: - 设置页
 
+    /// ⚠️ 下面每处都把页面铺成 420 × 2600，是**故意的**，别改小。
+    /// `UITableView` 只创建**可见范围内**的 cell：帧太矮时靠下的行根本不存在，
+    /// 递归找控件的辅助函数就会返回 nil，`XCTUnwrap` 报「找不到控件」——
+    /// 那是测试自己没把页面铺开，不是功能坏了。设置页现在有四个分组十来行，
+    /// 帧高得盖过整个内容高度，行才会全部建出来。
+
     /// 设置页要能建起来，开关显示的必须是配置里的真实值，拨一下要能写回去
     func testSettingsPageShowsCurrentValueAndWritesBack() throws {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
@@ -159,7 +165,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
 
         let controller = SettingsViewController(settings: settings)
         controller.loadViewIfNeeded()
-        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 640)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
         let toggle = try XCTUnwrap(firstSwitch(in: controller.view), "设置页里应该有一个开关")
@@ -177,7 +183,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         let url = makeTempFileURL()
         let controller = SettingsViewController(settings: MarkdownEditorSettings(fileURL: url))
         controller.loadViewIfNeeded()
-        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 640)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
         let toggle = try XCTUnwrap(firstSwitch(in: controller.view))
@@ -297,7 +303,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
 
         let controller = SettingsViewController(settings: settings)
         controller.loadViewIfNeeded()
-        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 900)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
         let control = try XCTUnwrap(firstSegmentedControl(in: controller.view),
@@ -320,7 +326,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
 
         let controller = SettingsViewController(settings: settings)
         controller.loadViewIfNeeded()
-        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 900)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
         let control = try XCTUnwrap(firstSegmentedControl(in: controller.view))
@@ -342,7 +348,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
         let controller = SettingsViewController(settings: settings)
         controller.loadViewIfNeeded()
-        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 900)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
         let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1))
@@ -420,7 +426,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
         let controller = SettingsViewController(settings: settings)
         controller.loadViewIfNeeded()
-        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 1100)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
         // 两个滑块用量程上界当身份证找（200 / 600，和大纲那两个 1 / 900 不冲突）

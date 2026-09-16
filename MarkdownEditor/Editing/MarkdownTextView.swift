@@ -39,6 +39,25 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         set { renderer.imageBaseURL = newValue }
     }
 
+    /// 正文栏宽的**上限**（点）。`nil`（默认）= 不限，正文铺满整个宽度。
+    ///
+    /// ### 它是怎么起作用的
+    /// 不是去限制 `textContainer` 的宽，而是**把左右内边距对称加宽**：
+    /// 可用宽度超上限时，多出来的部分左右平分，正文就居中、两边留白。
+    ///
+    /// ### 为什么选「改 `textContainerInset`」这条路
+    /// 这个编辑器里所有装饰 —— 折叠三角、代码块背景框、引用竖条、任务列表复选框 ——
+    /// 都是在算位置时**读 `textContainerInset`** 的。改它一处，整套装饰跟着一起挪，
+    /// 不用去每个绘制点挨个加偏移（漏一个就会出现「文字居中了、灰背景还在原处」）。
+    var maxContentWidth: CGFloat? {
+        didSet {
+            guard maxContentWidth != oldValue else { return }
+            updateTextContainerInsetIfNeeded()
+            // 宽度变了图片 / 表格要重新按新宽度画，交给布局阶段那一趟去重排
+            setNeedsLayout()
+        }
+    }
+
     // MARK: 大纲（目录）
 
     /// 大纲事件的出口。
@@ -164,13 +183,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         textColor = renderer.theme.textColor
         backgroundColor = .systemBackground
         alwaysBounceVertical = true
-        // 左边多留一条「装订线」给折叠三角。三角浮在这条带子里，不占正文字符位，
-        // 多行文字的左边缘才对得齐（它要是插在文本流里，第一行会被推歪）。
-        let baseInset: CGFloat = 16
-        textContainerInset = UIEdgeInsets(top: baseInset,
-                                          left: baseInset + renderer.theme.foldGutterWidth,
-                                          bottom: 32,
-                                          right: baseInset)
+        syncLinkTextAttributes()
+        // 左右内边距（含给折叠三角留的那条装订线）见 updateTextContainerInsetIfNeeded：
+        // 它会按「行宽上限」动态算，所以初始也走同一个口，别在这儿再写一份
+        updateTextContainerInsetIfNeeded()
 
         // 下面几项很关键：markdown 编辑器必须拿到「用户原始输入的字符」，
         // 否则系统会把引号变成弯引号、粘贴时自动补空格，源码就和用户输入对不上了
@@ -178,6 +194,23 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         smartQuotesType = .no
         smartInsertDeleteType = .no
         autocapitalizationType = .none
+    }
+
+    /// 把主题里的链接样式同步给 `UITextView` 自己。
+    ///
+    /// ### 为什么非得有这一步（踩过的坑，别删）
+    /// 富文本里给链接文字挂上 `.link` 之后，**UITextView 画图时会拿自己的
+    /// `linkTextAttributes` 盖在那一段上**，默认值是系统蓝（实测
+    /// `[NSColor = 0.00,0.53,1.00,1.00]`）。所以哪怕富文本里的 `foregroundColor`
+    /// 已经是 `theme.linkColor`，屏幕上照样是蓝的 —— 表现就是
+    /// 「在 `MarkdownTheme` 里改 `linkColor` 一点反应都没有」。
+    ///
+    /// 更阴的是：**UITextView 不会改你给它的字符串**，从 `attributedText` 里
+    /// 把颜色读回来还是红的。也就是说只查富文本永远看不出问题，必须看屏幕。
+    ///
+    /// 出处仍然只有 `theme.linkAttributes` 一份，不在这儿另写颜色。
+    private func syncLinkTextAttributes() {
+        linkTextAttributes = renderer.theme.linkAttributes
     }
 
     // MARK: 对外接口
@@ -240,10 +273,68 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         return max(120, width - textContainer.lineFragmentPadding * 2)
     }
 
+    /// 主题改过（字号 / 行高 / 段间距 / 首行缩进）之后，按新样式把整篇重排一遍。
+    ///
+    /// ### 为什么必须有这个入口
+    /// 这几个参数不是「画的时候读一下」，而是**渲染那一刻就烙进**字体和
+    /// `NSParagraphStyle` 里了。只改 `renderer.theme` 不动画面，屏幕上一点变化都没有。
+    ///
+    /// 重排会保着光标停在原来的源码位置（见 `reRenderPreservingCaret`），
+    /// 所以设置页上拖滑块时不会每动一下就跳回文首。
+    func refreshTheme() {
+        // textView 自己的 font 只影响「没被富文本属性覆盖的地方」（比如光标高度、
+        // 打新字时的临时样式），但既然字号换了，这里也一起对齐
+        font = renderer.theme.bodyFont
+        // 主题可能换了（配色联动时），链接颜色也得跟着换
+        syncLinkTextAttributes()
+        reRenderPreservingCaret()
+    }
+
+    /// 按「行宽上限」和主题里的装订线宽度，重算左右内边距。
+    ///
+    /// ### 三条边距的来历
+    /// - 左：基础留白 + 折叠三角要占的那条「装订线」（三角浮在带子里，不占正文字符位，
+    ///   多行文字的左边缘才对得齐）；
+    /// - 右：基础留白；
+    /// - 上下：上边留一点呼吸，下边多留一截，好让最后一行能滚到舒服的位置。
+    ///
+    /// 有「行宽上限」且当前可用宽度超过它时，把超出的部分**左右平分**加进去，
+    /// 正文就居中、两边留白，一行不会拉得太长。
+    ///
+    /// ⚠️ 只在结果真的变了才赋值。这个方法会在每次 `layoutSubviews` 里被调到，
+    /// 而设置 `textContainerInset` 会再触发一轮布局 —— 不判等就是死循环。
+    private func updateTextContainerInsetIfNeeded() {
+        let base: CGFloat = 16
+        var left = base + renderer.theme.foldGutterWidth
+        var right = base
+
+        if let limit = maxContentWidth {
+            // ⚠️ 别用 `bounds.width - left - right` 当可用宽度：正文真正能排字的宽度
+            // 还要再扣掉 `textContainer` 自己的行内边距（`lineFragmentPadding` 左右各一份，
+            // 和 `currentContainerWidth` 的算法保持一致）。不扣的话用户在设置页填 400，
+            // 实际只会得到 390 —— 差得不多，但「我设的数」和「看到的宽度」对不上很难解释。
+            let padding = textContainer.lineFragmentPadding * 2
+            let available = bounds.width - left - right - padding
+            if available > limit {
+                let extra = (available - limit) / 2
+                left += extra
+                right += extra
+            }
+        }
+
+        let target = UIEdgeInsets(top: base, left: left, bottom: 32, right: right)
+        guard target != textContainerInset else { return }
+        textContainerInset = target
+    }
+
     // MARK: 布局
 
     override func layoutSubviews() {
         super.layoutSubviews()
+
+        // 第一件事就是把左右内边距按当前宽度定下来 —— 下面算代码块背景、折叠三角、
+        // 图片宽度全都要读它，晚一步就会有一帧画在旧位置
+        updateTextContainerInsetIfNeeded()
 
         // 有整篇内容等着写入：现在就写（这一步必须在布局阶段做，见 applyPendingFullReplace 的注释）
         if pendingFullReplace { applyPendingFullReplace() }
