@@ -89,6 +89,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private(set) var isApplyingModelChange = false
     /// 上一次渲染时用的容器宽度，窗口尺寸变了要整篇重排
     private var renderedWidth: CGFloat = 0
+    /// 上一次渲染时用的容器**高度**。图片的最大高度跟着它走，所以窗口变高变矮也要重排
+    private var renderedHeight: CGFloat = 0
     /// 程序自己发起的编辑正在进行（比如点复选框）。
     ///
     /// 这种编辑**不是系统记的**，`applyEdit` 里 disable/enable undo 的配对在这种时机
@@ -194,6 +196,82 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         smartQuotesType = .no
         smartInsertDeleteType = .no
         autocapitalizationType = .none
+
+        setupImageTapGesture()
+    }
+
+    // MARK: 点图片预览
+
+    /// 点中了某张图片时的回调，参数是那个图片的 attachment。
+    ///
+    /// ### 为什么用闭包，而不是 textView 自己弹预览窗
+    /// 预览要用 `QLPreviewController`，它是 `UIViewController`，得有人 `present` 它 ——
+    /// 而 textView 只是个 view，没有 present 的能力。所以这里只负责「认出点到了哪张图」，
+    /// 弹窗交给外面（内容页）去做。
+    var onImageTapped: ((ImageAttachment) -> Void)?
+
+    /// 装一个「透明」的点击手势：认出点击位置，但不拦下这次触摸。
+    ///
+    /// `cancelsTouchesInView = false` 是关键 —— 编辑器还得靠这次触摸去放光标、
+    /// 选中文字。设成 false 之后两边各做各的：光标照常落下去，我们也在同一时刻
+    /// 收到回调。再配合 `shouldRecognizeSimultaneouslyWith` 返回 true，
+    /// 不会和系统自己的手势互相取消。
+    private func setupImageTapGesture() {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleImageTap(_:)))
+        tap.cancelsTouchesInView = false
+        tap.delegate = self
+        addGestureRecognizer(tap)
+    }
+
+    @objc private func handleImageTap(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended else { return }
+        let point = gesture.location(in: self)
+        guard let attachment = imageAttachment(at: point) else { return }
+        onImageTapped?(attachment)
+    }
+
+    /// 找出屏幕坐标 `point` 上盖着的是哪张图片。
+    ///
+    /// ### 怎么定位的
+    /// 图片在文本流里只占 1 个字符位，所以要先把点换算到 TextKit 的
+    /// **fragment 坐标系**，再逐个 fragment 问「你包含这个点吗」，
+    /// 命中之后在那个 fragment 覆盖的字符范围里找 `ImageAttachment`。
+    ///
+    /// ### 坐标系换算（和 `computeQuoteBarFrames` 里那套一致，别各写一份）
+    /// - `layoutFragmentFrame` 的原点是 textContainer 左上角，**不含** `textContainerInset`；
+    /// - 文档坐标 = fragment 坐标 + inset；
+    /// - 屏幕坐标 = 文档坐标 − contentOffset。
+    /// 反推就是下面这两行。
+    func imageAttachment(at point: CGPoint) -> ImageAttachment? {
+        guard let textLayoutManager,
+              let contentStorage = textLayoutManager.textContentManager as? NSTextContentStorage,
+              bounds.width > 1 else { return nil }
+
+        let target = CGPoint(x: point.x + contentOffset.x - textContainerInset.left,
+                             y: point.y + contentOffset.y - textContainerInset.top)
+
+        let documentStart = contentStorage.documentRange.location
+        var found: ImageAttachment?
+
+        textLayoutManager.enumerateTextLayoutFragments(from: documentStart,
+                                                       options: [.ensuresLayout]) { fragment in
+            guard fragment.layoutFragmentFrame.contains(target) else { return true }
+
+            // 这个 fragment 覆盖了哪几个字符（NSTextContentStorage 用的是 UTF-16 偏移，
+            // 和 NSRange.location 同一套坐标）
+            let start = contentStorage.offset(from: documentStart, to: fragment.rangeInElement.location)
+            let length = contentStorage.offset(from: fragment.rangeInElement.location,
+                                               to: fragment.rangeInElement.endLocation)
+            let range = NSRange(location: start, length: max(0, length))
+            guard range.location >= 0, NSMaxRange(range) <= textStorage.length else { return true }
+
+            textStorage.enumerateAttribute(.attachment, in: range, options: []) { value, _, _ in
+                if let attachment = value as? ImageAttachment { found = attachment }
+            }
+            // 图片自己独占一行，命中这个 fragment 就不用再看后面的了
+            return false
+        }
+        return found
     }
 
     /// 把主题里的链接样式同步给 `UITextView` 自己。
@@ -1420,5 +1498,20 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
                           in: context)
             return true
         }
+    }
+}
+
+// MARK: - 手势共存
+
+extension MarkdownTextView: UIGestureRecognizerDelegate {
+
+    /// 我们那个「认图片」的点击手势要和系统自己的手势**同时**生效。
+    ///
+    /// 不写这个的话，UITextView 内部的手势（放光标、选中、长按菜单…）会把我们这个
+    /// 手势挤掉，结果是「点了图片没反应 —— 但偶尔滚一下又能弹出来」，非常难查。
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer)
+        -> Bool {
+        true
     }
 }

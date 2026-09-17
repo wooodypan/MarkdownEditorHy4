@@ -33,6 +33,26 @@ enum OutlineHeightMode: String, Codable, CaseIterable {
     }
 }
 
+/// 图片的**最大宽度**按什么算。
+///
+/// 和 `OutlineHeightMode` 一样做成互斥的二选一：
+/// - 「按百分比」→ 最大宽度 = 编辑器可用宽度 × 百分比，窗口拉宽图也跟着变宽；
+/// - 「固定宽度」→ 永远是那个点数，窗口怎么变都不影响。
+enum ImageWidthMode: String, Codable, CaseIterable {
+    /// 宽度最多占编辑器宽度的百分之几
+    case percentage
+    /// 宽度最多是多少点（px）
+    case fixedPoints
+
+    /// 设置页上显示的名字
+    var displayName: String {
+        switch self {
+        case .percentage: return "按百分比"
+        case .fixedPoints: return "固定宽度"
+        }
+    }
+}
+
 /// 编辑器的用户配置。
 ///
 /// ### 落盘在哪
@@ -89,6 +109,13 @@ final class MarkdownEditorSettings {
         static let paragraphIndentCharacters: Double = 0
         /// 行宽默认「不限」—— 就是量程上限那个值，正文照旧铺满窗口宽度
         static let bodyContentWidth = Limits.bodyContentWidth.upperBound
+
+        /// 图片尺寸默认值同样**从主题读**，不在这里写第二份数字（理由同上）
+        static let imageWidthMode: ImageWidthMode = .percentage
+        static let imageWidthRatio = Double(theme.image.maxWidthRatio ?? 0.5)
+        static let imageWidthPoints = Double(theme.image.maxWidthPoints)
+        /// 图片最大高度默认 **420 点**（从主题读，不在这里写第二份数字）
+        static let imageMaxHeight = Double(theme.image.maxHeight)
     }
 
     /// 各项数值的合法范围。
@@ -117,6 +144,16 @@ final class MarkdownEditorSettings {
         /// 正文栏宽上限的合法范围（点）。
         /// ⚠️ 拖到**上限值**表示「不限」—— 见 `MarkdownEditorSettings.bodyContentWidthLimit`
         static let bodyContentWidth: ClosedRange<Double> = 320...1200
+
+        /// 图片宽度百分比的合法范围。20% 再小就看不清了，90% 基本就是满栏
+        static let imageWidthRatio: ClosedRange<Double> = 0.2...0.9
+        /// 图片固定宽度的合法范围（点）
+        static let imageWidthPoints: ClosedRange<Double> = 80...800
+        /// 图片最大高度的合法范围（点）。
+        ///
+        /// ⚠️ 上限 **1600** 不能和 `bodyContentWidth` 的 1200 撞车 ——
+        /// 设置页的测试是按「量程上界」在视图树里找滑块的，上界重复就找错行。
+        static let imageMaxHeight: ClosedRange<Double> = 120...1600
     }
 
     // MARK: 落盘
@@ -154,6 +191,11 @@ final class MarkdownEditorSettings {
         var paragraphSpacing: Double?
         var paragraphIndentCharacters: Double?
         var bodyContentWidth: Double?
+        /// 图片尺寸那一组
+        var imageWidthMode: String?
+        var imageWidthRatio: Double?
+        var imageWidthPoints: Double?
+        var imageMaxHeight: Double?
     }
 
     // MARK: 配置项
@@ -239,6 +281,25 @@ final class MarkdownEditorSettings {
     var bodyContentWidthLimit: Double? {
         bodyContentWidth >= Limits.bodyContentWidth.upperBound ? nil : bodyContentWidth
     }
+
+    // MARK: 图片尺寸
+
+    /// 图片的**最大宽度**按什么算，默认「按百分比」。两种模式的解释见 `ImageWidthMode`
+    private(set) var imageWidthMode: ImageWidthMode
+
+    /// 「按百分比」模式下，图片最多占编辑器宽度的百分之几。默认 `0.5`（一半）。
+    ///
+    /// 和正文的「行宽上限」是两回事：那个管文字排多宽，这个管图片画多大。
+    private(set) var imageWidthRatio: Double
+
+    /// 「固定宽度」模式下图片的最大宽度（点）。默认 `200`。
+    private(set) var imageWidthPoints: Double
+
+    /// 图片的最大高度（点）。默认 `420`。
+    ///
+    /// 只防「一张长图撑爆屏幕」，正常大小的图根本碰不到这个上限。
+    /// 跟窗口高度无关：用户几乎不会去动这个值，不值得为它每次拉窗口都重排整篇文档。
+    private(set) var imageMaxHeight: Double
 
     /// 改「是否记住滚动位置」。值没变就什么都不做（不发通知、不写盘）
     func setRemembersScrollPosition(_ value: Bool) {
@@ -339,6 +400,43 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    // MARK: 改图片尺寸
+
+    /// 改「图片最大宽度按什么算」
+    func setImageWidthMode(_ value: ImageWidthMode) {
+        guard value != imageWidthMode else { return }
+        imageWidthMode = value
+        save()
+        postChange()
+    }
+
+    /// 改「图片宽度百分比」
+    func setImageWidthRatio(_ value: Double) {
+        let clamped = clamp(value, to: Limits.imageWidthRatio)
+        guard clamped != imageWidthRatio else { return }
+        imageWidthRatio = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「图片固定宽度」（点）
+    func setImageWidthPoints(_ value: Double) {
+        let clamped = clamp(value, to: Limits.imageWidthPoints)
+        guard clamped != imageWidthPoints else { return }
+        imageWidthPoints = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「图片最大高度」（点）
+    func setImageMaxHeight(_ value: Double) {
+        let clamped = clamp(value, to: Limits.imageMaxHeight)
+        guard clamped != imageMaxHeight else { return }
+        imageMaxHeight = clamped
+        save()
+        postChange()
+    }
+
     // MARK: 初始化
 
     init(fileURL: URL = MarkdownEditorSettings.defaultFileURL) {
@@ -355,6 +453,10 @@ final class MarkdownEditorSettings {
         self.paragraphSpacing = Default.paragraphSpacing
         self.paragraphIndentCharacters = Default.paragraphIndentCharacters
         self.bodyContentWidth = Default.bodyContentWidth
+        self.imageWidthMode = Default.imageWidthMode
+        self.imageWidthRatio = Default.imageWidthRatio
+        self.imageWidthPoints = Default.imageWidthPoints
+        self.imageMaxHeight = Default.imageMaxHeight
         load()
     }
 
@@ -402,6 +504,19 @@ final class MarkdownEditorSettings {
         if let value = payload.bodyContentWidth {
             bodyContentWidth = clamp(value, to: Limits.bodyContentWidth)
         }
+        // 和上面那个模式一样存字符串：认不出来就只让这一项退回默认
+        if let raw = payload.imageWidthMode, let value = ImageWidthMode(rawValue: raw) {
+            imageWidthMode = value
+        }
+        if let value = payload.imageWidthRatio {
+            imageWidthRatio = clamp(value, to: Limits.imageWidthRatio)
+        }
+        if let value = payload.imageWidthPoints {
+            imageWidthPoints = clamp(value, to: Limits.imageWidthPoints)
+        }
+        if let value = payload.imageMaxHeight {
+            imageMaxHeight = clamp(value, to: Limits.imageMaxHeight)
+        }
     }
 
     private func save() {
@@ -415,7 +530,11 @@ final class MarkdownEditorSettings {
                               lineHeightMultiple: lineHeightMultiple,
                               paragraphSpacing: paragraphSpacing,
                               paragraphIndentCharacters: paragraphIndentCharacters,
-                              bodyContentWidth: bodyContentWidth)
+                              bodyContentWidth: bodyContentWidth,
+                              imageWidthMode: imageWidthMode.rawValue,
+                              imageWidthRatio: imageWidthRatio,
+                              imageWidthPoints: imageWidthPoints,
+                              imageMaxHeight: imageMaxHeight)
         guard let data = try? JSONEncoder().encode(payload) else { return }
         do {
             // 目录可能还不存在（第一次跑），先建出来
@@ -503,5 +622,26 @@ extension MarkdownEditorSettings {
         // 用户选的是「缩几个字」，这里乘上字号换成点 ——
         // 字号调大以后「缩进两格」还是两格，不会变成一格半
         theme.paragraphIndent = CGFloat(paragraphIndentCharacters) * theme.bodyFont.pointSize
+    }
+
+    /// 把「图片尺寸」这一组的配置写进编辑器主题。
+    ///
+    /// ### 换算照样放在配置这一侧
+    /// 主题里存的是「渲染层直接能用的三个数」：宽度比例（或 nil）+ 宽度点数 + 高度点数。
+    /// `MarkdownEditor/` 那一层不认识 `ImageWidthMode`，也就不认识设置单例 ——
+    /// 依赖方向保持「App 层 → 组件」，和上面几个 `apply...` 是同一个理由。
+    ///
+    /// ### 改完必须整篇重渲染
+    /// 图片尺寸是**渲染那一刻**写进 attachment 的 `bounds` 的，只改主题不动画面。
+    func applyImageSize(to theme: inout MarkdownTheme) {
+        switch imageWidthMode {
+        case .percentage:
+            theme.image.maxWidthRatio = CGFloat(imageWidthRatio)
+        case .fixedPoints:
+            // nil = 「不按比例算，用固定点数」，主题里两个字段的互斥就是这个 nil
+            theme.image.maxWidthRatio = nil
+            theme.image.maxWidthPoints = CGFloat(imageWidthPoints)
+        }
+        theme.image.maxHeight = max(60, CGFloat(imageMaxHeight))
     }
 }

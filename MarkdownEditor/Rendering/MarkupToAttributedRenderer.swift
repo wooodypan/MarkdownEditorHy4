@@ -298,7 +298,17 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             return .sourceSliced(markdownSource, sourceStart: range.location, attributes: theme.markerAttributes)
         }
 
-        let maxWidth = max(60, containerWidth - indent - 16)
+        // 这一行能排多宽（列表、引用块缩进之后剩下的）
+        let availableWidth = max(60, containerWidth - indent - 16)
+        // 图片最大宽度：按比例算，或者用固定点数 —— 两者互斥，见 `ImageStyle`
+        let requestedWidth = theme.image.maxWidthRatio.map { availableWidth * $0 }
+            ?? theme.image.maxWidthPoints
+        // 再夹一层：不管用户设的是哪种，都不能超过当前这一行实际能放下的宽度
+        let maxWidth = max(60, min(availableWidth, requestedWidth))
+
+        // 最大高度是主题里写死的点数，跟窗口多高无关（见 `ImageStyle.maxHeight` 的注释）
+        let maxHeight = max(60, theme.image.maxHeight)
+
         // 一行正文有多高。图片加载不出来时占位块要按它来收缩（最多 2 行）。
         // 行高倍数大于 1 时才乘，<= 1 表示「用字体自带的自然行高」，别改变排版。
         let lineHeight = theme.bodyFont.lineHeight * max(1, theme.lineHeightMultiple)
@@ -306,7 +316,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             markdownSource: markdownSource,
             imageURL: url,
             maxWidth: maxWidth,
-            maxHeight: theme.imageMaxHeight,
+            maxHeight: maxHeight,
             lineHeight: lineHeight,
             placeholderColor: theme.markerColor
         )

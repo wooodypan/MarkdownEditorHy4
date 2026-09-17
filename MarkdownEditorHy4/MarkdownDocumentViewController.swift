@@ -19,6 +19,8 @@
 import UIKit
 // 菜单里的「打开」要判断哪些文件可选，用到 UTType.markdown
 import UniformTypeIdentifiers
+// 点图片弹系统预览（QLPreviewController）
+import QuickLook
 import MultiTabController
 
 /// ⚠️ `PPContentDisplaying` 必须写在类型声明上，不能只写个 extension：内容页工厂的闭包
@@ -126,6 +128,54 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             editor.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bottomConstraint!
         ])
+
+        // 点正文里的图片 → 弹 QuickLook 预览。
+        // 编辑器只负责认出「点到了哪张图」，弹窗得由能 present 的这一层来做
+        editor.onImageTapped = { [weak self] attachment in
+            self?.previewImage(attachment)
+        }
+    }
+
+    // MARK: 图片预览（QuickLook）
+
+    /// 当前正在预览的那一项。
+    ///
+    /// ⚠️ 必须用属性**持有**着：QuickLook 是异步去取数据的，
+    /// 预览窗还开着的时候这个对象不能已经释放了。
+    private var previewItem: ImagePreviewItem?
+
+    /// 弹出 QuickLook 预览。
+    ///
+    /// ### 为什么要先落到文件
+    /// `QLPreviewController` 只认**文件 URL**，不认内存里的 `UIImage`。
+    /// 本地图片本来就有文件，直接把地址给它；网络图片则先把已经下载好的图
+    /// 写成一份临时 png 再给地址。
+    private func previewImage(_ attachment: ImageAttachment) {
+        guard let url = previewFileURL(for: attachment) else { return }
+        previewItem = ImagePreviewItem(url: url, title: attachment.previewTitle)
+
+        let controller = QLPreviewController()
+        controller.dataSource = self
+        present(controller, animated: true)
+    }
+
+    /// 给预览准备一个文件地址。
+    private func previewFileURL(for attachment: ImageAttachment) -> URL? {
+        // 本地图片直接用原文件，不动它
+        if attachment.imageURL.isFileURL,
+           FileManager.default.fileExists(atPath: attachment.imageURL.path) {
+            return attachment.imageURL
+        }
+        // 网络图片（或者原文件已经不在了）：用已经加载好的那张图写一份临时文件
+        guard let data = attachment.loadedImage?.pngData() else { return nil }
+        let url = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("preview-\(UUID().uuidString).png")
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
+            return nil
+        }
     }
 
     private func setupStatusLabel() {
@@ -273,11 +323,12 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         applyEditorStyle()
     }
 
-    /// 把「正文排版」和「表格列宽」两组配置一起写进编辑器主题，再整篇重排一遍。
+    /// 把「正文排版」「表格列宽」「图片尺寸」三组配置一起写进编辑器主题，再整篇重排一遍。
     ///
-    /// ### 为什么这两组合成一个方法
+    /// ### 为什么这三组合成一个方法
     /// 它们走的是同一条路：改主题里的数值 → **必须重渲染才生效**
-    /// （字号、行高、段间距、首行缩进是渲染时烙进段落样式的；表格是渲染时画成图的）。
+    /// （字号、行高、段间距、首行缩进是渲染时烙进段落样式的；表格是渲染时画成图的；
+    /// 图片尺寸是渲染时就写进 attachment 的 `bounds` 的，事后改主题也改不动已经排好的图）。
     /// 各写一个方法、各排一遍的话，用户在设置页拖一下滑块会白排两遍。
     ///
     /// ### 为什么非得重排
@@ -288,6 +339,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     private func applyEditorStyle() {
         settings.applyTypography(to: &editor.renderer.theme)
         settings.applyTableColumnWidths(to: &editor.renderer.theme)
+        settings.applyImageSize(to: &editor.renderer.theme)
         // 行宽是**编辑器自己的布局参数**，不走主题 ——
         // 主题管「文字长什么样」，行宽取决于窗口有多宽，是布局的事
         editor.maxContentWidth = settings.bodyContentWidthLimit.map { CGFloat($0) }
@@ -930,5 +982,42 @@ extension MarkdownDocumentViewController: UIDocumentPickerDelegate {
     /// 用户点了取消：什么都不改，保持原样，顺手把导出标记清掉
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         isExportingImage = false
+    }
+}
+
+// MARK: - QuickLook 数据源
+
+/// QuickLook 预览窗里的「一项」：一个文件地址 + 标题栏上显示的名字。
+///
+/// 为什么单独建这个类而不复用 `ImageAttachment`：attachment 是渲染层的东西
+/// （还带着源码映射那些职责），而 QuickLook 只想要一个 URL。让两者互相认识没必要。
+private final class ImagePreviewItem: NSObject, QLPreviewItem {
+    let previewItemURL: URL?
+    let previewItemTitle: String?
+
+    init(url: URL, title: String) {
+        self.previewItemURL = url
+        self.previewItemTitle = title
+        super.init()
+    }
+
+    /// 原因见 `MarkdownBlock` 里 `nonisolated deinit` 的注释：
+    /// 隔离 deinit 会踩 Swift 6.2 运行时的野指针 free
+    nonisolated deinit {}
+}
+
+extension MarkdownDocumentViewController: QLPreviewControllerDataSource {
+
+    /// 一次只预览一张图 —— 就是用户点的那张
+    func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+        previewItem == nil ? 0 : 1
+    }
+
+    func previewController(_ controller: QLPreviewController,
+                           previewItemAt index: Int) -> QLPreviewItem {
+        // 上面报了 1，走到这儿 `previewItem` 必然有值。
+        // 万一真的没有（时序异常），给个空壳也比强解包崩掉好
+        previewItem ?? ImagePreviewItem(url: URL(fileURLWithPath: NSTemporaryDirectory()),
+                                        title: "图片")
     }
 }

@@ -38,6 +38,8 @@ final class SettingsViewController: UIViewController {
         case outlineSize
         /// 表格画出来时的列宽限制
         case tableLayout
+        /// 图片画多大
+        case imageSize
 
         var title: String {
             switch self {
@@ -45,6 +47,7 @@ final class SettingsViewController: UIViewController {
             case .reading: return "阅读与大纲"
             case .outlineSize: return "大纲面板高度"
             case .tableLayout: return "表格列宽"
+            case .imageSize: return "图片尺寸"
             }
         }
 
@@ -62,6 +65,10 @@ final class SettingsViewController: UIViewController {
                 return [.outlineHeightMode, .outlineHeightRatio, .outlineMaximumHeight]
             case .tableLayout:
                 return [.tableMinColumnWidth, .tableMaxColumnWidth]
+            case .imageSize:
+                // 顺序就是界面上从上到下的顺序：先选「宽度怎么算」，再调两个数值，
+                // 最后是「最多占多高」
+                return [.imageWidthMode, .imageWidthRatio, .imageWidthPoints, .imageMaxHeight]
             }
         }
     }
@@ -93,6 +100,14 @@ final class SettingsViewController: UIViewController {
         case tableMinColumnWidth
         /// 表格最宽的一列（点）
         case tableMaxColumnWidth
+        /// 图片最大宽度按什么算（百分比 / 固定点数）
+        case imageWidthMode
+        /// 图片宽度占编辑器宽度的比例
+        case imageWidthRatio
+        /// 图片固定宽度（点）
+        case imageWidthPoints
+        /// 图片最大高度（点）
+        case imageMaxHeight
 
         /// 主标题
         var title: String {
@@ -119,6 +134,14 @@ final class SettingsViewController: UIViewController {
                 return "最小列宽"
             case .tableMaxColumnWidth:
                 return "最大列宽"
+            case .imageWidthMode:
+                return "宽度怎么算"
+            case .imageWidthRatio:
+                return "宽度百分比"
+            case .imageWidthPoints:
+                return "固定宽度"
+            case .imageMaxHeight:
+                return "最大高度"
             }
         }
 
@@ -127,6 +150,7 @@ final class SettingsViewController: UIViewController {
         /// 两句高度相关的说明要跟着模式变 —— 不生效的那一项得明说
         func detail(in settings: MarkdownEditorSettings) -> String {
             let usesRatio = settings.outlineHeightMode == .percentage
+            let imageUsesRatio = settings.imageWidthMode == .percentage
             switch self {
             case .bodyFontSize:
                 return "正文的字号。标题、行内代码、代码块都是从这个数推出来的"
@@ -167,6 +191,21 @@ final class SettingsViewController: UIViewController {
             case .tableMaxColumnWidth:
                 return "某一列内容特别长（比如贴了长链接）时，列宽到这里就封顶，"
                     + "多出来的文字自动换行，不把别的列挤没。"
+            case .imageWidthMode:
+                return "「按百分比」：图片最多占编辑器宽度的百分之几，窗口拉宽图也跟着变宽；"
+                    + "「固定宽度」：永远是你指定的点数，跟窗口无关。"
+            case .imageWidthRatio:
+                return imageUsesRatio
+                    ? "图片最多占编辑器宽度的百分之几。图片按原始比例缩放，"
+                        + "比这个宽度小的小图**不会被放大**（不会为了填满而变糊）。"
+                    : "当前用的是「固定宽度」，这一项暂不生效。"
+            case .imageWidthPoints:
+                return imageUsesRatio
+                    ? "当前用的是「按百分比」，这一项暂不生效。"
+                    : "图片最多画多少点宽。比它小的图按原尺寸显示，不会被拉大。"
+            case .imageMaxHeight:
+                return "图片最高能画多少点，防止一张长图撑爆屏幕。"
+                    + "这是个固定值，跟窗口多高没关系；比它矮的图按原尺寸显示，不会被拉高。"
             }
         }
 
@@ -183,6 +222,9 @@ final class SettingsViewController: UIViewController {
             case .outlineMaximumHeight: return MarkdownEditorSettings.Limits.outlineMaximumHeight
             case .tableMinColumnWidth: return MarkdownEditorSettings.Limits.tableMinColumnWidth
             case .tableMaxColumnWidth: return MarkdownEditorSettings.Limits.tableMaxColumnWidth
+            case .imageWidthRatio: return MarkdownEditorSettings.Limits.imageWidthRatio
+            case .imageWidthPoints: return MarkdownEditorSettings.Limits.imageWidthPoints
+            case .imageMaxHeight: return MarkdownEditorSettings.Limits.imageMaxHeight
             default: return 0...1
             }
         }
@@ -198,6 +240,8 @@ final class SettingsViewController: UIViewController {
             case .outlineHeightRatio: return 0.05
             case .outlineMaximumHeight: return 20
             case .tableMinColumnWidth, .tableMaxColumnWidth: return 8
+            case .imageWidthRatio: return 0.05
+            case .imageWidthPoints, .imageMaxHeight: return 20
             default: return 1
             }
         }
@@ -215,6 +259,9 @@ final class SettingsViewController: UIViewController {
             case .outlineMaximumHeight: return settings.outlineMaximumHeight
             case .tableMinColumnWidth: return settings.tableMinColumnWidth
             case .tableMaxColumnWidth: return settings.tableMaxColumnWidth
+            case .imageWidthRatio: return settings.imageWidthRatio
+            case .imageWidthPoints: return settings.imageWidthPoints
+            case .imageMaxHeight: return settings.imageMaxHeight
             default: return 0
             }
         }
@@ -245,6 +292,10 @@ final class SettingsViewController: UIViewController {
                 return "\(Int((value * 100).rounded()))%"
             case .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
                 return "\(Int(value.rounded())) pt"
+            case .imageWidthRatio:
+                return "\(Int((value * 100).rounded()))%"
+            case .imageWidthPoints, .imageMaxHeight:
+                return "\(Int(value.rounded())) px"
             default:
                 return "\(value)"
             }
@@ -335,6 +386,14 @@ final class SettingsViewController: UIViewController {
         tableView.reloadData()
     }
 
+    /// 「图片宽度怎么算」换了模式
+    @objc private func imageWidthModeChanged(_ sender: UISegmentedControl) {
+        let modes = ImageWidthMode.allCases
+        guard modes.indices.contains(sender.selectedSegmentIndex) else { return }
+        settings.setImageWidthMode(modes[sender.selectedSegmentIndex])
+        tableView.reloadData()
+    }
+
     /// 拖动了某个数值滑块
     @objc private func sliderChanged(_ sender: UISlider) {
         guard let row = Row(rawValue: sender.tag) else { return }
@@ -360,7 +419,13 @@ final class SettingsViewController: UIViewController {
             settings.setTableMinColumnWidth(stepped)
         case .tableMaxColumnWidth:
             settings.setTableMaxColumnWidth(stepped)
-        case .remembersScrollPosition, .outlineHeightMode:
+        case .imageWidthRatio:
+            settings.setImageWidthRatio(stepped)
+        case .imageWidthPoints:
+            settings.setImageWidthPoints(stepped)
+        case .imageMaxHeight:
+            settings.setImageMaxHeight(stepped)
+        case .remembersScrollPosition, .outlineHeightMode, .imageWidthMode:
             // 这两行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
             // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
             // 编译器会直接报「switch must be exhaustive」逼你回来接上 ——
@@ -431,6 +496,16 @@ final class SettingsViewController: UIViewController {
         return makeCell(row: .outlineHeightMode, control: control)
     }
 
+    /// 「图片宽度怎么算」：两个选项平铺，一眼能看出是「二选一」
+    private func makeImageWidthModeCell() -> UITableViewCell {
+        let modes = ImageWidthMode.allCases
+        let control = UISegmentedControl(items: modes.map(\.displayName))
+        control.selectedSegmentIndex = modes.firstIndex(of: settings.imageWidthMode) ?? 0
+        control.addTarget(self, action: #selector(imageWidthModeChanged(_:)), for: .valueChanged)
+        control.accessibilityLabel = Row.imageWidthMode.title
+        return makeCell(row: .imageWidthMode, control: control)
+    }
+
     /// 数值行：左边滑块，右边当前值。
     ///
     /// 当前这一项在当前模式下不生效时，滑块置灰 —— 光看文字说明还不够直观，
@@ -479,6 +554,8 @@ final class SettingsViewController: UIViewController {
         switch row {
         case .outlineHeightRatio: return settings.outlineHeightMode == .percentage
         case .outlineMaximumHeight: return settings.outlineHeightMode == .maximumHeight
+        case .imageWidthRatio: return settings.imageWidthMode == .percentage
+        case .imageWidthPoints: return settings.imageWidthMode == .fixedPoints
         default: return true
         }
     }
@@ -509,10 +586,13 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
             return makeToggleCell(for: row)
         case .outlineHeightMode:
             return makeHeightModeCell()
+        case .imageWidthMode:
+            return makeImageWidthModeCell()
         case .bodyFontSize, .lineHeightMultiple, .paragraphSpacing, .paragraphIndentCharacters,
              .bodyContentWidth,
              .outlineHeightRatio, .outlineMaximumHeight,
-             .tableMinColumnWidth, .tableMaxColumnWidth:
+             .tableMinColumnWidth, .tableMaxColumnWidth,
+             .imageWidthRatio, .imageWidthPoints, .imageMaxHeight:
             return makeSliderCell(for: row)
         }
     }

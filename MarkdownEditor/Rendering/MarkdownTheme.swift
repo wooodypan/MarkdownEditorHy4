@@ -78,8 +78,6 @@ struct MarkdownTheme {
     /// 中文排版的习惯是首行缩进两个汉字宽 —— 那是 `bodyFont.pointSize × 2`，
     /// App 层的设置页就是按「几个字」让用户选的（见 `MarkdownEditorSettings.applyTypography`）。
     var paragraphIndent: CGFloat = 0
-    /// 图片最大高度（防止一张长图撑爆屏幕）
-    var imageMaxHeight: CGFloat
     /// 代码块矩形背景的圆角
     var codeBlockCornerRadius: CGFloat
     /// 代码块矩形比文字上下各多出来的留白
@@ -119,6 +117,9 @@ struct MarkdownTheme {
     /// `Markdown` 模块里已经有一个 `Table`（swift-markdown 的表格 AST 节点），
     /// 同名会让代码里到处要写 `Markdown.Table`，容易看错。
     var table = TableStyle()
+
+    /// 图片的显示尺寸（最大宽、最大高），见 `ImageStyle`
+    var image = ImageStyle()
 
     /// **中文的仿斜体倾斜量**（字体的仿斜矩阵系数，0.2 ≈ 11°，0 = 关闭）。
     ///
@@ -168,7 +169,6 @@ struct MarkdownTheme {
             quoteIndent: 16,
             paragraphSpacing: 12,
             headingSpacing: 14,
-            imageMaxHeight: 420,
             codeBlockCornerRadius: 8,
             codeBlockVerticalPadding: 6,
             codeBlockTextInset: 10,
@@ -324,6 +324,41 @@ struct MarkdownTheme {
         style.paragraphSpacingBefore = paragraphSpacing
         style.paragraphSpacing = paragraphSpacing + 4
         return style
+    }
+}
+
+// MARK: - 图片样式
+
+extension MarkdownTheme {
+    /// 图片的显示尺寸。
+    ///
+    /// ### 三个值各自管什么
+    /// - `maxWidthRatio` / `maxWidthPoints`：最大宽度**二选一**（前者非 nil 就用前者）；
+    /// - `maxHeight`：最大高度（点），一张图再高也不超过它。
+    ///
+    /// ### 为什么「宽度」做成两种模式而「高度」只有一个点数
+    /// 宽度是用户最想自己定的（「图别超过半屏」/「就 200px」两种诉求都很常见），
+    /// 所以给百分比和固定点数两个选择；高度只是防「一张长图撑爆屏幕」的兜底，
+    /// 一个固定点数就够了。
+    ///
+    /// ⚠️ 高度**别再改成「窗口高度的百分之几」** —— 试过一版，代价是渲染层要多收一个
+    /// `containerHeight`、编辑器要多记一个 `renderedHeight`，窗口一拉高拉矮整篇文档
+    /// 就重排一次；而换来的收益（窗口特别高时图能大一点点）几乎没人会注意到。
+    ///
+    /// ### 这三个都是「上限」，不拉大小图
+    /// 小图（比如 10×10）永远按原尺寸显示，不会被撑大。
+    /// 放大只会让小图变糊，用户粘贴一个图标却看到马赛克是最糟的体验。
+    struct ImageStyle {
+        /// 最大宽度 = 容器可用宽度 × 这个比例。`nil` 表示改用下面的固定点数。
+        ///
+        /// 默认 `0.5`：图片最多占编辑器宽度的一半，正文不会被一张图打断节奏。
+        var maxWidthRatio: CGFloat? = 0.5
+
+        /// 最大宽度（点）。只在 `maxWidthRatio == nil` 时生效。默认 `200`。
+        var maxWidthPoints: CGFloat = 200
+
+        /// 最大高度（点），默认 `420`。只防「一张长图撑爆屏幕」，正常大小的图碰不到它。
+        var maxHeight: CGFloat = 420
     }
 }
 

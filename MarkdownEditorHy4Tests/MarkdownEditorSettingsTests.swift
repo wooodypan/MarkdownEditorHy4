@@ -306,7 +306,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
-        let control = try XCTUnwrap(firstSegmentedControl(in: controller.view),
+        let control = try XCTUnwrap(segmentedControl(in: controller.view, labeled: "高度怎么算"),
                                     "设置页该有「高度怎么算」的分段控件")
         XCTAssertEqual(control.numberOfSegments, 2, "两个选项：按百分比 / 按最大高度")
 
@@ -329,7 +329,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
-        let control = try XCTUnwrap(firstSegmentedControl(in: controller.view))
+        let control = try XCTUnwrap(segmentedControl(in: controller.view, labeled: "高度怎么算"))
         control.selectedSegmentIndex = 1
         control.sendActions(for: .valueChanged)
 
@@ -447,6 +447,208 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertEqual(settings.tableMaxColumnWidth, 336, accuracy: 0.0001, "333 应该被吸到 336（步进 8）")
     }
 
+    // MARK: - 图片尺寸：配置本身
+
+    /// 需求给的默认：按百分比、50%、固定宽度 200px、最大高度 420pt
+    func testImageSizeDefaults() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        XCTAssertEqual(settings.imageWidthMode, .percentage, "默认按百分比算宽度")
+        XCTAssertEqual(settings.imageWidthRatio, 0.5, accuracy: 0.0001, "默认占编辑器宽度的一半")
+        XCTAssertEqual(settings.imageWidthPoints, 200, accuracy: 0.0001)
+        XCTAssertEqual(settings.imageMaxHeight, 420, accuracy: 0.0001, "默认最高 420 点")
+    }
+
+    /// 四项都要落盘 —— 换台机器 / 重启之后还是用户调过的那套
+    func testImageSizeSettingsArePersisted() {
+        let url = makeTempFileURL()
+        let settings = MarkdownEditorSettings(fileURL: url)
+        settings.setImageWidthMode(.fixedPoints)
+        settings.setImageWidthRatio(0.35)
+        settings.setImageWidthPoints(320)
+        settings.setImageMaxHeight(600)
+
+        let reloaded = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(reloaded.imageWidthMode, .fixedPoints)
+        XCTAssertEqual(reloaded.imageWidthRatio, 0.35, accuracy: 0.0001)
+        XCTAssertEqual(reloaded.imageWidthPoints, 320, accuracy: 0.0001)
+        XCTAssertEqual(reloaded.imageMaxHeight, 600, accuracy: 0.0001)
+    }
+
+    /// 越界的值要被夹住（手改配置文件、传参越界两条路都防）
+    func testImageSizeValuesAreClamped() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setImageWidthRatio(9)
+        settings.setImageWidthPoints(5)
+        settings.setImageMaxHeight(10)
+        XCTAssertEqual(settings.imageWidthRatio, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(settings.imageWidthPoints, 80, accuracy: 0.0001)
+        XCTAssertEqual(settings.imageMaxHeight, 120, accuracy: 0.0001)
+
+        let url = makeTempFileURL()
+        try Data(#"{"imageWidthRatio": 0.01, "imageWidthPoints": 9999, "imageMaxHeight": 99999}"#.utf8)
+            .write(to: url)
+        let reloaded = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(reloaded.imageWidthRatio, 0.2, accuracy: 0.0001)
+        XCTAssertEqual(reloaded.imageWidthPoints, 800, accuracy: 0.0001)
+        XCTAssertEqual(reloaded.imageMaxHeight, 1600, accuracy: 0.0001)
+    }
+
+    /// 老配置文件里没有这几个字段 → 各自退回默认，而不是整份配置作废
+    func testImageSizeMissingFieldsFallBackToDefaults() throws {
+        let url = makeTempFileURL()
+        try Data("{}".utf8).write(to: url)
+
+        let settings = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(settings.imageWidthMode, .percentage)
+        XCTAssertEqual(settings.imageWidthRatio, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(settings.imageWidthPoints, 200, accuracy: 0.0001)
+        XCTAssertEqual(settings.imageMaxHeight, 420, accuracy: 0.0001)
+    }
+
+    /// 盘上是一个不认识的模式名 → 只有这一项退回默认，别的照旧
+    func testUnknownImageWidthModeFallsBackWithoutLosingOtherSettings() throws {
+        let url = makeTempFileURL()
+        let json = #"{"imageWidthMode": "someFutureMode", "imageWidthRatio": 0.4, "remembersScrollPosition": false}"#
+        try Data(json.utf8).write(to: url)
+
+        let settings = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(settings.imageWidthMode, .percentage)
+        XCTAssertEqual(settings.imageWidthRatio, 0.4, accuracy: 0.0001, "别的设置不该被带走")
+        XCTAssertFalse(settings.remembersScrollPosition)
+    }
+
+    // MARK: - 图片尺寸：配置怎么变成主题里的值
+
+    /// 百分比模式：主题拿到比例
+    func testApplyImageSizeInPercentageMode() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setImageWidthMode(.percentage)
+        settings.setImageWidthRatio(0.35)
+
+        var theme = MarkdownTheme.default
+        settings.applyImageSize(to: &theme)
+
+        XCTAssertEqual(theme.image.maxWidthRatio ?? -1, 0.35, accuracy: 0.0001)
+    }
+
+    /// 最大高度：设置里改了多少点，主题里就是多少点
+    ///
+    /// 这条链路是这次还原的重点 —— 用户要在设置页能直接调这个数，
+    /// 光有配置项、主题拿不到的话界面上就是「拖了没反应」。
+    func testApplyImageSizeWritesMaxHeight() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setImageMaxHeight(520)
+
+        var theme = MarkdownTheme.default
+        settings.applyImageSize(to: &theme)
+
+        XCTAssertEqual(theme.image.maxHeight, 520, accuracy: 0.0001)
+    }
+
+    /// 固定宽度模式：比例必须是 nil —— 渲染层就是靠这个 nil 判断「改用固定点数」
+    func testApplyImageSizeInFixedPointsMode() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setImageWidthMode(.fixedPoints)
+        settings.setImageWidthPoints(320)
+
+        var theme = MarkdownTheme.default
+        settings.applyImageSize(to: &theme)
+
+        XCTAssertNil(theme.image.maxWidthRatio, "固定宽度模式下，比例该是 nil")
+        XCTAssertEqual(theme.image.maxWidthPoints, 320, accuracy: 0.0001)
+    }
+
+    // MARK: - 图片尺寸：设置页控件
+
+    /// 设置页该有「宽度怎么算」的两个选项和三根滑块；
+    /// 当前模式用不上的那一根要灰掉
+    ///
+    /// ⚠️ 帧高给到 3600：图片尺寸是新加的分组，排在表格最下面，
+    /// 帧不够高时它的 cell 根本不会被建出来，递归找控件就会返回 nil
+    /// （那是测试没把页面铺开，不是功能坏了）。
+    func testSettingsPageHasImageSizeControls() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setImageWidthMode(.percentage)
+
+        let controller = SettingsViewController(settings: settings)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 3600)
+        controller.view.layoutIfNeeded()
+
+        // 页面上有两个分段控件：大纲「高度怎么算」在前、图片「宽度怎么算」在后
+        let controls = allSegmentedControls(in: controller.view)
+        XCTAssertEqual(controls.count, 2, "该有两个分段控件，实际 \(controls.count) 个")
+        XCTAssertEqual(controls.last?.numberOfSegments, 2, "两个选项：按百分比 / 固定宽度")
+
+        let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 0.9),
+                                        "找不到「宽度百分比」的滑块")
+        let pointsSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 800),
+                                         "找不到「固定宽度」的滑块")
+        let heightSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1600),
+                                         "找不到「图片最大高度」的滑块")
+
+        XCTAssertTrue(ratioSlider.isEnabled, "当前用百分比，它该是可调的")
+        XCTAssertFalse(pointsSlider.isEnabled, "当前用百分比，固定宽度那一项该灰掉")
+        XCTAssertTrue(heightSlider.isEnabled, "最大高度永远生效")
+    }
+
+    /// 切成「固定宽度」→ 写回配置，两根滑块的可用状态对调，拖动也写回配置
+    func testSwitchingImageWidthModeWritesBackAndFlipsAvailability() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setImageWidthMode(.percentage)
+
+        let controller = SettingsViewController(settings: settings)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 3600)
+        controller.view.layoutIfNeeded()
+
+        let control = try XCTUnwrap(segmentedControl(in: controller.view, labeled: "宽度怎么算"))
+        control.selectedSegmentIndex = 1
+        control.sendActions(for: .valueChanged)
+
+        XCTAssertEqual(settings.imageWidthMode, .fixedPoints, "切了模式要写回配置")
+
+        controller.view.layoutIfNeeded()
+        let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 0.9))
+        let pointsSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 800))
+        XCTAssertFalse(ratioSlider.isEnabled, "改用固定宽度后，百分比那一项该灰掉")
+        XCTAssertTrue(pointsSlider.isEnabled)
+
+        // 拖一下固定宽度：故意给一个不在步进上的值，该被吸到 20 的倍数上
+        pointsSlider.value = 333
+        pointsSlider.sendActions(for: .valueChanged)
+        XCTAssertEqual(settings.imageWidthPoints, 340, accuracy: 0.0001, "333 该被吸到 340（步进 20）")
+    }
+
+    /// 拖「宽度百分比」和「最大高度」→ 写回配置并按步进吸附
+    func testDraggingImageSizeSlidersWritesBack() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let controller = SettingsViewController(settings: settings)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 3600)
+        controller.view.layoutIfNeeded()
+
+        let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 0.9))
+        ratioSlider.value = 0.63
+        ratioSlider.sendActions(for: .valueChanged)
+        XCTAssertEqual(settings.imageWidthRatio, 0.65, accuracy: 0.0001, "0.63 该被吸到 0.65（步进 0.05）")
+
+        let heightSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1600))
+        heightSlider.value = 513
+        heightSlider.sendActions(for: .valueChanged)
+        XCTAssertEqual(settings.imageMaxHeight, 520, accuracy: 0.0001, "513 该被吸到 520（步进 20）")
+    }
+
+    /// 递归找所有的分段控件（页面上有两个：大纲高度在前、图片宽度在后）
+    private func allSegmentedControls(in view: UIView) -> [UISegmentedControl] {
+        var result: [UISegmentedControl] = []
+        for subview in view.subviews {
+            if let control = subview as? UISegmentedControl { result.append(control) }
+            result.append(contentsOf: allSegmentedControls(in: subview))
+        }
+        return result
+    }
+
     /// 递归找一个开关出来（设置页把开关挂在 cell 上，只能从视图树里挖）
     private func firstSwitch(in view: UIView) -> UISwitch? {
         for subview in view.subviews {
@@ -456,13 +658,14 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         return nil
     }
 
-    /// 递归找分段控件（「高度怎么算」那一行）
-    private func firstSegmentedControl(in view: UIView) -> UISegmentedControl? {
-        for subview in view.subviews {
-            if let control = subview as? UISegmentedControl { return control }
-            if let found = firstSegmentedControl(in: subview) { return found }
-        }
-        return nil
+    /// 按**无障碍标签**找分段控件（页面上有两个：「高度怎么算」「宽度怎么算」）。
+    ///
+    /// ⚠️ 不能用「第几个」来定位：`UITableView` 的 subviews 顺序不保证等于分组顺序，
+    /// 实测两个分段控件在视图树里的先后是反的 —— 用 `first` / `last` 会张冠李戴，
+    /// 表现出来就是「切了模式却没写回配置」这种看不懂的失败。
+    /// 单元格给控件挂的 `accessibilityLabel` 是稳定标识，用它最稳。
+    private func segmentedControl(in view: UIView, labeled title: String) -> UISegmentedControl? {
+        allSegmentedControls(in: view).first { $0.accessibilityLabel == title }
     }
 
     /// 按「滑块的量程」找一个滑块出来。

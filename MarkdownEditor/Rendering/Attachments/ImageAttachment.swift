@@ -28,6 +28,19 @@ final class ImageAttachment: NSTextAttachment {
     /// 加载完成后通知宿主刷新布局
     weak var host: MarkdownAttachmentHost?
 
+    /// 预览窗标题栏上显示的名字：优先用 `![这里写的替代文字]`，没写就用文件名。
+    ///
+    /// 之所以要专门算一下：用户写 `![架构图](a.png)` 时，「架构图」才是他心里这张图的名字，
+    /// 而文件名常常是 `pasted-3F2A….png` 这种机器起的，摆到标题栏上毫无意义。
+    var previewTitle: String {
+        guard let start = markdownSource.range(of: "!["),
+              let end = markdownSource[start.upperBound...].range(of: "]") else {
+            return imageURL.lastPathComponent
+        }
+        let alt = String(markdownSource[start.upperBound..<end.lowerBound])
+        return alt.isEmpty ? imageURL.lastPathComponent : alt
+    }
+
     /// 已经加载好的图片（本地图片在 init 里就有了）
     private(set) var loadedImage: UIImage?
     /// 图片确认加载不出来（网络 404、本地文件不存在或不是图片）之后置为 true。
