@@ -299,11 +299,16 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         }
 
         let maxWidth = max(60, containerWidth - indent - 16)
+        // 一行正文有多高。图片加载不出来时占位块要按它来收缩（最多 2 行）。
+        // 行高倍数大于 1 时才乘，<= 1 表示「用字体自带的自然行高」，别改变排版。
+        let lineHeight = theme.bodyFont.lineHeight * max(1, theme.lineHeightMultiple)
         let attachment = ImageAttachment(
             markdownSource: markdownSource,
             imageURL: url,
             maxWidth: maxWidth,
-            maxHeight: theme.imageMaxHeight
+            maxHeight: theme.imageMaxHeight,
+            lineHeight: lineHeight,
+            placeholderColor: theme.markerColor
         )
         attachment.host = attachmentHost
         attachment.loadIfNeeded(host: attachmentHost)
