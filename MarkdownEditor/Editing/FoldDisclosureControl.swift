@@ -20,7 +20,7 @@ final class FoldControlLayer: UIView {
     }
 }
 
-/// 一个顶层块左侧的展开 / 折叠三角。
+/// 一个标题左侧的展开 / 折叠三角。
 ///
 /// ### 为什么不放在文本流里当 attachment
 /// attachment 占一个字符位，会把块的第一行朝右推，而第二行、第三行还按原来的缩进排 ——
@@ -64,5 +64,31 @@ final class FoldDisclosureButton: UIButton {
         let name = isCollapsed ? "chevron.right" : "chevron.down"
         setImage(UIImage(systemName: name, withConfiguration: configuration), for: .normal)
         accessibilityValue = isCollapsed ? "已折叠" : "已展开"
+    }
+}
+
+/// 折叠标题后面那个「⋯」占位符的**点击热区**。
+///
+/// ### 为什么按钮是「透明」的
+/// 「⋯」这三个点是由文本流里的 `CollapsedBlockAttachment` 画出来的（它占 1 个字符位，
+/// 这样「全选复制 === 源文件」才成立）。按钮只是**盖在它上面**接点击，
+/// 自己什么都不画 —— 画面上看到的仍然是文本流里那个「⋯」。
+///
+/// 和复选框用的是同一套机制：位置由 `MarkdownTextView` 按字符矩形摆，
+/// 加在 `FoldControlLayer` 上（只有按钮吃点击，其余区域穿透给正文）。
+final class CollapsedSectionButton: UIButton {
+
+    /// 这个「⋯」属于哪个标题块（点它时靠它反查要展开哪一节）
+    var sectionID: UUID?
+
+    init() {
+        super.init(frame: .zero)
+        backgroundColor = .clear
+        accessibilityLabel = "展开被折叠的内容"
+        accessibilityTraits = .button
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("CollapsedSectionButton 不支持从 coder 解档")
     }
 }

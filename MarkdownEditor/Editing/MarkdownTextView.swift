@@ -121,7 +121,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     /// 三角所在的控件层，加在最上层，只让按钮吃点击
     private let foldControlLayer = FoldControlLayer()
-    /// 滚动停下之后补一次重画的定时任务（TextKit 排版比滚动事件慢半拍，见 positionFoldButtons）
+    /// 滚动停下之后补一次重画的定时任务（TextKit 排版比滚动事件慢半拍，见 positionFoldControls）
     private var foldRedrawWork: DispatchWorkItem?
     /// 监听滚动：滚动只改位置，不重算布局
     private var contentOffsetObservation: NSKeyValueObservation?
@@ -419,8 +419,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
         // 代码块背景矩形跟着布局走（内容或宽度变了会重算，纯滚动只平移）
         updateCodeBlockDecorationsIfNeeded()
-        // 折叠三角同理，只是它每次都按 fragment 的当前位置重摆
-        positionFoldButtons()
+        // 折叠三角 / 「⋯」热区同理，只是它每次都按 fragment 的当前位置重摆
+        positionFoldControls()
 
         // 容器宽度变了（转屏、Catalyst 拉窗口）→ 图片尺寸要跟着变，整篇重排一次
         let width = currentContainerWidth
@@ -467,7 +467,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             self?.positionCodeBlockDecorations()
             self?.positionQuoteBars()
             self?.positionCheckboxes()
-            self?.positionFoldButtons()
+            self?.positionFoldControls()
             // TextKit 排版比滚动事件慢半拍：滚动过程中刚进 viewport 的 fragment
             // 可能还是估算值（三角被跳过）。停一下再补一次，三角就不会「滚过去才冒出来」。
             self?.scheduleFoldRedraw()
@@ -821,12 +821,18 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
               bounds.width > 1 else { return ([], false) }
 
-        // 1) 扫出所有打了 `.markdownCheckbox` 标记的区间
-        var marked: [(NSRange, CheckboxInfo)] = []
+        // 1) 扫描复选框标记。优先认**座位** —— 渲染层专门给按钮留的那块透明空间，摆它正中就不会挡到任何字；没有座位时（遮盖模式，或别的入口渲染出来的任务项）回退到 `[x]` 三个字符的矩形。
         let full = NSRange(location: 0, length: textStorage.length)
-        textStorage.enumerateAttribute(.markdownCheckbox, in: full, options: []) { value, range, _ in
+        var marked: [(NSRange, CheckboxInfo)] = []
+        textStorage.enumerateAttribute(.markdownCheckboxSeat, in: full, options: []) { value, range, _ in
             guard let info = value as? CheckboxInfo else { return }
             marked.append((range, info))
+        }
+        if marked.isEmpty {
+            textStorage.enumerateAttribute(.markdownCheckbox, in: full, options: []) { value, range, _ in
+                guard let info = value as? CheckboxInfo else { return }
+                marked.append((range, info))
+            }
         }
         guard !marked.isEmpty else { return ([], false) }
 
@@ -869,27 +875,24 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         let theme = renderer.theme
         let style = theme.taskList
         let side = style.checkboxSide
+        // ⚠️ 方框宽度**只跟字体有关**，和「当前那一项勾没勾」无关 —— 理由见 checkboxCoverWidth
+        let coverWidth = checkboxCoverWidth(side: side)
         // 可见范围，上下各留 200pt 余量，滚快一点也不会闪出空白
         let visible = CGRect(x: 0, y: -200, width: bounds.width, height: bounds.height + 400)
 
         for entry in checkboxFrames {
-            let literal = entry.frame
+            let anchor = entry.frame
             let buttonFrame: CGRect
             if style.coversCheckboxLiteral {
-                // 遮盖模式（默认）：方框压在 `[x]` 正中，把它整个挡住（底色不透明）。
-                // 宽度取 max(方框边长, 字面宽度) —— `[X]` 比方框宽（实测 22.7pt vs 16pt），
-                // 不拉宽的话字的边角会从方框旁边露出来
-                let width = max(side, literal.width)
-                buttonFrame = CGRect(x: literal.midX - width / 2,
-                                     y: literal.midY - side / 2,
-                                     width: width,
+                // 遮盖模式：方框压在 `[x]` 正中，把它整个挡住（底色不透明）。宽度用「所有状态里最宽的那个字面量」算出来的**定值** —— 点前点后方框一样大
+                buttonFrame = CGRect(x: anchor.midX - coverWidth / 2,
+                                     y: anchor.midY - side / 2,
+                                     width: coverWidth,
                                      height: side)
             } else {
-                // 并列模式：方框画在 `[x]` 左边，源码照常露出来。
-                // 实测它会把列表标记 `- ` 压在身下（复选框和标记挤在同一个位置），
-                // 视觉比较挤 —— 这就是主题里 `coversCheckboxLiteral` 开关存在的原因
-                buttonFrame = CGRect(x: literal.minX - side - style.checkboxGap,
-                                     y: literal.midY - side / 2,
+                // 默认：anchor 是渲染层留出来的「座位」，方框摆在它正中 —— 左边是浅灰的 `-`、右边是浅灰的 `[x]`，两边都不挡
+                buttonFrame = CGRect(x: anchor.midX - side / 2,
+                                     y: anchor.midY - side / 2,
                                      width: side,
                                      height: side)
             }
@@ -909,6 +912,30 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             button.addTarget(self, action: #selector(checkboxTapped(_:)), for: .touchUpInside)
             checkboxLayer.addSubview(button)
         }
+    }
+
+    /// 遮盖模式下复选框要盖住 `[x]`，所以宽度得 ≥ 字面量在图里的宽度。
+    ///
+    /// ### 为什么宽度不能按「当前那一项的字面量」取（踩过的坑）
+    /// `[ ]` / `[x]` / `[X]` 三个字面量在图里的宽度**各不相同**（正文 17pt 系统字体实测 15.95 / 20.09 / 22.71pt）。早先写成 `max(checkboxSide, literal.width)`，于是**点一下 `[ ]` 变 `[x]`，方框就从 16pt 长到 20pt** —— 用户看到的就是「点一下复选框变宽了」。
+    ///
+    /// 宽度只该跟**字体**有关：这里把三种字面量都量一遍取最宽的，再和方框边长取大。这样同一份文档里所有复选框、勾前勾后，宽度全都是同一个值。
+    private func checkboxCoverWidth(side: CGFloat) -> CGFloat {
+        guard let font = checkboxLiteralFont() else { return side }
+        let widest = ["[ ]", "[x]", "[X]"]
+            .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
+            .max() ?? 0
+        return max(side, widest)
+    }
+
+    /// `[x]` 那三个字符在图里用的字体（整篇正文同一套字体，量第一个就够了）
+    private func checkboxLiteralFont() -> UIFont? {
+        guard let first = checkboxFrames.first,
+              let rendered = documentStore.renderedRange(
+                  forSourceRange: NSRange(location: first.info.sourceStart, length: 3)),
+              rendered.location < textStorage.length
+        else { return nil }
+        return textStorage.attribute(.font, at: rendered.location, effectiveRange: nil) as? UIFont
     }
 
     @objc private func checkboxTapped(_ sender: MarkdownCheckboxButton) {
@@ -953,7 +980,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         foldRedrawWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.positionFoldButtons()
+            self.positionFoldControls()
             self.positionCheckboxes()
             // 滚动停下后 fragment 才排实（滚动中屏幕外的还是估算值），
             // 代码块背景矩形要重算一遍，不然一直拿着首帧的错坐标画
@@ -963,7 +990,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
-    /// 把每个可折叠块的三角摆到它第一行的左边（装订线里）。
+    /// 把折叠三角摆到每个标题的左边，并给每个「⋯」占位符盖上点击热区。
     ///
     /// ### 位置的三个关键点
     /// 1. **只画已经「完整排版好」的 fragment**。没排到的 fragment 的
@@ -975,7 +1002,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     ///    用 `textLineFragments.first.typographicBounds` 取首行的矩形。
     /// 3. **层和子 view 的坐标系要统一**。控件层的 `frame = bounds`（跟着 viewport 走），
     ///    所以子 view 用 viewport 坐标 = 文档坐标 − contentOffset，和代码块复制按钮一致。
-    private func positionFoldButtons() {
+    private func positionFoldControls() {
         guard let layoutManager = textLayoutManager,
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
               bounds.width > 1 else {
@@ -985,7 +1012,14 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
         foldControlLayer.frame = bounds
 
-        // 扫出所有折叠锚点（渲染时打在块第一个字符上的 `.markdownFoldAnchor`）
+        // 全重建：数量不多（每节最多一个三角 + 一个「⋯」），比维护复用池省心
+        foldControlLayer.subviews.forEach { $0.removeFromSuperview() }
+
+        let documentStart = contentStorage.documentRange.location
+        // 可见范围（viewport 坐标），上下各留 200pt 余量，滚快一点也不闪空
+        let visible = CGRect(x: 0, y: -200, width: bounds.width, height: bounds.height + 400)
+
+        // ① 折叠三角：扫出所有锚点（渲染时打在标题第一个字符上的 `.markdownFoldAnchor`）
         var anchors: [(range: NSRange, info: FoldAnchorInfo)] = []
         let full = NSRange(location: 0, length: textStorage.length)
         textStorage.enumerateAttribute(.markdownFoldAnchor, in: full, options: []) { value, range, _ in
@@ -993,17 +1027,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             anchors.append((range, info))
         }
 
-        // 全重建：块数量不多，比维护复用池省心
-        foldControlLayer.subviews.forEach { $0.removeFromSuperview() }
-        guard !anchors.isEmpty else { return }
-
         let theme = renderer.theme
         let side = theme.foldButtonSide
         // 三角贴着正文左边缘往左让出一个间距，正好落在装订线里
         let x = textContainerInset.left - side - theme.foldButtonGap
-        let documentStart = contentStorage.documentRange.location
-        // 可见范围（viewport 坐标），上下各留 200pt 余量，滚快一点也不闪空
-        let visible = CGRect(x: 0, y: -200, width: bounds.width, height: bounds.height + 400)
 
         for anchor in anchors {
             guard let location = contentStorage.location(documentStart,
@@ -1039,19 +1066,69 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             button.addTarget(self, action: #selector(foldButtonTapped(_:)), for: .touchUpInside)
             foldControlLayer.addSubview(button)
         }
+
+        // ② 「⋯」占位符的点击热区：扫出所有打了 `.markdownCollapsedPlaceholder` 的字符
+        var placeholders: [(range: NSRange, info: CollapsedSectionInfo)] = []
+        textStorage.enumerateAttribute(.markdownCollapsedPlaceholder, in: full, options: []) { value, range, _ in
+            guard let info = value as? CollapsedSectionInfo else { return }
+            placeholders.append((range, info))
+        }
+        guard !placeholders.isEmpty else { return }
+
+        for entry in placeholders {
+            guard let start = contentStorage.location(documentStart, offsetBy: entry.range.location),
+                  let end = contentStorage.location(documentStart, offsetBy: NSMaxRange(entry.range)),
+                  let textRange = NSTextRange(location: start, end: end) else { continue }
+
+            // 字符级矩形：和复选框同一套取法（`enumerateTextSegments`）。
+            // 「⋯」是 attachment，这个 API 给的正是它在行里占的那块矩形
+            var rect: CGRect?
+            layoutManager.enumerateTextSegments(in: textRange, type: .standard, options: []) { _, segment, _, _ in
+                guard !segment.isNull else { return true }
+                rect = rect.map { $0.union(segment) } ?? segment
+                return true
+            }
+            guard let rect else { continue }
+
+            // 坐标系换算（推导见 computeCodeBlockFrames 里的注释）：
+            // TextKit 的矩形不含 textContainerInset，画在 textView 里要补回来；
+            // 再减掉 contentOffset 换成 viewport 坐标
+            var frame = CGRect(x: rect.minX + textContainerInset.left,
+                               y: rect.minY + textContainerInset.top,
+                               width: rect.width,
+                               height: rect.height)
+            // 三个小圆点太窄了，热区上下左右各撑开一点才点得中
+            frame = frame.insetBy(dx: -8, dy: -8)
+            frame.origin.x -= contentOffset.x
+            frame.origin.y -= contentOffset.y
+            guard frame.intersects(visible) else { continue }
+
+            let button = CollapsedSectionButton()
+            button.sectionID = entry.info.blockID
+            button.frame = frame
+            button.addTarget(self, action: #selector(collapsedSectionTapped(_:)), for: .touchUpInside)
+            foldControlLayer.addSubview(button)
+        }
     }
 
-    /// 点三角 → 折叠 / 展开它那一块
+    /// 点三角 → 折叠 / 展开这个标题下面的一整节
     @objc private func foldButtonTapped(_ sender: FoldDisclosureButton) {
         guard let blockID = sender.anchor?.blockID else { return }
         toggleCollapse(blockID: blockID)
         // 换完内容立刻重摆一次，不用等下个布局周期
-        positionFoldButtons()
+        positionFoldControls()
     }
 
-    /// 折叠 / 展开某一块：只替换这一块的渲染内容，其它块一个字符都不动。
+    /// 点「⋯」→ 展开这一节（「⋯」只会出现在已折叠的标题后面，所以点它一定是展开）
+    @objc private func collapsedSectionTapped(_ sender: CollapsedSectionButton) {
+        guard let blockID = sender.sectionID else { return }
+        toggleCollapse(blockID: blockID)
+        positionFoldControls()
+    }
+
+    /// 折叠 / 展开某个标题下面的一整节：只替换这一节涉及的渲染内容，其它块一个字符都不动。
     ///
-    /// - parameter blockID: 要切换的块（从被点到的 attachment 上拿来的）
+    /// - parameter blockID: 要切换的那个**标题块**（从被点到的三角 / 「⋯」上拿来的）
     func toggleCollapse(blockID: UUID) {
         guard let index = documentStore.blocks.firstIndex(where: { $0.id == blockID }),
               let outcome = documentStore.toggleCollapse(blockAt: index) else { return }
@@ -1229,6 +1306,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 只有「在文档最末尾（所有标题后面）的正文里打字」才不算 ——
         // 那时候标题一个都没动，目录不用白跑一趟，长文档连续打字也就不会被拖慢。
         if outcome.headingsChanged { publishOutlineItems() }
+
+        // 内容变了，装饰层（复选框按钮、代码块背景、引用竖条、折叠三角）可能整体失效，要**马上**重算一遍。
+        //
+        // 为什么不能只靠 `needsCodeBlockRefresh = true`：装饰层平时只挂在 `layoutSubviews` 里刷新，而我们用的是 TextKit 2 的 `performEditingTransaction` 改文本 —— 它会让 TextKit 的排版失效，但**不保证**系统会给 textView 排一次布局。实测：删掉文档里最后一个任务项后，渲染文本里座位已经没了，屏幕上那个复选框按钮却一直留在原地，要等下一次滚动（那时才走 layout）才消失。
+        setNeedsLayout()
+        updateCodeBlockDecorationsIfNeeded()
     }
 
     /// 真正用来改内容的 NSTextStorage

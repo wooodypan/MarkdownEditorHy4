@@ -23,6 +23,16 @@
 | [2](#2-粘贴后-cmdz残留几个字2026-09-13) | 2026-09-13 | 撤销按「源码长度」记账，实际存的却是「渲染长度」，差几个字 | `MarkdownTextView.swift`、`MarkdownPasteboardController.swift` |
 | [3](#3-点目录要连点好几次才跳到位2026-09-13) | 2026-09-13 | 屏幕外的行「还没排版」，量出来的坐标是猜的 | `MarkdownTextView+Outline.swift` |
 | [4](#4-斜体和粗斜体对中文不生效2026-09-13) | 2026-09-13 | 中文字体没有斜体字形，光标字体特征「斜体」汉字纹丝不动 | `MarkdownTheme.swift`、`MarkupToAttributedRenderer.swift` |
+| [5](#5-长文档里折叠卡手二级标题看着折不动2026-09-14) | 2026-09-14 | 目录每次折叠都重建**全部**标题行；只有带下级的行才给三角，看着像「折不动」 | `MarkdownOutlineView.swift`、`OutlineTree.swift` |
+| [6](#6-接多标签库时踩的两个坑2026-09-14) | 2026-09-14 | ①包了两层导航控制器，启动就崩；②漏写一个协议名，报错却指着闭包说「推不出类型」 | `WorkspaceCoordinator.swift`、`MarkdownDocumentViewController.swift`、`project.pbxproj` |
+| [7](#7-pbxproj-里工程自己引用自己-11-次2026-09-15) | 2026-09-15 | 源码文件夹里有个残缺的 `.xcodeproj`，Xcode 每次扫到就当子工程记一笔，攒了 11 条自引用 | `project.pbxproj`、删掉 `MarkdownEditorHy4/MarkdownEditorHy4.xcodeproj` |
+| [8](#8-app-把新建的文档写进了用户真实的文稿目录2026-09-15) | 2026-09-15 | Target 压根没开 App Sandbox，Mac 上文档目录解析成了用户真实的 `~/Documents` | `MarkdownEditorHy4.entitlements`（新增）、`project.pbxproj`、`Info.plist`、`MarkdownDocumentOpener.swift` |
+| [9](#9-mac-右键删除点了没反应2026-09-16) ★ | 2026-09-16 | 带副作用的调用写在 `completion?(...)` 的括号里，completion 为 nil 时被 Swift 整个跳过 —— 右键菜单点了没反应 | `DocumentListViewController.swift`、`DocumentDeleteTests.swift` |
+| [10](#10-在样式表里改-linkcolor-链接颜色没变2026-09-16) ★ | 2026-09-16 | 两层根因叠在同一个症状上：① 链接用「只补空缺」上色，文字早被涂成正文色；② `UITextView.linkTextAttributes` 默认系统蓝，画图时盖掉富文本里的颜色 | `MarkupToAttributedRenderer.swift`、`RenderedFragment.swift`、`MarkdownTextView.swift`、`MarkdownLinkColorTests.swift`（新增） |
+| [11](#11-设置页新增的滑块能拖但拖了什么都没发生2026-09-16) ★ | 2026-09-16 | `sliderChanged` 结尾那句 `default: return` 把「新增行忘了接上」从编译期错误降级成了静默失效 | `SettingsViewController.swift`、`MarkdownTypographyTests.swift`（新增） |
+| [12](#12-任务项正文里带-x复选框却显示成已勾选2026-09-18) ★ | 2026-09-18 | 勾选状态取了解析器给的 `item.checkbox`，而它是用 `strstr(整行, "[x]")` 算的 —— 正文里有个 `[x]` 就把整项报成已勾选 | `MarkupToAttributedRenderer.swift`、`MarkdownEditorHy4Tests.swift` |
+| [13](#13-点一下复选框方框就变宽2026-09-18) ★ | 2026-09-18 | 方框宽度写成「按**当前**那个字面量取宽」，而 `[ ]` 和 `[x]` 在图里宽度本来就不同（15.95 / 20.09pt）—— 点一下方框就长 4pt | `MarkdownTextView.swift`、`CheckboxControl.swift`、`MarkdownEditorHy4Tests.swift` |
+| [14](#14-任务项里按一次退格-整段被吃掉2026-09-18) ★ | 2026-09-18 | 复选框座位是无条件打了语法标记的装饰附件，把 `- ` 和 `[ ] ` 两段标记**粘成一段** —— 在 `]` 右边按一次退格，`- [ ] ` 整段被吃掉；装饰层又没及时重刷，按钮还残留在屏幕上 | `RenderedFragment.swift`、`MarkupToAttributedRenderer.swift`、`MarkdownDocumentStore.swift`、`MarkdownTextView.swift`、`TaskListBackspaceTests.swift`（新增） |
 
 ---
 
@@ -322,6 +332,1218 @@ iOS 的文本系统（TextKit 2）是**按需排版**的 —— 只排当前这�
 
 ---
 
+## 5. 长文档里折叠卡手；二级标题看着「折不动」（2026-09-14）
+
+> 这条一半是性能问题，一半是**看着像 bug、其实是有意为之**，两半都值得记。
+
+### 现象
+
+两件事一起报上来的：
+
+1. **「二级标题、三级标题点不动、折不了。」**
+   在示例文档里，`# Markdown 编辑器 Demo` 右边有三角、点得动；
+   底下那七个 `## xxx` 右边**什么都没有**，怎么点都不折。
+2. 标题一多（几百个），**点三角会明显卡一下**，手感像掉帧。
+
+第 1 条先说结论：**这不是 bug，是当前的设计**。目录里只有「**自己底下还有下级标题**」
+的行才画三角 —— 示例文档里那七个 `##` 底下没有 `###`，折起来不会有任何东西消失，
+画个三角反而会让人以为「点了没反应、坏了」。所以那一行干脆不给三角、右边留空白，
+保证所有标题左边缘整齐对齐。这个行为是产品上确认过要保留的。
+
+第 2 条是真问题。
+
+### 为什么会这样
+
+**原来目录的行区域是一个竖排的 `UIStackView`**，数据一变就把**所有**标题行
+整批重建一遍 —— 哪怕屏幕上只看得到十几行，屏幕外那几百行也一样建。
+
+实测（宿主视图 800 高、行高 30）：
+
+| 标题行数 | 一次折叠 + 布局 |
+|---|---|
+| 30 | 27 ms |
+| 80 | 78 ms |
+| 200 | 192 ms |
+| 400 | **414 ms** |
+
+大约**每行 1 毫秒**，完全是线性涨的。也就是说大部分功夫花在了**看不见的行**上。
+
+### 怎么修的
+
+按 `doc/标题大纲展开折叠方案.md` 的路子，把行区域换成
+`UICollectionView` + `UICollectionViewDiffableDataSource` + `NSDiffableDataSourceSectionSnapshot`
+（系统给「树状可展开列表」准备的那套），**只为屏幕上那十几行创建 cell**。
+
+顺手加了标题栏的「**全部折叠 / 全部展开**」按钮：一刀切地把所有能折的章节收起来 / 放回来，
+按钮图标和含义跟着当前状态换（同一个位置一按到底）；全文没有能折的章节时按钮置灰。
+
+> 「全部折叠」只收**目录列表**，正文一个字都不动 —— 和第四节装订线那个折正文的小三角是两码事。
+
+### ⚠️ 这次踩的坑（比结论更值钱）
+
+**坑 1：`NSDiffableDataSourceSectionSnapshot` 默认把「有子项的节点」当成收起。**
+
+按直觉写完是这样的：
+
+```swift
+snapshot.append(tree.roots.map { items[$0].id }, to: nil)          // 先放根
+for index in parentIndices {
+    snapshot.append(tree.children[index].map { items[$0].id },      // 再把子项挂上去
+                    to: items[index].id)
+}
+dataSource.apply(snapshot, to: 0, animatingDifferences: animated)
+```
+
+跑起来界面上**只剩最顶上那两三个根标题**，底下的全都不见。
+排查了半天数据源和树结构，最后才确认是快照的默认状态：
+光把层级 `append` 出来不够，**必须在 `apply` 之前显式 `expand` 一遍**。
+
+修法（注意两步的顺序）：
+
+```swift
+snapshot.expand(parentIndices.map { items[$0].id })          // 先全部展开
+snapshot.collapse(collapsedIDs.filter { collapsibleIDs.contains($0) })  // 再按用户折的收起来
+```
+
+⛔ **顺序不能反**：先折后展的话，用户自己折好的那些会被 `expand` 又给放出来。
+
+**坑 2：屏幕外的行没有 cell，「数行数」的测试写法要改。**
+
+以前用 stack view 时，所有行的视图对象**一直都在**（只是藏起来），
+所以测试里可以直接数视图个数。换成 cell 复用之后，**屏幕外的行根本没有视图对象**。
+
+现在断言「显示了几行」要读面板自己算出来的可见行标题（`visibleTitles`，读的是快照里的
+可见项），不要去数 cell —— 数出来的永远只有屏幕上那十几个。
+
+**坑 3：改面板的宽高之后，光让外层视图跑布局不够。**
+
+面板的行列表挂在面板自己身上，它的尺寸是在**面板自己的** `layoutSubviews` 里摆的。
+所以测试里 `setCollapsed(false)` 之后如果只调外层视图的 `layoutIfNeeded()`，
+行列表的高度还停在 0、一行都建不出来（表现为「展开之后还是 0 行」）。
+要调面板自己的：`outline.setNeedsLayout()` + `outline.layoutIfNeeded()`。
+
+### 为什么不选别的做法
+
+- **继续用 stack view，只把「建行」做成懒加载**：也能省下那 400ms，但行高固定、
+  不需要按内容自适应，collection view 现成就是「只建可见行」，比自己搭一套懒加载更直白；
+- **把折叠状态交给系统（存进快照里）**：不行。系统的 diff 靠「稳定标识」认人，
+  而本项目的标题 `id` 复用块 `id`，**每次编辑都会换新**，折叠状态一编辑就全丢。
+  所以折叠状态的唯一出处仍旧是自己那份 `collapsedIDs`，快照只是它的一个「投影」。
+
+### 以后注意
+
+- **折叠状态的唯一出处是 `collapsedIDs`**，不要改成从快照里读；
+- **面板高度还是自己算**（可见行数 × 行高），别去读 `collectionView.contentSize` ——
+  那是布局跑完才准的值，而面板高度反过来决定行列表高度，用它俩就会绕成圈；
+- **叶子行不给三角是有意的**，别「顺手修一下」；
+- 「全部折叠」不碰正文，测试里有一条专门盯着这个（只断言目录行数，不断言正文）。
+
+### 改动文件
+
+| 文件 | 改了什么 |
+|---|---|
+| `MarkdownEditor/Outline/MarkdownOutlineView.swift` | 行区域 `UIStackView` → `UICollectionView`；新增「全部折叠 / 全部展开」按钮；`OutlineRowView` → `OutlineRowCell`（cell 复用） |
+| `MarkdownEditor/Outline/OutlineTree.swift` | 新增 `canCollapse(at:)`（「有下级 + 层级在 H1–H5」）和 `collapsibleIndices`，作为「能不能折」的唯一判据 |
+| `MarkdownEditorHy4Tests/MarkdownOutlineFoldTests.swift` | 新增 7 条折叠测试（默认全展开、全部折叠 / 展开、叶子行不参与、按钮置灰……） |
+| `MarkdownEditorHy4Tests/MarkdownOutlineTests.swift` | 行视图改从 `createdRowCells` 取；点行改走 `simulateRowTap` |
+
+---
+
+## 6. 接多标签库时踩的两个坑（2026-09-14）
+
+这一条不是「用着用着坏了」，而是**把 App 从「单页编辑器」改成「左栏文件列表 + 右栏多标签」
+（接了第三方库 `MultiTabController`）时踩的两个坑**。两个都很有代表性：
+**报出来的错跟真正的原因完全不像**，不知道套路的话能查半天。
+
+### 6.1 坑一：启动就崩 —— `Pushing a navigation controller is not supported`
+
+#### 现象
+
+代码全写完、编译一路通过。一运行，App 在**启动那一刻**就崩：
+
+```
+NSInvalidArgumentException: Pushing a navigation controller is not supported
+```
+
+（跑单测时也一样：单测的宿主就是 App 本身，所以「测试崩溃」的表现其实是 App 启动崩了。）
+
+#### 为什么会这样
+
+用生活里的例子说：左栏那份「文档列表」要在导航条下面显示，所以得包一层导航控制器。
+我想着「这事儿我来办」，就在交给分栏容器的时候顺手包了一层：
+
+```swift
+SplitContainerViewController(leftViewController: UINavigationController(rootViewController: list), ...)
+```
+
+问题是 —— **那个分栏容器内部已经替左栏包了一层导航控制器**（它自己也要用这个导航条：
+标题、右侧的「＋」按钮都挂在上面）。于是它拿到一个导航控制器之后，又往外层那个导航栈里塞了一个：
+
+> 相当于你把一个已经装好箱子的货，又整个装进另一个箱子，再让人把这个箱子塞进只能放单件货的货架。
+
+UIKit 明确不允许「往导航栈里 push 一个导航控制器」，直接抛异常。
+
+#### 怎么修的
+
+`leftViewController:` **只传列表本身**，导航条由分栏容器自己准备：
+
+```swift
+SplitContainerViewController(leftViewController: list, ...)
+```
+
+#### 以后注意
+
+- 接任何「容器类」第三方组件（分栏、标签栏、抽屉…）之前，**先读它的 `init` 注释**，
+  看它替你包了什么。这个库的注释里就写着 `self.leftNavigationController = UINavigationController(...)`。
+- **这类错误只在运行期出现，编译期一点征兆都没有** —— 所以本项目坚持「编译过了也要真启动一次」。
+  这次就是靠启动冒烟逮到的（顺带一提：跑单测也等于启动一次，因为单测的宿主就是 App）。
+
+### 6.2 坑二：一句完全不着边际的编译错误
+
+#### 现象
+
+分栏搭好之后编译，`WorkspaceCoordinator.swift` 里报一个错：
+
+```
+error: unable to infer closure type without a type annotation
+        let makeContentViewController: PPContentViewControllerProvider = {
+                                                                         ^
+```
+
+箭头指着**一整个闭包**，意思是「这个闭包推不出类型」。可按理说左边已经写了完整的类型
+（`PPContentViewControllerProvider`，就是 `() -> PPContentDisplaying`），闭包里也就一句
+`MarkdownDocumentViewController()` —— 怎么看都不像类型不明。
+
+按提示「把类型写全一点」折腾了三轮（补参数列表、补返回值、干脆不写 typealias 直接写函数类型），
+**错误一字不变**，只是列号跟着变。
+
+#### 为什么会这样
+
+真正的原因在另一个文件里：内容页那个类的声明**漏了一个协议名**。
+
+```swift
+// 错的（原来是这样）
+final class MarkdownDocumentViewController: UIViewController {
+
+// 对的
+final class MarkdownDocumentViewController: UIViewController, PPContentDisplaying {
+```
+
+内容页是「右边一个标签里显示什么」的通用约定：宿主不关心具体是谁，只要求它能被一份内容
+配置、能上报状态（就是 `PPContentDisplaying`）。这层关系**必须写在类型声明上**。
+
+一旦这个一致性没写，闭包体里那句 `MarkdownDocumentViewController()` 就**没法当成** `PPContentDisplaying` 用 ——
+Swift 的类型推导在这一步失败，但它没把「XX 没有遵守 YY」这个真话说出来，
+而是回头去怪「这个闭包推不出类型」。
+
+> 就像你寄快递，单子上少填一个必填项。你希望对方说「这里没填」，结果对方说
+> 「你这单子我看不懂」—— 你还是不知道该补哪一项。
+
+#### 怎么修的
+
+在类声明上补上协议名（`final class ...: UIViewController, PPContentDisplaying`）。
+
+#### 以后注意
+
+- **Swift 报「推不出闭包类型」时，先把闭包体里那个表达式的类型对一遍** ——
+  真凶经常是「里面那个东西不满足外部要求的类型」，而不是闭包本身写法有问题。
+- 这类错误之所以难查，是因为**报错位置在调用方、根因在被调用方的类型声明上**。
+  所以本项目在那行声明上留了注释，写清「漏了会报什么错」。
+- 顺带一条：内容页工厂这种「返回某个协议」的闭包，`X()` 能不能直接当协议用，
+  完全取决于 `X` 声明上的协议列表 —— 别在闭包里加类型标注去「修」，修不好。
+
+### 6.3 顺手记一个还留着的控制台告警（**没改**）
+
+跑起来控制台会有一条：
+
+```
+Unbalanced calls to begin/end appearance transitions for <MarkdownDocumentViewController>
+```
+
+原因查清了：`MultiTabController` 在把内容页的视图挂到右侧容器上时，
+**自己主动调了一对 `beginAppearanceTransition / endAppearanceTransition`**（它注释里写了意图：
+「view 是手动拆装，UIKit 不会自动重发，所以这里补上」）。但在「父视图已经在屏幕上」的情况下，
+UIKit 其实**也会自动发一遍**外观回调 —— 两边都发，就成了「多出来一次」。
+
+对功能**没有可见影响**（内容页的 `viewDidAppear` 里只做了一次窗口标题更新，重复执行无害）。
+之所以没动它：这是**上游库自己的实现选择**（`MultiTabController` 的源码），
+本项目只是它的使用者。而这个告警只是控制台噪音。**真要清掉，两条路**：
+① 在那对手动调用处改一次（那条路径下 UIKit 会自动发，删了也还有回调）——
+   库现在是远端依赖，改它等于**给上游提一个改动**，而不是在本地打补丁；
+② 让宿主在**自己还没出现在屏幕上**的时候就把第一个标签开好。
+
+### 6.4 附：这个库最后是怎么接进来的（远端 SPM 依赖）
+
+这段不是 bug，是**「上游仓库长什么样」决定接法**的三条实测经验，省得下一个人再试一遍。
+
+**过程**：一开始它只有子目录里的 `MultiTabController/Package.swift`（仓库根目录既没有清单、
+也没有 tag），README 里写的「用仓库地址加 SPM」**根本走不通** —— Xcode 只认**仓库根目录**的
+`Package.swift`。当时只能把源码 vendor 到 `Vendor/MultiTabController`、用**本地包引用**接。
+后来上游在根目录补了 `Package.swift`，这才换成正常的远端依赖，`Vendor/` 也删掉了。
+
+**三条经验**：
+
+1. **没 tag 就用「分支」当要求。** `project.pbxproj` 里写的是 `XCRemoteSwiftPackageReference`
+   ＋ `requirement = { branch = master }`。它表达的不是「版本号」，而是「盯住 master 分支上的
+   **某一个具体提交**」—— 那个提交会记进 `Package.resolved`（当前锁的是 `bbd7ebe`），
+   别人 clone 下来装的是同一份。代价是**升级要手动**（Xcode：File → Packages →
+   Update to Latest Package Versions）。
+   ⚠️ 想变成普通依赖：在 GitHub 上给仓库打个 tag（比如 `1.0.0`），再把这段换成
+   `kind = upToNextMajorVersion; minimumVersion = 1.0.0;`。
+2. **库清单里的 `platforms:` 决定「编译时按哪套 API 可用性检查」，不是 App 的部署目标。**
+   上游写 iOS 12，而源码里用了 iOS 13 才有的 `UIBarButtonItem.SystemItem.close` ——
+   早先按 iOS 12 编真机直接报 `'close' is only available in iOS 13.0`（Catalyst 反而不报）。
+   上游后来在源码里补了 `if #available(iOS 13.0, *)` 兜底，这才两平台都能编。
+3. **换依赖来源时，`project.pbxproj` 里有三处要一起改**，漏一处就解析不到：
+   ① 工程级 `packageReferences` 列表里的那一条；
+   ② `XCRemoteSwiftPackageReference` 段里的定义（`repositoryURL` ＋ `requirement`）；
+   ③ **每个用到该产品的 target** 里，`XCSwiftPackageProductDependency` 上的 `package = ...` 指回 ①②。
+   —— App 和测试 target 各有一份产品依赖，两份都要指对。
+
+### 6.5 改动文件
+
+| 文件 | 改了什么 |
+|---|---|
+| `MarkdownEditorHy4/WorkspaceCoordinator.swift` | 新增：按设备搭根（iPhone 导航栈 / iPad·Mac 分栏）；左栏**不再**自己包导航控制器 |
+| `MarkdownEditorHy4/DocumentListViewController.swift` | 新增：左栏文件列表（单击预览 / 双击正式打开） |
+| `MarkdownEditorHy4/DocumentsWorkspace.swift` | 新增：Documents 目录的唯一数据源 + 首启复制示例 |
+| `MarkdownEditorHy4/MarkdownDocumentViewController.swift` | 由 `ViewController` 改名并改造成内容页；补上 `PPContentDisplaying` |
+| `MarkdownEditorHy4/AppDelegate.swift` | 首启准备目录；`newDocument` 兜底（没有标签时菜单项不至于变灰） |
+| `MarkdownEditorHy4.xcodeproj/project.pbxproj` | 接第三方库：远端 SPM 依赖指向 `wooodypan/iOSDemoHub`（怎么接的见 6.4）；测试 target 也挂上该产品 |
+
+---
+
+## 7. pbxproj 里工程自己引用自己 11 次（2026-09-15）
+
+### 现象
+
+`project.pbxproj` 的 `projectReferences`（「本工程引用了哪些**子工程**」那张表）里，
+躺着 11 条一模一样的记录，全都指向 `MarkdownEditorHy4.xcodeproj` —— **工程自己**：
+
+```
+projectReferences = (
+    {
+        ProductGroup = 3BF4ACB73057D39E00FE03AD /* Products */;
+        ProjectRef = 3BF4ACB23057D39E00FE03AD /* MarkdownEditorHy4.xcodeproj */;
+    },
+    ... 后面还有 10 条长得一模一样的 ...
+);
+```
+
+除了这 11 条记录，还配套多出来：11 个**空的** `PBXGroup`（名字全叫 `Products`，
+一个 children 都没有）+ 11 条 `PBXFileReference`。
+
+**每次提交就多一条**，翻 git 历史看得清清楚楚：
+
+| 提交 | 自引用条数 |
+|---|---|
+| `537f9e0` Initial Commit | 0 |
+| `118c2f9` | 1 |
+| `e5fc955` | 2 |
+| `7e8c739` | 3 |
+| `d86d5c9` | 4 |
+| `0e45f32` | 5 |
+| `dca0a56` | 5 |
+| 工作区（清理前） | **11** |
+
+### 为什么会这样
+
+**真凶是源码文件夹里躺着一个坏掉的工程包。**
+
+`MarkdownEditorHy4/MarkdownEditorHy4.xcodeproj/` 是 2026-08-31 00:55 冒出来的，
+里面**只有一个 `project.xcworkspace/xcuserdata/pan.xcuserdatad/UserInterfaceState.xcuserstate`**，
+**没有 `project.pbxproj`** —— 它根本不是一个能打开的工程。
+
+而本工程用的是 `PBXFileSystemSynchronizedRootGroup`（「文件系统同步文件夹」，
+就是「往 `MarkdownEditorHy4/` 里丢 `.swift` 不用改 pbxproj」那个机制）。
+这个机制的代价是：**Xcode 会把那个文件夹里的一切都扫一遍**。
+扫到 `.xcodeproj` 就当成「子工程」去加载 → 没有 pbxproj → 加载失败。
+
+失败归失败，**Xcode 还是往 `projectReferences` 里记一笔，而且从不清理旧的**。
+于是每开一次工程就攒一条，攒到 11 条。
+
+佐证：跑 `xcodebuild -list` 每次都会打印
+
+```
+IDEFileReferenceDebug: [Load] ... Failed to load container at path:
+  .../MarkdownEditorHy4/MarkdownEditorHy4/MarkdownEditorHy4.xcodeproj
+  "cannot be opened because it is missing its project.pbxproj file"
+```
+
+注意路径里**多了一层 `MarkdownEditorHy4/`** —— 正好是同步文件夹的位置。
+这解释了「这些引用不在任何 group 的 children 里，Xcode 却能算出路径」。
+
+> **侦探小技巧**：Xcode 生成的对象 ID 是 24 位十六进制，**中间 8 位就是生成时刻的时间戳**
+> （自 2001-01-01 起的秒数）。抠出来一算，就知道每个对象是什么时候蹦出来的：
+> ```
+> 3BF4ACB2 3057D39E 00FE03AD
+>          └─ 0x3057D39E → 2026-09-14
+> ```
+> 靠它一眼看出「这 11 条是分 11 次长出来的」，而不是一次性写错 ——
+> 这个区别决定了「改一次就好」还是「必须先掐掉源头」。
+
+### 怎么修的
+
+1. 把坏包**移走**（没直接删，先挪到 `/tmp/mdeditor-removed/` 放着，确认没问题再清理）：
+   `MarkdownEditorHy4/MarkdownEditorHy4.xcodeproj` → `/tmp/mdeditor-removed/nested-broken-MarkdownEditorHy4.xcodeproj`
+2. 清掉 11 条自引用，连带它们专用的 11 个空 `Products` 组 + 11 条 `PBXFileReference`，
+   以及整个 `projectReferences = (...)` 段和配套的 `minimizedProjectReferenceProxies`。
+
+**只删「在 projectReferences 里出现过」的那些 ID** —— 真正的 `Products` 组
+（被 `productRefGroup` 引用的那个）一根汗毛没动。
+
+`project.pbxproj` 从 764 行降到 651 行，**删掉 113 行**。
+
+### 怎么验证的
+
+| 检查 | 结果 |
+|---|---|
+| 每个待删 ID 在文件里出现次数 | 都是 2 次（定义 1 次 + 引用 1 次）→ 没有别处依赖 |
+| 删后有没有「被引用但没定义」的 ID | 0 个 |
+| 大括号 / 圆括号配平 | 63:63、54:54，都配平 |
+| 三个 target 还在不在 | `MarkdownEditorHy4`、`…Tests`、`…UITests` 都在 |
+| `xcodebuild -list` 那条加载告警 | **归零**（连跑两次都是 0 条） |
+| 单元测试 | 156 全绿 |
+| Catalyst / iOS 编译 | BUILD SUCCEEDED ×2 |
+
+### 以后注意什么
+
+1. **源码文件夹里绝对不能放 `.xcodeproj`。** 提交前手跑一句就能查出来：
+   `find . -name "*.xcodeproj" -not -path "./.git/*"` —— 正常只该输出根目录那一个。
+2. **`.xcodeproj` 是「包」，不是普通文件夹。** 在 Finder 里拷文件时如果只拷了其中一部分
+   （比如只带上了 `project.xcworkspace`），就会留下这种「坏包」。删的时候要**整包**删。
+3. **看到 pbxproj 里的重复条目，先翻 git 历史判断它是「一次性写错」还是「每次 +1」。**
+   前者修一次就好；后者说明有个源头在持续制造，不掐掉源头，清完还会长回来。
+4. 清理 pbxproj 别用跨行正则 —— 一个对象自己就占好几行，`.*?` 不跨行会直接匹配失败
+   （这次第一次就是这么翻车的）。用「定位起止下标 + 字符串切片」最稳。
+
+---
+
+## 8. App 把新建的文档写进了用户真实的「文稿」目录（2026-09-15）
+
+### 现象
+
+在 Mac 上跑这个 App（Catalyst 版），**⌘N 新建的 `未命名.md` 跑到了 `/Users/pan/Documents/` 里** ——
+那是用户自己的「文稿」目录，不是 App 该待的地方。更吓人的是左栏列表列的也是
+`~/Documents` 底下的东西，右键「删除」真能把用户自己的文稿删掉。
+
+iOS 模拟器上怎么试都是好的，只有 Mac 出问题。
+
+### 先用生活里的例子理解
+
+把 App 想成一个租客。
+
+- **iOS 上**：房东（系统）硬性给每个租客一间上锁的房间，钥匙只给这一间 —— 你想乱跑也没门路。
+- **macOS 上**：房东不管。租客得**自己主动在合同上签字**，声明「我只要我自己那一间」。
+  没签，就等于默认可以在整栋楼里随便走 —— 于是它把东西顺手放进了你的书房。
+
+那个「签字」就是 **entitlement**（`com.apple.security.app-sandbox`）。
+
+### 为什么会这样（根因）
+
+**这个 target 根本没开 App Sandbox，不是代码写错了。**
+
+| 查的东西 | 结果 |
+|---|---|
+| 工程里有没有 `.entitlements` 文件 | 没有 |
+| `project.pbxproj` 里有没有 `CODE_SIGN_ENTITLEMENTS` / `ENABLE_APP_SANDBOX` | 都没有 |
+| 实际签名里带了什么 | 只有一个 `com.apple.security.get-task-allow` |
+| `~/Library/Containers/com.yijian.mirror` 存不存在 | 不存在 |
+
+于是 `FileManager.urls(for: .documentDirectory, in: .userDomainMask)` 老老实实解析成了
+`NSHomeDirectory()/Documents` —— 也就是 `/Users/pan/Documents`。
+
+**为什么只有 Catalyst 现形**：macOS 的沙盒是**选入式**的（靠 entitlement 声明），
+而 iOS 的沙盒是**系统强制**的 —— 同一个写法在 iOS 上永远落在容器里。
+所以「模拟器上验证过是好的」完全不能说明 Mac 上也是好的。
+
+### 怎么修的（方案 A：开 App Sandbox）
+
+1. **新增 `MarkdownEditorHy4/MarkdownEditorHy4.entitlements`**，声明两件事：
+   - `com.apple.security.app-sandbox` = 开沙盒；
+   - `com.apple.security.files.user-selected.read-write` = 允许读写**用户亲手挑的**文件
+     （⌘O 的打开面板、导出面板、Finder 双击进来的 .md）。只读不够 —— ⌘S 要写回原文件。
+2. **`project.pbxproj` 两个配置（Debug / Release）各加三条**：
+   ```
+   "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]"   = MarkdownEditorHy4/MarkdownEditorHy4.entitlements;
+   "ENABLE_APP_SANDBOX[sdk=macosx*]"       = YES;
+   "ENABLE_USER_SELECTED_FILES[sdk=macosx*]" = readwrite;
+   ```
+   后两条是 Xcode 的「能力」开关（同一件事用两种写法表达，Xcode 自己加能力时也是这么写的）。
+3. **`Info.plist` 加 `UIFileSharingEnabled`**：把容器里的 Documents 目录露到 iPhone / iPad 的
+   「文件」App 里 —— 开了沙盒之后，往容器里放文件 / 取文件得有这么一个正经入口。
+4. **`MarkdownDocumentOpener`：安全作用域从「只记最后一个」改成一批。**
+   以前不开沙盒，全盘都能读写，记不记无所谓；开了沙盒就不同了 —— 右侧可以同时开着好几份
+   容器外的文档，**只留最后一个的授权，会让较早那份按 ⌘S 写不进去**。
+5. **左栏空态文案分平台**：Mac 上教用户走「文件 > 打开…」，别再让他去「文件」App 里拖
+   （Mac 上没有那个 App 的这一套）。
+
+### 为什么给设置加 `[sdk=macosx*]` 这个条件
+
+因为 **iOS 压根不需要这份文件**：iOS 的沙盒是系统强制的，多写一份跟 iOS 无关的权限声明，
+只会让「这个 App 到底要什么权限」变得难讲清。加上条件之后，iOS 构建连
+`CODE_SIGN_ENTITLEMENTS` 都是空的（实测 `ENABLE_APP_SANDBOX = NO`、上下文里没有 `.xcent`），
+两个平台各管各的。
+
+### 怎么验证的
+
+| 检查 | 结果 |
+|---|---|
+| 签名里真的带上沙盒了吗 | `codesign -d --entitlements -` 打出 `com.apple.security.app-sandbox = true` ✅ |
+| 容器建出来了吗 | `~/Library/Containers/com.yijian.mirror/Data` 首次启动后出现 ✅ |
+| 容器里能读写、能删吗 | 新增的 `SandboxWorkspaceTests` 在容器里走了一遍「建 → 写 → 读 → 删」 ✅ |
+| **用户真实的 `~/Documents` 有没有被动过** | 跑测试 + 真启动前后各 `ls` 一次，`diff` 退出码 0（一个字节都没变）✅ |
+| 回归：有没有把老功能弄坏 | 单元测试 **158 全绿** |
+| 两个平台还编得过吗 | Catalyst / iOS(generic) 均 BUILD SUCCEEDED ✅ |
+| 还有没有**新增** CodeSign / entitlement 的告警 | 无 |
+
+### 顺带发现的两件事
+
+1. **从「本身已被沙盒包住」的终端里直接跑这个 App，会 SIGTRAP 崩掉**（`EXC_BREAKPOINT`）。
+   沙箱不允许套娃 —— 跟 xcodebuild 在沙箱里跑不起来是同一个道理
+   （`sandbox_apply: Operation not permitted`）。
+   换成 `open -n <App.app>` 让 launchd 去启动就一切正常。
+   → 以后**冒烟测试别再用「直接跑二进制」那条路**，用 `open`。
+2. **沙盒里 `FileManager.trashItem`（丢系统废纸篓）依然可用**：拿一个临时文件实测过，
+   文件确实进了 `/Users/pan/.Trash/`。
+   所以「Mac 上删除先试着丢废纸篓」这个设计**不用改**，确认框里那句
+   「还能从废纸篓捞回来」也还是实话。
+
+### 以后注意什么
+
+1. **别把 `CODE_SIGN_ENTITLEMENTS[sdk=macosx*]` 那条删了，新建 target 时也记得抄。**
+   删掉之后 App 表面上一切正常，只是又悄悄开始往用户的文稿目录里写东西 ——
+   编译期看不出来。`MarkdownEditorHy4Tests/SandboxWorkspaceTests.swift` 就是拦这个的：
+   Catalyst 上断言文档目录必须落在 `/Library/Containers/` 里。
+2. **老文件不会自己搬进容器。** 之前 App 写进真实 `~/Documents` 的那几份，还留在原地，
+   要用户自己挪。开关一改，左栏就只看得到容器里的东西了（看不到 ≠ 删掉了）。
+3. **写测试仍然不许碰 `DocumentsWorkspace.folderURL` / `documentURLs()`** ——
+   那是用户真正的文稿目录，只能读路径、不能拿它当草稿纸。
+   `SandboxWorkspaceTests` 里那个「建 → 写 → 读 → 删」的用例是**先确认自己在容器里**才动手的。
+
+### 补记：Xcode 26 里「开沙盒」有两套写法（2026-09-15 晚，用户问手动怎么做）
+
+Xcode 26 的 Signing & Capabilities 编辑器改成了**用构建设置来表达能力**：勾一下 App Sandbox，
+写进 pbxproj 的是一串 `ENABLE_*`，**不再强制生成 `.entitlements` 文件**。用户手动点出来的就是这一串：
+
+```
+ENABLE_APP_SANDBOX = YES;
+ENABLE_USER_SELECTED_FILES = readwrite;
+ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+ENABLE_OUTGOING_NETWORK_CONNECTIONS = NO;
+ENABLE_RESOURCE_ACCESS_AUDIO_INPUT / BLUETOOTH / CALENDARS / CAMERA / CONTACTS / LOCATION /
+PRINTING / USB = NO;
+```
+
+**手动步骤**：选 project → TARGETS 里选 target → `Signing & Capabilities` 页 →
+左上角 `+ Capability` → 搜 `App Sandbox` → 添加 → 面板里 `User Selected File` 下拉选 `Read/Write`。
+（Xcode 26 加能力时会顺带把不用的一堆开关显式写成 `NO`，那是**防止继承到别的配置的值**，不是多余行。）
+
+**两套写法都会真的生效，而且会合并。** 用空 entitlements 文件 + 只开 ENABLE_* 实测过，
+`.xcent` 里照样出 `app-sandbox`；反过来把 `ENABLE_APP_SANDBOX` 覆盖成 `NO`，
+文件里那一对键也照样进包。这是用 `xcodebuild build CODE_SIGN_ENTITLEMENTS=/tmp/空文件.entitlements`
+逐个验证的（命令行覆盖不改 pbxproj，是安全的试探手法）。
+
+**实测出来的对照表**（把 12 个开关全开 YES，看生成的 `.xcent` 里冒出哪些键）：
+
+| 构建设置 | 生成的 entitlement 键 |
+|---|---|
+| `ENABLE_APP_SANDBOX` | `com.apple.security.app-sandbox` |
+| `ENABLE_USER_SELECTED_FILES` = readwrite / readonly | `…files.user-selected.read-write` / `.read-only` |
+| `ENABLE_OUTGOING_NETWORK_CONNECTIONS` | `com.apple.security.network.client` |
+| `ENABLE_INCOMING_NETWORK_CONNECTIONS` | `com.apple.security.network.server` |
+| `ENABLE_RESOURCE_ACCESS_CAMERA` | `com.apple.security.device.camera` |
+| `ENABLE_RESOURCE_ACCESS_AUDIO_INPUT` | `com.apple.security.device.audio-input` |
+| `ENABLE_RESOURCE_ACCESS_BLUETOOTH` | `com.apple.security.device.bluetooth` |
+| `ENABLE_RESOURCE_ACCESS_USB` | `com.apple.security.device.usb` |
+| `ENABLE_RESOURCE_ACCESS_PRINTING` | `com.apple.security.print` |
+| `ENABLE_RESOURCE_ACCESS_LOCATION` | `com.apple.security.personal-information.location` |
+| `ENABLE_RESOURCE_ACCESS_CALENDARS` | `com.apple.security.personal-information.calendars` |
+| `ENABLE_RESOURCE_ACCESS_CONTACTS` | `com.apple.security.personal-information.addressbook` ⚠️ 名字不一样 |
+
+**iOS 不用担心被牵连**（实测）：带着无条件的 `ENABLE_APP_SANDBOX=YES` 构建 iOS 模拟器版，
+产物里只有 `application-identifier`，**没有** `app-sandbox`。原因是苹果自己的模板就把这套设置
+声明为只属于 macOS 平台：
+`Xcode.app/…/Templates/Project Templates/MultiPlatform/Application/macOS App Entitlements.xctemplate`
+里写着 `Platforms = [com.apple.platform.macosx]` + `ENABLE_APP_SANDBOX = YES`
++ `ENABLE_USER_SELECTED_FILES = readonly`（新建 macOS App 默认不开沙盒的只给 readonly，
+要写回得自己改成 readwrite）。
+
+> 所以本项目给设置加 `[sdk=macosx*]` 属于**表述更清楚**，不是**功能上必需** ——
+> 留着挺好：pbxproj 里一眼能看出「这是 Mac 侧的事」，也不会在 Xcode 的 iOS 视图里
+> 显示一堆用不上的能力开关。
+
+---
+
+## 9. Mac 右键「删除」点了没反应（2026-09-16）
+
+### 现象
+
+在左栏对着某份文档点**右键**（iPad 上是长按）→ 菜单里选「删除」→ 确认框正常弹出来 →
+点确认框里的「删除」→ **什么都没发生，文件还好好地在原地。**
+
+但 iPhone 上**往左滑**删除是好的 —— 同一个确认框、同一段删除代码，两条路一个好一个坏。
+
+### 为什么会这样：`completion?(...)` 会把括号里的东西一起跳过
+
+确认框里原来是这么写的：
+
+```swift
+alert.addAction(UIAlertAction(title: "删除", style: .destructive) { [weak self] _ in
+    completion?(self?.performDelete(url) ?? false)   // ← 问题在这
+})
+```
+
+`completion` 是个**可选**闭包（`((Bool) -> Void)?`）。它为 nil 时，Swift 的 `?()`
+**不只是「不调用这个闭包」，连括号里那些参数都不会去算** —— 于是
+`performDelete(url)`（真正删文件的那一步）压根没执行过。
+
+拿一个独立脚本就能验证（存成 `.swift` 直接 `swift 文件名.swift` 跑，不用建工程）：
+
+```swift
+var sideEffectRan = false
+func performDelete() -> Bool { sideEffectRan = true; return true }
+
+var completion: ((Bool) -> Void)? = nil   // 右键菜单那条路：不传 completion
+completion?(performDelete())
+print(sideEffectRan)                      // 实测打出 false —— 函数根本没被调用
+```
+
+**为什么偏偏只有右键这条路坏**：右键菜单（`deleteMenu`）只想「把它删掉」，不需要知道结果，
+所以调 `confirmDelete(url)` 时没传 completion → 它是 nil → 被短路。
+而左下角往左滑那条路要拿结果去决定「这一行收不收回原位」，传了 completion → 参数照常求值 → 看着一切正常。
+
+一句话总结：**坏不坏，取决于一个「反正也用不上」的参数传没传。** 这就是它难被发现的原因。
+
+### 怎么修的
+
+把「删除」从参数位置**拿出来**，先执行完再回调：
+
+```swift
+func handleDeleteConfirmation(_ url: URL, completion: ((Bool) -> Void)? = nil) {
+    // 先删，再回调 —— 顺序反了就又回到原来那个坑里
+    let didDelete = performDelete(url)
+    completion?(didDelete)
+}
+```
+
+`confirmDelete` 里改成 `self?.handleDeleteConfirmation(url, completion: completion)`。
+
+单独抽成一个方法有两个好处：**能单测**，以及能把「这一步必须无条件执行」的理由写成注释，
+免得以后有人又把它塞回参数里。
+
+顺带加了一个给测试用的替换口 `var deleteFile: (URL) throws -> Void`：
+测试里换成「直接删临时文件」，免得每跑一次测试就往用户的废纸篓里丢一个文件。
+
+### 怎么验证的
+
+1. **新增两条测试**（`DocumentDeleteTests.swift`）：
+   - `testDeleteWorksWhenCompletionIsNil` —— 专门用 `completion: nil` 复现右键那条路；
+   - `testDeleteReportsResultToCompletion` —— 左滑那条路要能收到 `true`。
+2. **反向验证（这一步才是关键）**：把代码**故意改回**有 bug 的写法再跑一遍 ——
+   `testDeleteWorksWhenCompletionIsNil` 立刻变红，其余 5 条照过；然后才改回正确写法。
+   **一条从没红过的测试，没法证明它守得住任何东西。**
+3. 编译：Catalyst + iOS 两个平台都 BUILD SUCCEEDED。
+
+### 以后注意什么
+
+1. **带副作用的调用，别放进 `?` 调用的括号里。** 判断方法：问一句
+   「这一步要是没执行，会有人发现吗？」—— 如果是「文件没删掉」「东西没存进去」这种，
+   就先单独一行执行完，再回调。`对象?.方法(有副作用的东西())` 全都有这个毛病。
+2. **一个功能有两条入口时，两条都得点一遍。** 这次两条路共用同一个确认框，
+   差别只在「传不传 completion」，光读代码很难看出来。
+3. 排查测试失败**先确认是不是自己碰坏的**：`git diff --stat` 看工作区还有哪些改动，
+   再拿 `stat -f "%Sm %N"` 看文件修改时间对不对得上。这次就是靠时间戳发现
+   `testCodeBlockBackgroundFollowsScroll` 的失败来自另一处未提交的段落间距改动，与本次修复无关。
+4. **顺带记一笔**：`testCodeBlockBackgroundFollowsScroll` 对**段落间距**很敏感 ——
+   它断言「滚到 1500 之后代码块背景该落在哪」，间距一调大，整篇文档高度就变了，断言跟着失败。
+   实测把 `MarkdownTheme.swift` 的 `paragraphSpacing` 和列表样式的 `paragraphSpacing`
+   改回原值就能恢复通过。以后调排版参数时，记得这条测试会跟着动。
+
+---
+
+## 10. 在样式表里改 linkColor，链接颜色没变（2026-09-16）
+
+### 现象
+
+在 `MarkdownTheme` 里把 `linkColor` 改成任何颜色，界面上的链接**一点变化都没有** ——
+始终是正文那个颜色。但链接本身是好的：能点、能长按打开（说明 `.link` 属性其实挂上了）。
+
+### 为什么会这样：链接用「只补空缺」的方式上色，可文字早就有颜色了
+
+渲染是「先里后外」的：最里面的文字节点先被 `visitText` 渲染出来，那时候就套上了
+`bodyAttributes`，里面已经含 `.foregroundColor: textColor`。
+
+然后才轮到外层的 `visitLink` 给整段上链接色。可它用的是 `addAttributesIfAbsent`，
+这个函数的语义是「**已有属性优先，我只填空缺**」：
+
+```swift
+// RenderedFragment.swift —— addAttributesIfAbsent 里那几行
+var merged = attributes           // 想加的新属性（这里是 linkColor）
+for (key, value) in existing {    // 已有的属性（这里是 textColor）
+    merged[key] = value           // 已有的盖掉新的
+}
+```
+
+`foregroundColor` 这个 key 早就存在了（是正文色），于是 `linkColor` 被直接挤掉。
+
+而 `.link`（URL）倒是加上了 —— 它是个**全新**的 key，不属于「已经有」的东西，
+所以链接依然能点开。这就解释了「为什么链接能用，偏偏颜色不对」。
+
+**生活化类比**：给一张已经涂满颜色的纸再上色，规则是「只涂还没涂到的地方」——
+整张纸都涂过了，新颜色自然一点都上不去。
+
+### 怎么修的
+
+`visitLink` 换成 `setAttributes`（强制覆盖）。它只覆盖传进去的那几个 key，
+字体、段落样式这些别的属性都保留：
+
+```swift
+// MarkupToAttributedRenderer.swift —— visitLink
+out.setAttributes(theme.linkAttributes)     // 原来是 addAttributesIfAbsent
+if let destination = link.destination, let url = URL(string: destination) {
+    out.setAttributes([.link: url])
+}
+```
+
+顺手在 `addAttributesIfAbsent` 的注释里加了一句提醒：它本来是给 Emphasis / Strong 这类
+嵌套语法准备的（外层不该把内层行内代码的等宽字体盖掉），凡是「必须盖掉正文色」的样式
+都不能用它。
+
+### 怎么验证的
+
+1. **先证明它真的坏了**（反向验证）：新写了 `MarkdownLinkColorTests`，跑出来
+   `("0.13,0.21,0.28,1.00") is not equal to ("0.10,0.20,0.90,1.00")` ——
+   链接文字拿到的确实是**正文色**，不是设进去的蓝色。
+2. 修完三条全过：链接文字是 linkColor、链接**外面**的正文仍是 textColor、`.link` 属性还在。
+3. 全量 178 条测试，只有 `testCodeBlockBackgroundFollowsScroll` 一条失败 ——
+   它对段落间距敏感，来自另一处未提交的改动（`paragraphSpacing` 6→12），与本次无关
+   （见第 9 条「以后注意什么」的第 3、4 点）。
+4. 编译：Catalyst + iOS 两个平台都 BUILD SUCCEEDED。
+
+### 以后注意什么
+
+1. **`addAttributesIfAbsent` 不是「加属性」，是「补空缺」。** 判断办法：问一句
+   「这个 key 在更内层是不是已经被设过了？」—— 只要是（尤其是 `foregroundColor`，
+   叶子文字节点一定设过），用它就等于没写。这种情况要用 `setAttributes`。
+2. **改了样式没反应时，别急着怀疑「主题是不是没传进来」。** 这次先确认了
+   `MarkdownTextView` 用的就是 `MarkdownTheme.default`（第 135 行），链路没问题，
+   才往下查到是上色方式的问题。排查顺序：样式表 → renderer → attributed string → 屏幕。
+3. **断言颜色要比 RGBA 分量，别直接比 `UIColor` 对象。** 同一个颜色可能落在不同的
+   色彩空间里（sRGB / Display P3），直接 `XCTAssertEqual` 会误判成不相等。
+4. 顺带说一句：`linkAttributes` 仍然保持「样式表是唯一样式出处」，
+   `visitLink` 里没有写死任何颜色。
+
+### 补记：富文本改对了，屏幕上还是蓝的（同一症状的第二层根因）
+
+上面修完之后富文本里的链接色确实是红的，可界面上**照样是蓝的**。同一个症状底下压着
+两个独立的根因，第二个在 UIKit 那一层：
+
+**`UITextView` 画 `.link` 范围时，会拿自己的 `linkTextAttributes` 盖上去，默认值是系统蓝
+`0.00,0.53,1.00`。** 实测（把一段「红色文字 + `.link`」赋给一个全新的 `UITextView`）：
+
+```text
+赋值后从 textView.attributedText 读回来 = 1.00,0.00,0.00,1.00   ← 富文本没被改，还是红
+textView.linkTextAttributes             = [NSColor = 0.00,0.53,1.00,1.00]   ← 系统蓝
+```
+
+最阴的地方在于：**它只影响绘制，不改字符串。** 从 `attributedText` 里查颜色永远是对的，
+所以上一轮那三个查富文本的用例全绿，也照样挡不住这个 bug。只有对着真正的
+`UITextView` 查 `linkTextAttributes` 才能拦住。
+
+修法：`MarkdownTextView` 新增 `syncLinkTextAttributes()`，把 `theme.linkAttributes`
+交给 `linkTextAttributes`（出处仍然只有样式表一份），在 `configureTextView()` 和
+`refreshTheme()` 两处调用。
+
+```swift
+private func syncLinkTextAttributes() {
+    linkTextAttributes = renderer.theme.linkAttributes
+}
+```
+
+**以后注意什么**
+
+1. **凡是「富文本里挂了 `.link`」的样式，都要同时在 `UITextView` 上设一遍**
+   （`linkTextAttributes`）。光写进 `NSAttributedString` 只对 `UILabel` / 自己画的情况有效。
+2. **排查「改了样式没反应」要一路查到屏幕**：样式表 → renderer → attributed string →
+   **UITextView 自身的样式属性**。这一轮就是卡在最后一环 —— 前三环全对。
+3. 反向验证是真的：把 `syncLinkTextAttributes()` 注掉之后，新用例立刻报
+   `("0.00,0.53,1.00,1.00") is not equal to ("1.00,0.00,0.00,1.00")`。
+
+---
+
+## 11. 设置页新增的滑块，能拖但拖了什么都没发生（2026-09-16）★
+
+### 11.1 现象
+
+给设置页加了「正文排版」那一组（字号 / 行高 / 段落间距 / 段落首行缩进 / 行宽上限）。
+界面一切正常：五行都画出来了、滑块能拖、右边的数字也跟着变。
+**但正文一点反应都没有**，拖完关掉设置页再打开，滑块又回到原来的位置 ——
+说明值压根没写进配置。
+
+有意思的是「**看起来完全正常**」这件事本身就是最坑的地方：
+滑块能拖、数字在动，用户（和读代码的人）根本不会往「这个回调没接上」上想。
+
+### 11.2 为什么会这样
+
+`sliderChanged(_:)` 里是这么写的：
+
+```swift
+switch row {
+case .outlineHeightRatio:     settings.setOutlineHeightRatio(stepped)
+case .outlineMaximumHeight:   settings.setOutlineMaximumHeight(stepped)
+case .tableMinColumnWidth:    settings.setTableMinColumnWidth(stepped)
+case .tableMaxColumnWidth:    settings.setTableMaxColumnWidth(stepped)
+default:
+    return          // ← 祸根
+}
+```
+
+新增的五行走进了 `default: return` —— 直接返回，连 setter 都没调到。
+
+**关键在于「界面那一半是好的」**：画控件是另一个 switch
+（`tableView(_:cellForRowAt:)`），那处加对了。于是「能显示、能拖」和
+「拖了不生效」各自成立，拼在一起就是一个静默失效的功能：
+不崩、不报错、不打日志，只是没用。
+
+`default: return` 的真正害处是**它把编译期错误降级成了运行期错误**。
+`Row` 是个 `CaseIterable` 枚举，本来「有行没处理」是编译器一眼能看出来的事；
+加了 `default` 之后，编译器认为「反正有兜底」，就不再管了。
+
+### 11.3 怎么修的
+
+把 `default` 去掉，让 switch **穷举**所有 `Row`；两个挂别种控件的行显式写出来：
+
+```swift
+case .remembersScrollPosition, .outlineHeightMode:
+    // 这两行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
+    // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
+    // 编译器会直接报「switch must be exhaustive」逼你回来接上 ——
+    // 少了这层保护就会出现「滑块能拖、但拖了什么都没发生」这种静默失效。
+    return
+```
+
+去掉 `default` 之后编译器立刻就报了 `error: switch must be exhaustive`，
+说明这个护栏是实打实生效的。
+
+### 11.4 怎么验证的
+
+1. 补了 21 条测试（`MarkdownTypographyTests.swift`）。其中设置页那两条
+   （`testSettingsPageHasTypographySlidersAndWritesBack`、
+   `testDraggingContentWidthToTheEndMeansUnlimited`）**在修之前就是红的**，
+   断言正是「拖完 `settings.bodyFontSize` 应该变成 21，实际还是 17」。
+   先红后绿，说明这个测试真的守得住这条链路。
+2. 顺手做了突变验证，确认另外三条守卫不是空跑：
+   把 `applyLineHeight` 改成永不生效、把列表项的段间距改回写死的 `12`，
+   对应三条测试**立刻变红**（其中 `testLineHeightActuallyPushesFollowingContentDown`
+   是拿「第二个代码块被推下去多少点」量的，属于**排版层**的证据，不是属性层）。
+
+### 11.5 以后注意什么
+
+1. **「能拖但没反应」优先怀疑回调没接上**，而不是「设置没生效」。
+   排查顺序：`sliderChanged` 的 switch → setter → 配置对象是不是同一个实例 →
+   内容页有没有监听通知。这个 bug 卡在第一层。
+2. **分发用的 switch 不要写 `default`。** 枚举穷举时，编译器就是最好的测试 ——
+   白拿一条「新增成员必须处理」的编译期断言，没有理由不要。
+3. **给设置页加一行，要同时改四处，少一处就静默失效**：
+   | 位置 | 改什么 |
+   |---|---|
+   | `Section.rows` | 把新行放进哪个分组、排第几 |
+   | `Row` 的各个计算属性 | `title` / `detail` / `sliderRange` / `sliderStep` / `currentValue` / `formatted` |
+   | `tableView(_:cellForRowAt:)` | 挂哪种控件（开关 / 分段 / 滑块） |
+   | `sliderChanged(_:)` | 写回哪个 setter（**穷举，别加 `default`**） |
+   另外 `MarkdownEditorSettings` 那边还要补：`Default` / `Limits` / `Payload` /
+   属性 / setter / `init` / `load` / `save`（全可选字段，老配置缺字段要能退默认）。
+4. **设置页的单元测试，帧高一定要给够。** `UITableView` 只创建**可见范围内**的
+   cell：帧太矮时靠下的行根本不存在，`XCTUnwrap` 会以「找不到控件」失败 ——
+   那是测试自己没把页面铺开，不是功能坏了。现在统一用 `420 × 2600`，
+   踩之前那几条用的 640 / 900 就不够了。
+5. **打开视图树里找控件的辅助函数，用「量程上界」当身份证最稳**，
+   别用顺序（挪一行就挂）或 tag（往枚举里插一个 case 就全错位）：
+   ```swift
+   private func slider(in view: UIView, maximumValue: Float) -> UISlider?
+   ```
+   代价是**每行的量程必须唯一**。这次的量程是 28 / 2 / 40 / 4 / 1200，
+   和原有的 1 / 900 / 200 / 600 互不冲突。
+
+---
+
+## 12. 任务项正文里带 [x]，复选框却显示成「已勾选」（2026-09-18）★
+
+### 12.1 现象
+
+文档里这么写：
+
+```markdown
+- [ ] 未完成的项，点一下变 [x]
+```
+
+这一行的标记明明是 `[ ]`（没勾），可它那个复选框**画成了勾上的绿框**。
+去点它，**点了没反应** —— 源码还是 `[ ]`，框也还是勾着的。
+
+触发条件是这一行的**正文里也有一个 `[x]`**。把正文里那个 `[x]` 删掉，一切正常。
+
+### 12.2 为什么会这样
+
+两件事凑在一起。
+
+**第一件：判定勾没勾的，是「整行文字里有没有 `[x]`」。**
+
+本项目解析 markdown 走的是 `swift-markdown` → 底层 `cmark-gfm`。
+它任务列表扩展里判定状态就一句（`extensions/tasklist.c`）：
+
+```c
+parent_container->as.list.checked =
+    (strstr((char *)input, "[x]") || strstr((char *)input, "[X]"));
+```
+
+`input` 是**整行**，而 `strstr` 是「在这个字符串里找子串」——
+所以只要这一行**别处**还出现一个 `[x]` / `[X]`，整项就被报成「已勾选」，
+哪怕真正的标记是 `[ ]`。实测：
+
+| 源码 | 语法树给的 `item.checkbox` | 真相 |
+|---|---|---|
+| `- [ ] 未完成的项` | unchecked | `[ ]` |
+| `- [ ] 未完成的项，点一下变 [x]` | **checked** | `[ ]` |
+| `- [ ] 第一行`⏎`  续行有 [x]` | unchecked | 只看第一行，续行不算 |
+| `- 正文里有 [x]`（行首没有标记） | `nil`（不是任务项） | 行首这个判定是准的 |
+
+**第二件：我们把这个字段直接拿来画按钮了。**
+
+渲染器 `markCheckboxLiteral` 里原本是：
+
+```swift
+isChecked: checkbox == .checked    // checkbox 就是 item.checkbox
+```
+
+于是「语法树说勾了」= 「按钮画成勾上」。
+**文本框里那三个字符到底是什么，从头到尾没人看过一眼。**
+
+**为什么点不动**：点一下会走 `toggleCheckbox`，它按 `info.isChecked` 决定往源码里写什么 ——
+既然 `isChecked` 是（错的）`true`，它就写 `[ ]`；而源码本来就是 `[ ]`，等于什么都没干。
+所以症状是「**点了没反应**」，而不是「切反了」。
+
+### 12.3 怎么修的
+
+只改一处：**勾选状态从源码里那三个字符本身读**；语法树只保留「这一行是不是任务项」这一个用途。
+
+`MarkupToAttributedRenderer.swift`：
+
+```swift
+guard item.checkbox != nil,                                  // 只用来判定「是不是任务项」
+      let literal = checkboxLiteral(in: markerText, markerRange: markerRange) else { return }
+let info = CheckboxInfo(sourceStart: blockOrigin + literal.range.location,
+                        isChecked: literal.isChecked)         // ← 状态读字面量本身
+```
+
+原来的 `checkboxLiteralRange` 顺手升级成 `checkboxLiteral`：找 `[` 的同时，
+把中间那个字符一起读出来（`x` / `X` 算勾上，其余算没勾）。
+
+为什么不干脆绕开 cmark 自己判断「是不是任务项」：那一半语法树**是准的**
+（`- 正文里有 [x]` 不会被误判成任务项），没必要自己再造一套。
+**错的只有「状态」这一个字段。**
+
+### 12.4 怎么验证的
+
+先写了个**探针单测**（用完就删），把三层并排打出来：
+
+1. 语法树给的 `item.checkbox`
+2. 渲染后 `.markdownCheckbox` 标记落在哪三个字符上
+3. 真实视图里那个按钮到底画没画对勾
+
+三层一比，问题立刻现形（对照表见 12.2）。**别只盯其中一层猜。**
+
+然后补了 3 条正式回归测试（在 `MarkdownEditorHy4Tests.swift` 的复选框那一节）：
+
+| 测试 | 盯的是什么 |
+|---|---|
+| `testCheckboxStateComesFromLiteralNotWholeLine` | 数据层：标记是 `[ ]` 就不许报成已勾选；正文含 `[ ]` 的 `[x]` 项仍要算勾上 |
+| `testCheckboxButtonLooksUncheckedWhenLiteralIsUnchecked` | **视图层**：从视图树里捞出那个真按钮，问它有没有画对勾 |
+| `testClickingCheckboxWithDecoyXStillWritesX` | 点击真能改到源码，且正文里那个 `[x]` 一个字不动 |
+
+**反向验证**：把 `isChecked:` 临时改回 `item.checkbox == .checked` 再跑 ——
+3 条新测试**全部变红**，2 条老测试照过（这正是它能溜过测试的原因）。
+这一步很关键：**一条从没红过的测试，证明不了它守得住什么。**
+
+回归：全量 228 条只有 1 条红（`testCodeBlockBackgroundFollowsScroll`，
+成因是 11.5 末尾说的那个段落间距改动，与本次无关 —— 那个测试文档里一个任务列表都没有）；
+Catalyst / iOS 双平台编译通过；Catalyst 冒烟存活、用户真实文稿目录未被写。
+
+### 12.5 以后注意什么
+
+1. **上游解析器给的「语义字段」不等于真相。** 本项目的铁律是「源码才是唯一真相」，
+   落到代码上就是：**能读字面量就别读解析结果**。这次栽的就是信了 `item.checkbox`。
+2. 但也别一杆子打翻：`item.checkbox != nil`（是不是任务项）**是准的**，该用还用。
+   分清「一个字段的哪一部分可信」比「整个字段信不信」更重要。
+3. **症状是「点了没反应」时，先怀疑「它算出来的当前状态本身就是错的」。**
+   状态算错 → 写回的就是原值 → 表现成空操作，不报错、不崩。
+4. 「UI 显示 vs 数据对不上」这类问题，最省事的排查手段就是**探针单测三层并排打印**
+   （解析器字段 / 渲染标记 / 真实视图控件）。
+
+---
+
+## 13. 点一下复选框，方框就变宽（2026-09-18）★
+
+### 13.1 现象
+
+任务项的复选框，**点一下（从 `[ ]` 变成 `[x]`）方框就变宽**，再点回去又缩回来。
+宽度差得不小，一眼能看出来在「跳」。
+
+> 提出这个问题的原话是：「`UIImage(systemName: "checkmark", withConfiguration:)` 点击后变宽」。
+> 顺着这句话去查符号本身，会一无所获 —— 真正变的是**方框**，不是对勾。见下。
+
+### 13.2 为什么会这样
+
+复选框是**叠在源码 `[ ]` / `[x]` 上面**的一个原生按钮（不是插进文本流的附件）。
+为了让方框把那三个字符整个盖住，宽度当初是这么算的：
+
+```swift
+// 旧写法：按**当前这一项**的字面量取宽
+let width = max(checkboxSide, literal.width)
+```
+
+问题出在 `literal.width` —— 它是**当前那三个字符在图里的实际宽度**，
+而这三个字面量在图里**宽度本来就不一样**（正文 17pt 系统字体实测）：
+
+| 字面量 | 图里宽度 | 旧写法算出的方框宽 |
+|---|---|---|
+| `[ ]` | 15.95pt | **16.00pt**（`max(16, 15.95)`） |
+| `[x]` | 20.09pt | **20.09pt** |
+| `[X]` | 22.71pt | **22.71pt** |
+
+于是**点一下 `[ ]` → `[x]`，方框就从 16pt 长到 20.09pt**，多出来 4.1pt。
+`[X]`（大写）更夸张，长 6.7pt。
+
+**宽度本来就不该跟「当前状态」走** —— 同一份文档里、勾上没勾上的复选框，
+在用户眼里就是同一种控件，尺寸必须一样。
+
+顺带一提：同一份文档里同时有勾上和没勾的项时，**不用点就已经一宽一窄**了，
+这也是同一个根因。
+
+### 13.3 怎么修的
+
+分两件事，第一件是根因，第二件是顺手把对勾也变成可控的。
+
+**① 宽度只跟字体有关，跟状态无关**（`MarkdownTextView.swift`）。
+
+把三种字面量都量一遍、取最宽的那个，全场共用这一个定值：
+
+```swift
+// positionCheckboxes() 里，循环之前算一次
+let coverWidth = checkboxCoverWidth(side: side)
+
+private func checkboxCoverWidth(side: CGFloat) -> CGFloat {
+    guard let font = checkboxLiteralFont() else { return side }
+    let widest = ["[ ]", "[x]", "[X]"]
+        .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
+        .max() ?? 0
+    return max(side, widest)      // 仍要 ≥ 方框边长
+}
+```
+
+字体从 `textStorage` 里那三个字符的实际 `.font` 属性读（整篇正文同一套字体，量第一个就够），
+所以主题改字号、改字体，这里自动跟着变，不用写死数字。
+
+> **2026-09-18 补充**：同一天晚些时候默认改成了「**不遮盖**」——复选框不再压住 `[x]`，
+> 而是坐在 `- ` 和 `[x]` 之间留出来的一块「座位」上（用户要的排布）。
+> 于是 `checkboxCoverWidth` 这套宽度只对 `coversCheckboxLiteral = true` 的老模式还有意义；
+> 新默认路径下方框宽度恒等于 `checkboxSide`，压根没有「变宽」的余地。
+> 详见 `doc/任务列表渲染方案.md` 末尾的「实际实现」一节。
+
+**② 对勾改成自己画**（`CheckboxControl.swift`）。
+
+原来用 `UIImage(systemName: "checkmark", withConfiguration:)`，
+大小由 `configuration.pointSize` 定死，**和方框边长没有任何关系** ——
+而方框边长是主题里可配的（`taskList.checkboxSide`）。符号不会跟着方框变，
+只能写一个「凑出来正好」的 pointSize 去碰运气；系统换一套符号度量就偏了。
+
+改成按方框边长算笔画粗细和留白、用 `UIGraphicsImageRenderer` 画一张 `side × side` 的图：
+
+```swift
+let lineWidth = max(1, side * 0.14)     // 笔画粗细
+let inset = side * 0.26                 // 四周留白
+// 一个普通的对勾：左边起笔偏下 → 下方折点 → 右边收笔偏上
+path.move(to: CGPoint(x: inset, y: side * 0.53))
+path.addLine(to: CGPoint(x: side * 0.42, y: side - inset))
+path.addLine(to: CGPoint(x: side - inset, y: inset))
+```
+
+画成黑色 + `.alwaysTemplate` —— 颜色照旧由 `tintColor`（主题的 `checkmarkColor`）决定，
+所以换主题、切深浅色都不用动这里。
+
+### 13.4 怎么验证的
+
+先写了个**探针单测**（用完就删），把四样东西并排打出来：
+
+```
+[PROBE] before #0 literal=[ ] checked=false literalW=15.953663476293599 buttonW=16.0
+[PROBE] before #1 literal=[x] checked=true  literalW=20.0874525387936 buttonW=20.0874525387936
+[PROBE] before #2 literal=[X] checked=true  literalW=22.7104994137936 buttonW=22.7104994137936
+[PROBE] before symbolImageSize=(13.0, 12.0)      ← 对勾图片本身恒定，压根没变
+```
+
+一句 `print` 就把「不是符号的锅、是方框的锅」钉死了 —— **别照着用户的猜测去查**，
+先把事实打出来。
+
+然后补了 3 条正式回归测试：
+
+| 测试 | 盯的是什么 |
+|---|---|
+| `testCheckboxWidthDoesNotDependOnCheckedState` | 同一份文档里 `[ ]` / `[x]` / `[X]` 三项的方框**必须一样宽**，且不窄于要盖住的字面量 |
+| `testCheckboxWidthStaysAfterToggling` | **用户看到变化的正是点击那一刻**：点一下 `[ ]` 变 `[x]`，宽度不许变 |
+| `testCheckmarkIsSelfDrawnSquareWithinBox` | 对勾是自绘的：正方形、不比如框高、走模板模式（颜色交给 tintColor） |
+
+**反向验证**：把宽度改回 `max(side, literal.width)` 再跑 ——
+2 条宽度测试变红，报的就是用户看到的那组数：
+
+```
+实际宽度：[16.0, 20.0874525387936, 22.7104994137936]
+点一下 `[ ]` 变 `[x]`，方框宽度不该跟着变：("Optional(20.087...)") is not equal to ("Optional(16.0)")
+```
+
+还原后全绿。回归：全量 **235 条 0 失败**；Catalyst / iOS 双平台编译通过；用户真实文稿目录未被写。
+
+### 13.5 以后注意什么
+
+1. **浮在文本上的控件，尺寸别从「当前状态对应的文本度量」里算。**
+   这里的 `literal.width` 就是「当前状态对应的度量」—— 状态一变它就变，
+   控件跟着跳。这类量应该是**常量**（只跟字体 / 主题有关），循环外算一次、全场共用。
+2. **用户报的根因未必是根因。** 这次原话指着 SF Symbol 说「点击后变宽」，
+   但探针打出来符号尺寸 `(13, 12)` 从头到尾没动过。**先把事实打出来，再动手。**
+3. **别让控件的尺寸依赖某个「凑出来的数字」。** 旧的 `pointSize: 11` 就是凑的：
+   它和方框边长（主题可配）之间没有任何关系，改主题就会对不上。
+   能按比例算就别写死。
+4. 自绘图 + `.alwaysTemplate` 是个好组合：**形状自己定，颜色还给 `tintColor`**，
+   浅色深色、换主题都不用另写一遍。
+
+---
+
+## 14. 任务项里按一次退格，`- [ ] ` 整段被吃掉（2026-09-18）★
+
+### 14.1 现象
+
+源码只有一行 `- [ ] 未完成的项`，光标停在 `]` 的右边，按一次删除键：
+
+- **源码**：`- [ ] 未完成的项` → `未完成的项`（列表标记 `- ` **也被吃了**）
+- **屏幕**：只剩一个没勾选的空复选框 + 「未完成的项」，要等下次滚动才干净
+
+（这是两个 bug 叠出来的同一个现场：删除范围算大了 + 装饰层没及时重刷。）
+
+### 14.2 类比
+
+`- ` 和 `[ ] ` 是两根挨着的短木条，中间垫着一块**透明塑料块**（复选框座位）。
+退格的规则是「碰到木条，就把它那一根整根抽走」。塑料块一旦也被当成木条，
+三样就粘成了一根长木条 —— 一抽，整根全出来。
+
+### 14.3 根因（两层）
+
+1. `RenderedFragment.decorationAttachment(...)` 给**每一个**装饰附件都无条件打了
+   `.markdownSyntaxMarker`。这个属性本来是给引用竖条、代码块背景这类**真·结构装饰**
+   准备的（删它们就该整段删），但复选框座位只是个**占位**，于是它把左边 `- `
+   和右边 `[ ] ` 两段**本来独立**的标记粘成了一段连续标记。
+2. `MarkdownDocumentStore.expandedSyntaxMarkerRange` 扩展删除范围时只看「有没有标记」，
+   不认座位，于是一路从 `]` 扩到 `- ` 前面。
+3. 附带一层：装饰层（复选框按钮、代码块背景、引用竖条）只在 `layoutSubviews` 里刷新，
+   而 TextKit 2 的 `performEditingTransaction` 改文本**不保证**让 textView 重新布局 ——
+   渲染文本里座位已经没了，屏幕上那个按钮却一直留着。
+
+探针把渲染文本按「属性 run」打出来，一眼就看见座位被标了：
+
+```
+i=0 len=2 marker=true  ch="- "
+i=2 len=1 marker=true  seat=true  att=CheckboxSeatAttachment   ← 座位也带语法标记
+i=3 len=3 marker=true  box=true   ch="[ ]"
+i=6 len=1 marker=true  ch=" "
+```
+
+### 14.4 修法（四处，都很小）
+
+| 文件 | 改动 |
+|---|---|
+| `Rendering/RenderedFragment.swift` | `decorationAttachment` 多一个 `isSyntaxMarker: Bool = true` 参数；座位这类占位传 `false` |
+| `Rendering/MarkupToAttributedRenderer.swift` | 座位调用点传 `isSyntaxMarker: false` |
+| `Model/MarkdownDocumentStore.swift` | 扩展时**碰到座位就停**；起点落在座位上时先往后挪一格（座位不占源码，直接删它算出的范围是空的，表现为「按了没反应」） |
+| `Editing/MarkdownTextView.swift` | `applyEdit` 末尾补 `setNeedsLayout()` + `updateCodeBlockDecorationsIfNeeded()` |
+
+修完的行为：
+
+| 光标位置 | 源码变化 | 说明 |
+|---|---|---|
+| `]` 右边 | `- [ ] 未完成的项` → `- 未完成的项` | 只走复选框那几个字符，列表标记留着 |
+| 座位上 | 同上 | 座位属于它右边那一段 |
+| `- ` 里 | `- [ ] 未完成的项` → `[ ] 未完成的项` | 整段 `- ` 走掉，这一行降级成普通段落（和普通列表项圆点一致） |
+
+### 14.5 为什么不这样做
+
+- **没照搬 TextKit 1 参考项目**（`markdown_textkit1_qwen3.8max`）的「删一个字符就删一个字符」：
+  那个版本没有 `.markdownSyntaxMarker` 这套机制，删一下会留下 `- [ 未完成的项` 这种半截标记，
+  既不是任务项也不是普通句子。本项目「碰到结构标记就整段删」的设计更合理，保留。
+- **没只改扩展逻辑、让座位继续带标记**：那样删除行为也能对，但「座位是语法标记」这个说法本身是错的 ——
+  下次再往标记中间夹一个新装饰，同样的坑会再来一次。属性层改对 + 扩展层兜底，两道都留着。
+
+### 14.6 性能
+
+`applyEdit` 多调了一次装饰层重算。但 `needsCodeBlockRefresh = true` 本来就会在**下一次**
+layout 里触发同一件事，这次只是把「下一次」提前到「这一次」，没有新增量级。
+
+### 14.7 怎么验证
+
+新增 5 条回归测试放在**新文件** `MarkdownEditorHy4Tests/TaskListBackspaceTests.swift`
+（新加测试文件不用改 pbxproj）：
+
+| 测试 | 盯的是什么 |
+|---|---|
+| `testBackspaceAfterBracketKeepsListMarker` | `]` 右边退格 → 源码必须正好是 `- 未完成的项\n` |
+| `testBackspaceOnSeatDeletesCheckboxLiteral` | 座位上的退格 → 同样删掉 `[ ] `，不许变成空操作 |
+| `testBackspaceOnListMarkerDegradesToParagraph` | `- ` 里退格 → 整段走掉，降级成段落 |
+| `testCheckboxButtonDisappearsImmediatelyAfterDelete` | 删掉最后一个任务项后，按钮必须**立刻**从屏幕上消失 |
+| `testCheckboxSeatIsNotSyntaxMarker` | 机制层护栏：座位不许带 `.markdownSyntaxMarker` |
+
+**反向验证**跑了两轮，确认每条修复都有测试钉着：
+
+- 座位改回 `isSyntaxMarker: true` → `testCheckboxSeatIsNotSyntaxMarker` 变红
+- 注掉 `setNeedsLayout()` + `updateCodeBlockDecorationsIfNeeded()` →
+  `testCheckboxButtonDisappearsImmediatelyAfterDelete` 变红
+
+### 14.8 以后注意什么
+
+1. **装饰附件要分两类**：真·结构装饰（删它就该整段删）vs 纯占位（绝不能算标记）。
+   `decorationAttachment` 的默认值是给前者用的，后者必须**显式**关掉，
+   并且在代码里写清楚为什么 —— 不然下次有人「统一一下」就把它改回去了。
+2. **「向两侧扩展直到属性断掉」这类逻辑，一定要问一句：中间会不会夹着别的东西。**
+   本次是座位，下次可能是图片占位、折叠三角 ⋯ 任何一个装饰。
+3. **改了文本就主动刷一次装饰层。** TextKit 改文本 ≠ view 会重新布局 ——
+   「数据对了，屏幕没跟上」这种 bug 全靠这一条防。
+
+---
+
+## 附 0：右侧标签条那两个做不到的事（库接口缺口）
+
+不计入 bug 编号 —— 这不是哪次改坏的，是一个**一直存在、目前只能绕**的边界。
+
+右侧那条标签由一个外部组件管（`MultiTabController`，仓库 `wooodypan/iOSDemoHub`）。
+它通过 SPM 远端依赖接进来（接法见第 6.4 节），本工程碰不到它的 `private` 成员，
+所以下面两件事做不了：
+
+| 想做的事 | 卡在哪 | 现在怎么绕 |
+|---|---|---|
+| 给文档起名后，**标签上的标题跟着改** | 标签标题存在库内部的 `tabs[].item.title`（`private`）；对外只有 `openPreview` / `openNewTab` 这类「开」的入口，没有「改」的 | 左栏 / 窗口标题 / 左下角状态栏全都会变，只有标签条上那个字不变；在 `doc/功能说明.md` 里如实写明了 |
+| 删掉文档后，**关掉右边对应的标签** | `DetailHostViewController.closeTab(withID:)` 是 `private`，没有对外接口 | 删除确认框里提醒用户自己点标签上的 × |
+
+**要根治就得给库加两个公开方法**（改完 push 到 `wooodypan/iOSDemoHub` 的 master，
+本工程 `swift package resolve` 一下就能用）：
+
+```swift
+// DetailHostViewController 里
+public func updateContent(_ item: PPContentItem, forContentID id: String)  // 改标题用
+public func closeTab(withContentID id: String)                            // 关标签用
+```
+
+⚠️ **push 之前别在 App 侧调用它们**：本工程锁的是 `master` 上那个具体提交
+（`Package.resolved` 里记着），没 push 的话这边编译不过。
+
+---
+
 ## 附 1：名词小词典
 
 | 词 | 大白话 |
@@ -333,6 +1555,9 @@ iOS 的文本系统（TextKit 2）是**按需排版**的 —— 只排当前这�
 | **快照** | 某个时间点拍下来的一份数据副本。文档一改，它就可能过期 |
 | **标题指纹 / `headingFingerprint`** | 给整篇标题拍的一张「位置 + 层级 + 文字」的清单。两张比一比就知道目录要不要刷新 |
 | **目录 / 大纲（outline）** | 右侧那个列出所有标题、点了能跳过去的悬浮组件 |
+| **cell / cell 复用** | 列表里「一行」的视图对象。系统只会为**屏幕上看得见**的行创建几个，滚出屏幕的会被回收、拿去显示新滚进来的行 —— 所以一个 cell 对象会「先后代表好几行」，每次复用都必须把上一行的状态清干净 |
+| **快照（两种含义）** | ①（第 1 条）某个时间点拍下来的数据副本，文档一改就可能过期；②（第 5 条）`NSDiffableDataSourceSectionSnapshot`，交给列表控件的「这次该显示哪些行、谁折着」的一份交代 |
+| **全部折叠 / 全部展开** | 目录标题栏上的按钮，一刀切地收起 / 放出所有带下级的章节。只动目录列表，不动正文 |
 | **块（block）** | 编辑器把整篇 markdown 切成的一段一段，比如一个标题、一个段落、一个代码块。**每个块在编辑后都会被重新创建**，它的 `id`（UUID）也跟着换新 |
 
 ## 附 2：本次改动文件清单

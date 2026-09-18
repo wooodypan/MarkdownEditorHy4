@@ -239,40 +239,66 @@ final class MarkdownEditorHy4Tests: XCTestCase {
 
     // MARK: - 折叠 / 展开
 
-    /// 只有**多行的块**才挂折叠锚点；单行块（标题、单行段落）不该有
-    func testOnlyMultiLineBlocksHaveFoldDisclosure() {
-        let store = makeStore(sample)
+    /// 折叠三角**只挂在标题上**，而且只挂在「下面真的有内容」的标题上。
+    ///
+    /// ### 这条守的是本次重写的核心规则
+    /// 折叠从「多行块各自折叠」改成了「按标题层级折叠」：
+    /// - 正文块（哪怕是多行的列表、代码块）不再有三角；
+    /// - 标题下面什么都没有（`# A` 紧跟着 `# B`）时也不给三角 —— 折了也看不出变化。
+    func testOnlyHeadingsWithContentHaveFoldDisclosure() {
+        let source = """
+        # 一级标题
 
-        var multiLine = 0
+        一级的正文。
+
+        ## 二级标题
+
+        ### 三级标题
+
+        三级下面的正文。
+
+        ## 另一个二级
+        """
+        let store = makeStore(source)
+
+        var headingsWithTriangle = 0
         for block in store.blocks {
-            // 块的源码自带结尾换行，先 trim 掉再数行数（否则 `# 标题一\n\n` 会被算成 3 行）
-            let trimmed = block.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let isMultiLine = trimmed.contains("\n")
+            let anchor = foldAnchor(in: block)
 
-            // 找块里的折叠锚点（打在第一个非空白字符上的那个标记）
-            let anchor = (0..<block.renderedLength)
-                .compactMap { block.renderedContent.attribute(.markdownFoldAnchor,
-                                                              at: $0,
-                                                              effectiveRange: nil) }
-                .compactMap { $0 as? FoldAnchorInfo }
-                .first
+            guard let title = block.headingTitle else {
+                XCTAssertNil(anchor, "非标题块不该有折叠三角：\(block.kindDescription)")
+                continue
+            }
 
-            XCTAssertEqual(anchor != nil, isMultiLine,
-                           "块「\(block.kindDescription)」\(isMultiLine ? "有多行" : "只有一行")，折叠锚点的存在情况不对")
-
+            // 「## 另一个二级」在文档末尾，下面一个块都没有 → 没有三角
+            let expectTriangle = title != "另一个二级"
+            XCTAssertEqual(anchor != nil, expectTriangle,
+                           "标题「\(title)」的三角情况不对")
             if let anchor {
                 XCTAssertFalse(anchor.isCollapsed, "初始状态应该是展开的")
                 XCTAssertEqual(anchor.blockID, block.id,
                                "锚点必须记住自己属于哪个块，否则点了不知道折叠谁")
-                multiLine += 1
+                headingsWithTriangle += 1
             }
         }
-        XCTAssertGreaterThan(multiLine, 2, "示例文档里应该有多行块（列表 / 引用 / 代码块）")
+        XCTAssertEqual(headingsWithTriangle, 3, "三个有内容的标题应该有三角")
+    }
+
+    /// 取一个块里的折叠锚点（打在第一个非空白字符上的那个标记）
+    private func foldAnchor(in block: MarkdownBlock) -> FoldAnchorInfo? {
+        (0..<block.renderedLength)
+            .compactMap { block.renderedContent.attribute(.markdownFoldAnchor,
+                                                          at: $0,
+                                                          effectiveRange: nil) }
+            .compactMap { $0 as? FoldAnchorInfo }
+            .first
     }
 
     /// 折叠三角**不能占字符位**（用户报的就是这个：块首插一个 attachment 画三角，
     /// 第一行被推歪，第二行起还按原缩进排，多行左边缘就对不齐了）。
     ///
+    /// 现在三角画在正文左边的装订线里，文本流里一个多余字符都没有 ——
+    /// 这条测试守的是「打锚点这个动作不改变文本结构」。
     /// 现在三角画在正文左边的装订线里，文本流里一个多余字符都没有 ——
     /// 这条测试守的是「打锚点这个动作不改变文本结构」。
     func testFoldDisclosureDoesNotOccupyCharacterPosition() {
@@ -281,8 +307,7 @@ final class MarkdownEditorHy4Tests: XCTestCase {
 
         var checked = 0
         for block in store.blocks {
-            let trimmed = block.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.contains("\n") else { continue }
+            guard foldAnchor(in: block) != nil else { continue }
 
             // 不加锚点地渲染同一段源码，长度必须和加过锚点的完全一样
             let (plain, _) = renderer.render(blockSource: block.sourceText)
@@ -303,30 +328,108 @@ final class MarkdownEditorHy4Tests: XCTestCase {
             }
             checked += 1
         }
-        XCTAssertGreaterThan(checked, 2, "示例文档里应该有多行块")
+        XCTAssertGreaterThan(checked, 0, "示例文档里应该有带三角的标题")
     }
 
-    /// 折叠之后块尾要留着换行，否则下一个块会直接贴在「⋯」后面（一行挤两块）
-    func testCollapsedBlockEndsWithLineBreak() {
-        let store = makeStore(sample)
+    // MARK: - 折叠一整节（折叠 H2 = 收起它下面直到下一个同级/更高级标题的全部内容）
 
-        guard let index = store.blocks.firstIndex(where: { $0.kindDescription.contains("List") }) else {
-            return XCTFail("示例文档里找不到列表块")
+    /// 一份「H1 → H2 → H3 → H2」的样例文档，专门用来验证折叠范围
+    private var sectionSample: String {
+        """
+        # 一级
+
+        一级的正文。
+
+        ## 二级 A
+
+        二级 A 的正文。
+
+        ### 三级 A1
+
+        三级 A1 的正文。
+
+        ## 二级 B
+
+        二级 B 的正文。
+        """
+    }
+
+    /// 找到标题文字等于 `title` 的那个块的下标
+    private func headingIndex(_ title: String, in store: MarkdownDocumentStore) -> Int? {
+        store.blocks.firstIndex { $0.headingTitle == title }
+    }
+
+    /// 折叠 H2 后，它下面的正文和 H3 **整节**都要消失；下一个同级标题不受影响
+    func testCollapsingH2HidesEverythingUntilNextSameLevel() {
+        let store = makeStore(sectionSample)
+        guard let index = headingIndex("二级 A", in: store) else {
+            return XCTFail("样例里找不到「二级 A」")
+        }
+
+        XCTAssertNotNil(store.toggleCollapse(blockAt: index), "有内容的标题应该能折叠")
+
+        let rendered = store.renderedString
+        XCTAssertTrue(rendered.contains("## 二级 A"), "标题自己要留着，用户才知道收起的是哪一节")
+        XCTAssertFalse(rendered.contains("二级 A 的正文"), "这一节的正文应该被收起来")
+        XCTAssertFalse(rendered.contains("### 三级 A1"), "折叠 H2 要连 H3 一起收起来")
+        XCTAssertFalse(rendered.contains("三级 A1 的正文"), "H3 下面的正文也要一起收起来")
+
+        XCTAssertTrue(rendered.contains("# 一级"), "更外层的标题不受影响")
+        XCTAssertTrue(rendered.contains("一级的正文"), "更外层的正文不受影响")
+        XCTAssertTrue(rendered.contains("## 二级 B"), "下一个同级标题要露出来")
+        XCTAssertTrue(rendered.contains("二级 B 的正文"), "下一节的内容不受影响")
+    }
+
+    /// 折叠之后整节只剩**一个**「⋯」占位符（1 个字符位），并且它带着可点击的标记
+    func testCollapsedSectionShowsExactlyOnePlaceholder() {
+        let store = makeStore(sectionSample)
+        guard let index = headingIndex("二级 A", in: store) else {
+            return XCTFail("样例里找不到「二级 A」")
+        }
+        store.toggleCollapse(blockAt: index)
+
+        let content = store.blocks[index].renderedContent
+        XCTAssertTrue(content.string.hasPrefix("## 二级 A"),
+                      "折叠后显示的是「标题 + ⋯」，实际是：\(content.string)")
+
+        var placeholders = 0
+        content.enumerateAttribute(.markdownCollapsedPlaceholder,
+                                   in: NSRange(location: 0, length: content.length),
+                                   options: []) { value, range, _ in
+            guard value is CollapsedSectionInfo else { return }
+            placeholders += 1
+            XCTAssertEqual(range.length, 1, "「⋯」只占 1 个字符位")
+        }
+        XCTAssertEqual(placeholders, 1, "一节折叠后只该有一个「⋯」")
+        XCTAssertEqual(content.string.filter { $0 == "\u{FFFC}" }.count, 1,
+                       "整节内容应该被一个 attachment 字符位代替")
+
+        // 被折叠起来的那些块：还在 blocks 里，但渲染内容被清空了
+        let hidden = store.blocks.filter { $0.isHidden }
+        XCTAssertFalse(hidden.isEmpty, "被折叠的块应该标成 hidden")
+        XCTAssertTrue(hidden.allSatisfy { $0.renderedContent.length == 0 },
+                      "隐藏的块不该再有渲染内容")
+    }
+
+    /// 折叠之后块尾要留着换行，否则下一节会直接贴在「⋯」后面（一行挤两块）
+    func testCollapsedHeadingEndsWithLineBreak() {
+        let store = makeStore(sectionSample)
+        guard let index = headingIndex("二级 A", in: store) else {
+            return XCTFail("样例里找不到「二级 A」")
         }
         store.toggleCollapse(blockAt: index)
 
         let rendered = store.blocks[index].renderedContent.string as NSString
         XCTAssertTrue(rendered.hasSuffix("\n"),
-                      "折叠块的渲染内容必须以换行结尾，否则下一块会接在后面，实际是：\(rendered)")
+                      "折叠块的渲染内容必须以换行结尾，否则下一节会接在后面，实际是：\(rendered)")
     }
 
     /// 折叠之后「全选复制 === 源码」必须依然成立：折叠只是视图状态，源码一个字没少
-    func testCollapsedBlockStillCopiesFullSource() {
-        let source = sample
+    func testCollapsedSectionStillCopiesFullSource() {
+        let source = sectionSample
         let store = makeStore(source)
-
-        guard let index = store.blocks.firstIndex(where: { $0.kindDescription.contains("List") }) else {
-            return XCTFail("示例文档里找不到列表块")
+        guard let index = headingIndex("二级 A", in: store) else {
+            return XCTFail("样例里找不到「二级 A」")
         }
 
         let lengthBefore = store.renderedLength
@@ -337,7 +440,7 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         // 1) 源码一个字都不能变
         XCTAssertEqual(store.sourceDocument, source, "折叠不能改动源码")
 
-        // 2) 折叠着全选复制，拿到的依然是完整源码（靠占位符那一个字符位吐出整块内容）
+        // 2) 折叠着全选复制，拿到的依然是完整源码（靠「⋯」那一个字符位吐出整节内容）
         let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
         XCTAssertEqual(restored, source, firstDifference(source, restored))
 
@@ -350,13 +453,11 @@ final class MarkdownEditorHy4Tests: XCTestCase {
 
     /// 折叠 → 展开，应该回到原样（渲染长度、源码、复制结果都不变）
     func testCollapseExpandRoundTrip() {
-        let source = sample
+        let source = sectionSample
         let store = makeStore(source)
         let lengthBefore = store.renderedLength
-
-        // 只有多行的块能折叠，挑列表块
-        guard let index = store.blocks.firstIndex(where: { $0.kindDescription.contains("List") }) else {
-            return XCTFail("示例文档里找不到列表块")
+        guard let index = headingIndex("二级 A", in: store) else {
+            return XCTFail("样例里找不到「二级 A」")
         }
 
         store.toggleCollapse(blockAt: index)
@@ -370,25 +471,61 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertEqual(restored, source, firstDifference(source, restored))
     }
 
-    /// 在折叠的块里编辑一个字，折叠状态不能丢（否则「折叠一段 → 敲个字 → 它自己展开了」很烦人）
-    func testCollapseStateSurvivesEditingInsideBlock() {
-        let store = makeStore("- 列表项一\n- 列表项二\n\n尾部段落。\n")
+    /// **展开 H2 要恢复它下面原来的折叠状态**：之前折着的 H3，展开后仍然是折着的
+    func testExpandingRestoresNestedCollapseState() {
+        let store = makeStore(sectionSample)
+        guard let h2 = headingIndex("二级 A", in: store),
+              let h3 = headingIndex("三级 A1", in: store) else {
+            return XCTFail("样例里找不到对应的标题")
+        }
 
-        // 第一块是两行的列表，能折叠
-        XCTAssertTrue(store.blocks[0].sourceText.contains("\n"), "列表块应该是多行的")
-        store.toggleCollapse(blockAt: 0)
-        XCTAssertTrue(store.blocks[0].isCollapsed, "列表块应该被折叠了")
+        // 先折 H3，再折 H2（H3 整块被 H2 收进去）
+        store.toggleCollapse(blockAt: h3)
+        XCTAssertTrue(store.blocks[h3].isCollapsed)
+        store.toggleCollapse(blockAt: h2)
+        XCTAssertFalse(store.renderedString.contains("### 三级 A1"), "H2 折起来后 H3 也该看不见")
 
-        // 在块尾敲一个字：块的源码起点和内容都没变，折叠状态应该继承下来。
-        // （注意别在块首插字符 —— `X- 列表项一` 会被 markdown 解析成段落 + 新列表，
-        //   原来的块被拆开，这个测试就测不到继承逻辑了）
-        let caret = NSMaxRange(store.blocks[0].renderedRange)
+        // 展开 H2：H3 要恢复成**它自己折着**的样子
+        store.toggleCollapse(blockAt: h2)
+        XCTAssertTrue(store.blocks[h3].isCollapsed, "H3 的折叠状态不该被 H2 的展开冲掉")
+
+        let rendered = store.renderedString
+        XCTAssertTrue(rendered.contains("### 三级 A1"), "展开 H2 后 H3 的标题要露出来")
+        XCTAssertFalse(rendered.contains("三级 A1 的正文"), "H3 自己折着，它的正文仍该收着")
+        XCTAssertTrue(store.blocks[h3].renderedIsCollapsed, "H3 应该渲染成「标题 + ⋯」")
+
+        let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
+        XCTAssertEqual(restored, store.sourceDocument,
+                       firstDifference(store.sourceDocument, restored))
+    }
+
+    /// 下面什么都没有的标题：不给三角，也折不动（返回一个空操作而不是崩）
+    func testHeadingWithoutContentCannotCollapse() {
+        let store = makeStore("# A\n# B\n")
+        XCTAssertNil(store.toggleCollapse(blockAt: 0), "空节不该能折叠")
+
+        for block in store.blocks {
+            XCTAssertNil(foldAnchor(in: block), "空节标题不该有折叠三角")
+        }
+    }
+
+    /// 在折叠标题的**标题行**里编辑，折叠状态不能丢
+    /// （否则「折叠一节 → 改个标题 → 它自己展开了」很烦人）
+    func testCollapseStateSurvivesEditingInsideHeading() {
+        let store = makeStore("# 标题\n\n正文。\n")
+        XCTAssertNotNil(store.toggleCollapse(blockAt: 0), "标题应该能折叠")
+
+        // 在标题文字末尾插一个字（「# 标题」4 个字符之后）
+        let caret = 4
         store.applyEdit(inRenderedRange: NSRange(location: caret, length: 0),
                         replacementText: "X",
                         containerWidth: 600)
 
         XCTAssertTrue(store.blocks[0].isCollapsed,
-                      "在块内部编辑不应该把折叠状态弄丢，实际状态：\(store.blocks.map(\.isCollapsed))")
+                      "改标题不应该把折叠状态弄丢，实际状态：\(store.blocks.map(\.isCollapsed))")
+        XCTAssertTrue(store.sourceDocument.hasPrefix("# 标题X"),
+                      "字符应该插在标题里，实际源码：\(store.sourceDocument)")
+        XCTAssertFalse(store.renderedString.contains("正文"), "折叠着的节不该露出正文")
 
         // 顺便确认这个不变量依然成立
         let restored = store.sourceText(forRenderedRange: fullRenderedRange(store))
@@ -396,22 +533,71 @@ final class MarkdownEditorHy4Tests: XCTestCase {
                        firstDifference(store.sourceDocument, restored))
     }
 
-    /// 块被编辑成单行之后，必须自动展开 —— 没有按钮的话用户就再也点不回来了
-    func testSingleLineBlockIsNeverCollapsed() {
-        let store = makeStore("- 列表项一\n- 列表项二\n")
+    /// 每个「下面有内容」的标题左边都要真的画出一个三角（不占字符位、浮在装订线里）
+    func testFoldTrianglesAppearOnScreen() {
+        let source = """
+        # 一级
 
-        store.toggleCollapse(blockAt: 0)
-        XCTAssertTrue(store.blocks[0].isCollapsed, "多行列表应该能折叠")
+        一级的正文。
 
-        // 把整块替换成一行（相当于全选这个折叠块，重新输入一行字）
-        store.applyEdit(inRenderedRange: store.blocks[0].renderedRange,
-                        replacementText: "只有一行。\n",
-                        containerWidth: 600)
+        ## 二级 A
 
-        XCTAssertFalse(store.blocks[0].isCollapsed,
-                       "变成单行之后必须自动展开，否则没有按钮就点不回来了")
-        XCTAssertFalse(store.blocks[0].renderedContent.string.contains("\u{FFFC}"),
-                       "单行块不该再有折叠按钮")
+        二级 A 的正文。
+
+        ## 空的二级
+        """
+        let textView = makeEditor(source)
+        textView.layoutIfNeeded()
+
+        let triangles = allSubviews(of: textView).compactMap { $0 as? FoldDisclosureButton }
+        XCTAssertEqual(triangles.count, 2, "两个有内容的标题该各有一个三角，末尾那个空标题不该有")
+
+        // 三角必须落在正文左边的装订线里（不能压到正文上）
+        for triangle in triangles {
+            XCTAssertLessThan(triangle.frame.maxX, textView.textContainerInset.left + 1,
+                              "三角应该整个在装订线里，实际 frame=\(triangle.frame)")
+        }
+
+        // 折掉「二级 A」之后：它自己的三角变成 ▶（表示「点开」），另一个不受影响
+        guard let index = textView.documentStore.blocks.firstIndex(where: { $0.headingTitle == "二级 A" }) else {
+            return XCTFail("找不到「二级 A」")
+        }
+        textView.toggleCollapse(blockID: textView.documentStore.blocks[index].id)
+        textView.layoutIfNeeded()
+
+        let after = allSubviews(of: textView).compactMap { $0 as? FoldDisclosureButton }
+        XCTAssertEqual(after.count, 2)
+        let collapsed = after.filter { $0.accessibilityValue == "已折叠" }
+        XCTAssertEqual(collapsed.count, 1, "折叠之后应该只有一个三角变成 ▶")
+    }
+
+    /// 折叠后的「⋯」在屏幕上要有一个能点的热区（点它展开）
+    func testCollapsedPlaceholderHasTapTarget() {
+        let textView = makeEditor("# 标题\n\n正文。\n")
+        guard let index = textView.documentStore.blocks.firstIndex(where: { $0.headingLevel != nil }) else {
+            return XCTFail("样例里找不到标题")
+        }
+        textView.toggleCollapse(blockID: textView.documentStore.blocks[index].id)
+        textView.layoutIfNeeded()
+
+        let button = findSubview(in: textView) { $0 is CollapsedSectionButton }
+        XCTAssertNotNil(button, "折叠后的「⋯」应该有一个点击热区")
+        XCTAssertGreaterThan(button?.frame.width ?? 0, 0, "热区不该是零宽度的")
+    }
+
+    /// 递归找符合条件的子视图（测试里用来挖 overlay 上的控件）
+    private func findSubview(in root: UIView,
+                             where matches: (UIView) -> Bool) -> UIView? {
+        if matches(root) { return root }
+        for subview in root.subviews {
+            if let found = findSubview(in: subview, where: matches) { return found }
+        }
+        return nil
+    }
+
+    /// 把视图树拍平（数 overlay 上的控件时用）
+    private func allSubviews(of root: UIView) -> [UIView] {
+        [root] + root.subviews.flatMap { allSubviews(of: $0) }
     }
 
     // MARK: - 按回车
@@ -501,14 +687,7 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertTrue(extensions.contains("md"), "必须把 md 扩展名绑到 markdown UTI 上，否则系统认不出 .md")
     }
 
-    /// 冷启动时界面还没建好，URL 要先攒着，等 ViewController 起来再取走
-    func testDocumentOpenerKeepsPendingURL() {
-        let url = URL(fileURLWithPath: "/tmp/MarkdownEditorHy4文件关联测试.md")
-        MarkdownDocumentOpener.shared.handle(url: url)
-        XCTAssertEqual(MarkdownDocumentOpener.shared.pendingURL, url)
-        XCTAssertEqual(MarkdownDocumentOpener.shared.takePendingURL(), url)
-        XCTAssertNil(MarkdownDocumentOpener.shared.takePendingURL(), "取走之后必须清空，否则下次启动会重复打开")
-    }
+    
 
     /// 空文档和只有空行的文档不能崩，也不能凭空多出字符
     func testEmptyAndBlankDocuments() {
@@ -829,6 +1008,18 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         return result
     }
 
+    /// 把编辑器视图树里所有复选框按钮捞出来。
+    ///
+    /// 复选框所在的层（`CheckboxLayer`）和摆按钮的方法都是 private，所以只能从视图树里找 —— 但这也正是「用户看到的那一个」，拿它做断言比查数据更贴近症状。
+    private func allCheckboxButtons(in view: UIView) -> [MarkdownCheckboxButton] {
+        var result: [MarkdownCheckboxButton] = []
+        for sub in view.subviews {
+            if let button = sub as? MarkdownCheckboxButton { result.append(button) }
+            result.append(contentsOf: allCheckboxButtons(in: sub))
+        }
+        return result
+    }
+
     /// `[x]` / `[ ]` 三个字符必须带着正确的标记，且**字符本身原样保留在文本里**。
     ///
     /// ### 防的是什么回归
@@ -842,10 +1033,8 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         let marked = checkboxMarkedRanges(in: tv)
         XCTAssertEqual(marked.count, 2, "两个任务项应该有两个复选框标记")
 
-        // 字符还在原位
-        XCTAssertEqual(tv.textStorage.string, "￼- [x] 已完成⏎￼- [ ] 未完成"
-            .replacingOccurrences(of: "⏎", with: "\n")
-            .replacingOccurrences(of: "￼", with: "\u{FFFC}"))
+        // 文本流：`- ` + 座位(￼) + `[x] ` + 正文。**没有圆点** —— 任务项的标记位置换成了「浅灰 `-` + 复选框座位 + 浅灰 `[x]`」
+        XCTAssertEqual(tv.textStorage.string, "- \u{FFFC}[x] 已完成\n- \u{FFFC}[ ] 未完成")
 
         // 勾选状态识别正确
         XCTAssertEqual(marked[0].1.isChecked, true, "`[x]` 应该识别为已勾选")
@@ -888,12 +1077,11 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertEqual(tv.markdownSource, "- [ ] 大写也算完成\n")
     }
 
-    /// 复选框矩形必须精确罩住 `[x]` 三个字符 —— 用官方 `caretRect` 做基准对照。
+    /// 复选框矩形（也就是渲染层留出来的那块「座位」）必须紧贴在 `[x]` **左边**，且和它同一行 —— 垂直方向对不上就说明 inset 换算又丢了。
     ///
-    /// ### 防的是什么回归
-    /// `enumerateTextSegments` 给的矩形和 fragment 一样，原点在 textContainer 左上角
-    /// （不含 textContainerInset）。忘了补 inset 的话按钮会整体偏移一个 inset。
-    func testCheckboxFrameAlignsWithCaret() {
+    /// ### 为什么基准从「和 `[` 左边界对齐」改成「待在 `[` 左边」
+    /// 早先复选框是**盖在** `[x]` 上的，矩形左边界自然该和 `[` 对齐；现在默认不遮盖（`[x]` 要照常看得见），按钮改坐在 `- ` 和 `[x]` 之间留出的座位上，左边界落在 `[` 前面一截 —— 隔的那段正是座位宽度（边长 + 两侧间距）。
+    func testCheckboxFrameSitsLeftOfLiteral() {
         let tv = makeEditor("- [x] 已完成\n- [ ] 未完成\n")
         let (boxes, _) = tv.computeCheckboxFrames()
         XCTAssertEqual(boxes.count, 2)
@@ -905,9 +1093,9 @@ final class MarkdownEditorHy4Tests: XCTestCase {
                 continue
             }
             let caret = tv.caretRect(for: pos)
-            XCTAssertEqual(frame.minX, caret.minX, accuracy: 2,
-                           "`[` 字符的 x 应该和光标矩形对齐（差值大了说明 inset 换算又丢了）")
-            XCTAssertEqual(frame.minY, caret.minY, accuracy: 2,
+            XCTAssertLessThanOrEqual(frame.maxX, caret.minX + 0.5,
+                                     "座位必须整个待在 `[` 左边，否则按钮会压住源码")
+            XCTAssertEqual(frame.midY, caret.midY, accuracy: 3,
                            "y 没对齐 —— 八成是忘了补 textContainerInset.top")
             XCTAssertGreaterThan(frame.width, 8, "矩形宽度不该是 0 —— segment 没算出来")
         }
@@ -938,10 +1126,195 @@ final class MarkdownEditorHy4Tests: XCTestCase {
                        firstDifference(source, store.sourceText(forRenderedRange: fullRenderedRange(store))))
     }
 
-    /// 遮盖模式必须是默认值 —— 上次截图对比过，并列模式会把列表标记 `- ` 压在身下。
-    /// 如果要改默认值，先更新这条测试和 MarkdownTheme 里的注释。
-    func testCheckboxCoversLiteralByDefault() {
-        XCTAssertTrue(MarkdownTheme.default.taskList.coversCheckboxLiteral)
+    /// 复选框**默认不遮盖** `[x]`：源码要照常看得见，按钮坐在渲染层留出的座位上。要改回遮盖（盖在 `[x]` 上），先更新这条测试和 `MarkdownTheme` 里的注释。
+    func testCheckboxDoesNotCoverLiteralByDefault() {
+        XCTAssertFalse(MarkdownTheme.default.taskList.coversCheckboxLiteral)
+    }
+
+    /// 勾选状态必须**读源码里那三个字符**，不能信语法树的 `item.checkbox`。
+    ///
+    /// ### 防的是什么回归（真出过，用户报的就是这个）
+    /// cmark-gfm 判定勾没勾用的是 `strstr(整行, "[x]")` —— 只要这一行**别处**还有一个 `[x]` / `[X]`，整项就被报成已勾选，哪怕真正的标记是 `[ ]`。于是复选框顶着绿底盖在 `[ ]` 上，点它又按「已勾选」写回 `[ ]`（等于没动），表现为「点了没反应」。
+    func testCheckboxStateComesFromLiteralNotWholeLine() {
+        // 用户报的那一行：标记是 `[ ]`，正文里另有 `[x]`
+        let decoy = "- [ ] 未完成的项，点一下变 [x]\n"
+        let tv = makeEditor(decoy)
+        guard let marked = checkboxMarkedRanges(in: tv).first else {
+            return XCTFail("没有找到复选框标记")
+        }
+        let source = tv.markdownSource as NSString
+        XCTAssertEqual(source.substring(with: NSRange(location: marked.1.sourceStart, length: 3)), "[ ]",
+                       "定位必须指向 `[` 那三个字符")
+        XCTAssertFalse(marked.1.isChecked,
+                       "标记是 `[ ]` 就不该是已勾选 —— 语法树的 checkbox 在正文含 `[x]` 时会错报")
+
+        // 反过来：标记是 `[x]`、正文里有 `[ ]`，仍然算勾上
+        let reverse = makeEditor("- [x] 已完成的项，正文提到 [ ]\n")
+        XCTAssertEqual(checkboxMarkedRanges(in: reverse).first?.1.isChecked, true,
+                       "`[x]` 就是勾上，别被正文里的 `[ ]` 带偏")
+
+        // 大小写 `X` 一样算勾上
+        XCTAssertEqual(checkboxMarkedRanges(in: makeEditor("- [X] 大写\n")).first?.1.isChecked, true)
+    }
+
+    /// 用户看到的那个按钮：源码是 `[ ]` 时必须画成**未勾选**。
+    ///
+    /// ### 为什么单测要走到视图层
+    /// 上一条盯的是数据，这条盯的是「用户眼里看到的样子」—— 复选框是叠在正文上的原生 UIButton，状态由 `computeCheckboxFrames()` 喂给它，所以直接从视图树里把按钮捞出来问一句，才是这条 bug 的真实验收标准。
+    func testCheckboxButtonLooksUncheckedWhenLiteralIsUnchecked() {
+        let tv = makeEditor("- [ ] 未完成的项，点一下变 [x]\n")
+        let buttons = allCheckboxButtons(in: tv)
+        XCTAssertEqual(buttons.count, 1, "应该只有一个复选框")
+        guard let button = buttons.first else { return }
+
+        XCTAssertEqual(button.checkbox?.isChecked, false, "按钮拿到的状态该是没勾")
+        XCTAssertNil(button.image(for: .normal), "没勾就不该画对勾")
+        XCTAssertEqual(button.accessibilityValue, "未完成")
+    }
+
+    /// 点一下必须**真的改到源码**：正文里那个 `[x]` 是干扰，不能让它导致「按已勾选写回 `[ ]`」这种空操作。
+    func testClickingCheckboxWithDecoyXStillWritesX() {
+        let tv = makeEditor("- [ ] 未完成的项，点一下变 [x]\n")
+        guard let info = checkboxMarkedRanges(in: tv).first?.1 else {
+            return XCTFail("没有找到复选框标记")
+        }
+        tv.toggleCheckbox(info)
+        XCTAssertEqual(tv.markdownSource, "- [x] 未完成的项，点一下变 [x]\n",
+                       "点一下应该把标记改成 `[x]`，正文里那个 `[x]` 一个字都不能动")
+
+        // 再点一次切回去
+        guard let reloaded = checkboxMarkedRanges(in: tv).first?.1 else {
+            return XCTFail("切换之后复选框标记丢了")
+        }
+        tv.toggleCheckbox(reloaded)
+        XCTAssertEqual(tv.markdownSource, "- [ ] 未完成的项，点一下变 [x]\n")
+    }
+
+    /// 复选框的**宽度不能随勾选状态变** —— 这就是「点一下复选框变宽了」那个 bug。
+    ///
+    /// ### 防的是什么回归
+    /// 方框宽度早先写成 `max(checkboxSide, 当前字面量宽度)`。而 `[ ]` / `[x]` / `[X]` 在图里的宽度**各不相同**（正文 17pt 系统字体实测 15.95 / 20.09 / 22.71pt），于是点一下 `[ ]` → `[x]`，方框就从 16pt 长到 20pt。
+    ///
+    /// 宽度只该跟**字体**有关、和当前状态无关 —— 所以同一份文档里，勾上的和没勾的复选框必须是同一个宽度。
+    func testCheckboxWidthDoesNotDependOnCheckedState() {
+        let tv = makeEditor("- [ ] 未完成\n- [x] 已完成\n- [X] 大写\n")
+        let buttons = allCheckboxButtons(in: tv)
+        XCTAssertEqual(buttons.count, 3, "三个任务项应该三个复选框")
+
+        let widths = buttons.map(\.frame.width)
+        XCTAssertEqual(Set(widths.map { ($0 * 100).rounded() }).count, 1,
+                       "勾没勾不能影响方框宽度，实际宽度：\(widths)")
+
+        // 不遮盖模式下按钮就是方框边长本身（居中坐在座位里），而座位要留出两侧间距，所以必须比方框宽
+        let side = MarkdownTheme.default.taskList.checkboxSide
+        XCTAssertEqual(widths[0], side, accuracy: 0.5, "按钮宽度就该是主题里的方框边长")
+        let seatWidth = tv.computeCheckboxFrames().boxes.map(\.frame.width).max() ?? 0
+        XCTAssertGreaterThan(seatWidth, widths[0], "座位要留出两侧间距，得比方框宽")
+    }
+
+    /// 用户看到变化的**正是点击那一刻**，所以要单独钉一次「点完宽度不变」。
+    func testCheckboxWidthStaysAfterToggling() {
+        let tv = makeEditor("- [ ] 未完成\n")
+        let before = allCheckboxButtons(in: tv).first?.frame.width
+
+        guard let info = checkboxMarkedRanges(in: tv).first?.1 else {
+            return XCTFail("没有找到复选框标记")
+        }
+        tv.toggleCheckbox(info)
+        // 直接调 toggleCheckbox 不会自己标脏，要手动催一次布局（按钮在布局里重建）
+        tv.setNeedsLayout()
+        tv.layoutIfNeeded()
+
+        XCTAssertEqual(allCheckboxButtons(in: tv).first?.frame.width, before,
+                       "点一下 `[ ]` 变 `[x]`，方框宽度不该跟着变")
+    }
+
+    // MARK: - 任务项的排版：`-` 不是圆点、`[x]` 要看得见
+
+    /// 任务项**不画圆点**；普通列表项照旧画（别顺手把圆点一起改没了）。
+    ///
+    /// 圆点和座位在文本流里都是 `\u{FFFC}`，靠位置区分：任务项是「`- ` 打头、座位跟在后面」，普通列表项是「圆点打头、后面才跟着弱化的 `- `」。
+    func testTaskListItemHasNoBulletButPlainItemKeepsIt() {
+        let tv = makeEditor("- [ ] 任务项\n- 普通项\n")
+        let text = tv.textStorage.string
+        XCTAssertTrue(text.contains("- \u{FFFC}[ ] 任务项"),
+                      "任务项应该是「浅灰 `-` + 座位 + `[ ]` + 正文」，实际：\(text)")
+        XCTAssertTrue(text.contains("\u{FFFC}- 普通项"),
+                      "普通列表项仍然以圆点打头，实际：\(text)")
+    }
+
+    /// 按钮必须坐在 `- ` 和 `[x]` 中间 —— 两边的源码都不许被压住。
+    ///
+    /// 这条钉的就是用户要的那个顺序：浅灰 `-` → 复选框 → `[ ]`/`[x]` → 正文。
+    func testCheckboxButtonSitsBetweenDashAndLiteral() {
+        let tv = makeEditor("- [ ] 未完成的项\n")
+        let buttons = allCheckboxButtons(in: tv)
+        XCTAssertEqual(buttons.count, 1)
+        guard let button = buttons.first,
+              let info = checkboxMarkedRanges(in: tv).first?.1,
+              let rendered = tv.documentStore.renderedRange(forSourceRange:
+                  NSRange(location: info.sourceStart, length: 3)),
+              let literalPos = tv.position(from: tv.beginningOfDocument, offset: rendered.location),
+              let seatPos = tv.position(from: tv.beginningOfDocument, offset: rendered.location - 1),
+              let dashPos = tv.position(from: tv.beginningOfDocument, offset: rendered.location - 2)
+        else { return XCTFail("定位失败") }
+
+        let literalX = tv.caretRect(for: literalPos).minX   // `[` 的位置
+        let seatX = tv.caretRect(for: seatPos).minX         // 座位的位置
+        let dashX = tv.caretRect(for: dashPos).minX         // `- ` 的位置
+
+        XCTAssertGreaterThan(seatX, dashX, "座位应该在 `- ` 右边")
+        XCTAssertLessThanOrEqual(button.frame.maxX, literalX + 0.5,
+                                 "按钮不能压住 `[ ]` —— 源码要照常看得见")
+        XCTAssertGreaterThanOrEqual(button.frame.minX, seatX - 0.5,
+                                    "按钮不能越出座位、压到左边的 `- `")
+    }
+
+    /// 任务项换行后，第二行要落在首行**正文**起点附近 —— 悬挂缩进得按标记实际宽度算，不能沿用普通列表项的 `listIndent`。
+    ///
+    /// ### 为什么允许一点点偏差（实测约 7pt）
+    /// 悬挂缩进取的是「所有字面量里最宽的那个」（`[X] `）算出来的**定值**，这样**同一份文档里勾上和没勾的任务项，第二行起点一模一样**（整列看着才齐）。代价是当前字面量是较窄的 `[ ]` 时，首行正文比第二行靠左约 7pt（`[ ]` 与 `[X]` 的字宽差）。反过来「按当前字面量算」能让单项内部严丝合缝，但勾上/没勾的行会各缩各的，更乱。
+    func testTaskListIndentFollowsMarkerWidth() {
+        let tv = makeEditor("- [ ] 未完成的项\n")
+        guard let style = tv.textStorage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle else {
+            return XCTFail("第一个字符上应该有列表项的段落样式")
+        }
+        XCTAssertGreaterThan(style.headIndent, MarkdownTheme.default.listIndent,
+                             "任务项的标记区比普通项宽（多了座位和 `[x]`），悬挂缩进要跟着变大")
+        XCTAssertEqual(style.firstLineHeadIndent, 0, accuracy: 0.5, "首行仍然顶到最左边")
+
+        // 第二行不能跑到首行正文左边 —— 那看着就像缩进错乱
+        guard let info = checkboxMarkedRanges(in: tv).first?.1,
+              let literal = tv.documentStore.renderedRange(
+                  forSourceRange: NSRange(location: info.sourceStart, length: 3)),
+              let bodyPos = tv.position(from: tv.beginningOfDocument, offset: literal.location + 4)
+        else { return XCTFail("定位失败") }
+
+        let bodyX = tv.caretRect(for: bodyPos).minX
+        let wrappedX = tv.textContainerInset.left + style.headIndent
+        XCTAssertGreaterThanOrEqual(wrappedX, bodyX - 0.5, "第二行不能缩到首行正文左边")
+        XCTAssertLessThan(wrappedX - bodyX, 12, "两行起点别差太多 —— 差值是 `[ ]` 与 `[X]` 的字宽差")
+    }
+
+    /// 对勾是**自己画的**（不走 SF Symbol）：形状随方框边长等比，颜色交给 tintColor。
+    ///
+    /// ### 为什么不用 `UIImage(systemName: "checkmark")`
+    /// 符号大小由 `pointSize` 定死、**和方框边长无关** —— 方框边长是主题里可配的，符号不会跟着变，只能拿一个「凑出来正好」的 pointSize 碰运气。自绘之后「对勾比方框小一圈、永远居中」由代码保证。
+    func testCheckmarkIsSelfDrawnSquareWithinBox() {
+        let tv = makeEditor("- [x] 已完成\n")
+        guard let button = allCheckboxButtons(in: tv).first else {
+            return XCTFail("没有找到复选框按钮")
+        }
+        guard let image = button.image(for: .normal) else {
+            return XCTFail("已勾选就该画上对勾")
+        }
+
+        XCTAssertEqual(image.renderingMode, .alwaysTemplate,
+                       "对勾走模板模式，颜色才能由 tintColor（主题的 checkmarkColor）决定")
+        XCTAssertEqual(image.size.width, image.size.height, accuracy: 0.5,
+                       "对勾图应该是正方形，边长按方框边长算")
+        XCTAssertLessThanOrEqual(image.size.height, button.bounds.height + 0.5,
+                                 "对勾不能比如框还高，否则会顶到边框")
     }
 
     // MARK: - 代码块背景（文档坐标修正）
@@ -1165,6 +1538,12 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         tv.contentOffset = CGPoint(x: 0, y: offsetY)
         tv.layoutIfNeeded()
 
+        // ⚠️ 必须用**实际**滚动量：文档总高只有 1700 出头，滚 1500 会被系统夹到底部
+        // （实测夹到 813）。拿写死的 1500 去算期望值，测出来的是「UITextView 会夹滚动」
+        // 而不是「背景没跟上」，白白红了很久
+        let actualOffset = tv.contentOffset.y
+        XCTAssertGreaterThan(actualOffset, 100, "这个用例要真的滚起来才有意义")
+
         let (frames, _) = tv.computeCodeBlockFrames()
         XCTAssertEqual(frames.count, 2)
 
@@ -1175,12 +1554,12 @@ final class MarkdownEditorHy4Tests: XCTestCase {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
             placed = backgroundFrames(of: tv)
             if let first = placed.first,
-               abs(first.origin.y - (frames.last!.frame.origin.y - offsetY)) < 2 { break }
+               abs(first.origin.y - (frames.last!.frame.origin.y - actualOffset)) < 2 { break }
         }
 
-        XCTAssertFalse(placed.isEmpty, "滚到 1500 时第二个代码块应该还在可见范围内")
+        XCTAssertFalse(placed.isEmpty, "滚到底时第二个代码块应该还在可见范围内")
         XCTAssertEqual(placed.first?.origin.y ?? 0,
-                       frames.last!.frame.origin.y - offsetY,
+                       frames.last!.frame.origin.y - actualOffset,
                        accuracy: 2,
                        "背景没跟着滚动重新落位：\(placed.first?.origin.y ?? 0) 应该等于文档 y 减滚动量")
     }

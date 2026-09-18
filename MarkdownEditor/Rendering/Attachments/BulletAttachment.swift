@@ -61,6 +61,51 @@ final class BulletAttachment: NSTextAttachment {
     }
 }
 
+// MARK: - 任务列表复选框的「座位」
+
+/// 任务列表项里给复选框**留出来的那块位置**。
+///
+/// ### 它是什么
+/// 它不是视觉元素（整张图是透明的），而是一块**占位空间**：在文本流里占 1 个字符位，宽度 = 方框边长 + 左右各一点间距。真正的复选框按钮由 `MarkdownTextView` 叠在这块空间正中。
+///
+/// ### 为什么需要它（修「复选框挤在 `- ` 上」的由来）
+/// 用户要的排布是：浅灰 `-` → 复选框 → `[x]`（照常显示）→ 正文。标记区凭空多出「一个复选框」的宽度，就必须在**文本流里**真的留出位置，否则按钮只能压在 `- ` 上（老的「并列模式」）或者压在 `[x]` 上（老的「遮盖模式」）。有了座位，按钮既不挡源码、也不跟列表标记挤。
+///
+/// ### 它不消耗源码位置，但**是退格的边界**
+/// 它是纯装饰：构造时走 `RenderedFragment.decorationAttachment(isSyntaxMarker: false)`（**必须传 `false`**，理由见那里的注释），映射被标成「跳过」，所以全选复制出来的文本里没有它。退格时它只是一道**边界**：光标停在座位上、或者停在 `]` 右边，删掉的都是右边 `[ ] ` 那一段，不会越过它把左边的 `- ` 一起吃掉 —— 这条踩过坑，见 `MarkdownDocumentStore.expandedSyntaxMarkerRange`。
+final class CheckboxSeatAttachment: NSTextAttachment {
+    /// 原因见 `MarkdownBlock` 里 `nonisolated deinit` 的注释：
+    /// 隔离 deinit 一旦嵌套就会踩 Swift 6.2 运行时的野指针 free。
+    nonisolated deinit {}
+
+    /// - parameter side: 复选框边长（按钮就铺在这块空间的中间）
+    /// - parameter gap:  方框左右各留多少间距（和主题里的 `checkboxGap` 同一个值）
+    /// - parameter font: 正文字体（决定垂直位置，让方框和文字的大写字母高度居中对齐）
+    init(side: CGFloat, gap: CGFloat, font: UIFont) {
+        super.init(data: nil, ofType: nil)
+
+        let width = side + gap * 2
+        // 和圆点同一套垂直定位：bounds.y 是相对基线向上为正的偏移，让方框的垂直中心落在大写字母高度的一半处 ==> y = (capHeight - side) / 2
+        let y = (font.capHeight - side) / 2
+        bounds = CGRect(x: 0, y: y, width: width, height: side)
+
+        // 必须给一张图：TextKit 靠 image 的尺寸决定这个字符位占多大（不给图的话可能被算成 0 宽，座位就白留了）
+        self.image = Self.transparentImage(size: bounds.size)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("CheckboxSeatAttachment 不支持从 coder 解档")
+    }
+
+    /// 一张全透明的图 —— 座位本身什么都不画，视觉上的东西全由叠上去的按钮负责
+    private static func transparentImage(size: CGSize) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = UIScreen.main.scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in }
+    }
+}
+
 // MARK: - 分隔线
 
 /// `---` 分隔线的 attachment。

@@ -561,7 +561,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     /// 渲染一个列表项：标记 + 内容，并给整段套上「悬挂缩进」的段落样式
     private func renderListItem(_ item: ListItem, ordered: Bool) -> RenderedFragment {
         let markerIndent = indent
-        let contentIndent = indent + theme.listIndent
+        var contentIndent = indent + theme.listIndent
 
         var out = RenderedFragment.empty
 
@@ -571,6 +571,12 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             if ordered {
                 // 有序列表直接显示源码里的 `1. `，编辑时能直接改，也不需要额外维护映射
                 out.append(.sourceSliced(markerText, sourceStart: markerRange.location, attributes: theme.listMarkerAttributes))
+            } else if let literal = taskListLiteral(of: item, in: markerText, markerRange: markerRange) {
+                // 任务项：**不画圆点** —— 排布是「浅灰 `-` → 复选框 → `[x]` → 正文」
+                appendTaskListMarker(to: &out, markerText: markerText,
+                                     markerRange: markerRange, literal: literal)
+                // 悬挂缩进：任务项的标记区比普通列表项宽（多了一整个复选框和 `[x]`），换行后得跟首行的**正文**起点对齐，否则第二行会缩回标记底下
+                contentIndent = markerIndent + max(theme.listIndent, taskListMarkerWidth)
             } else {
                 // 无序列表：圆点 attachment 占 1 个字符位，但映射到源码里的 `- ` 这段，
                 // 于是「复制还原」和「退格降级」两个行为自动就对了。
@@ -584,16 +590,10 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                 // 圆点后面弱化显示 `- ` 源码：和有序列表的 `1. ` 视觉对称，又能看到真实语法。
                 // 这 `- ` 就是源码本身（真实映射），所以光标停在它后面输入完全正常。
                 if theme.showsSourceHints {
-                    let hintStart = out.text.length
                     out.append(.sourceHint(markerText,
                                            sourceStart: markerRange.location,
                                            isSyntaxMarker: true,
                                            attributes: theme.markerAttributes))
-                    markCheckboxLiteral(in: &out,
-                                        hintStart: hintStart,
-                                        markerText: markerText,
-                                        markerRange: markerRange,
-                                        item: item)
                 }
             }
         }
@@ -618,40 +618,113 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
 
     // MARK: 任务列表（`- [x] xxx`）
 
-    /// 给列表标记里的 `[x]` / `[ ]` 这三个字符打上 `.markdownCheckbox` 标记。
+    /// 这一行是不是任务项；是的话把 `[x]` / `[ ]` 这三个字符也找出来。
     ///
-    /// ### 为什么只在源码提示文字上打标记
-    /// 这三个字符就是源码本身，本来就被 `sourceHint` 显示着（弱化灰色）。
-    /// 在它上面挂一个自定义属性，**一个字符都不用增删** ——
-    /// 「全选复制 === 源文件」这条不变量天然不受影响，UI 层扫到标记就在旁边放按钮。
-    ///
-    /// ### 为什么不用 `NSTextAttachmentViewProvider`（和 doc/任务列表渲染方案.md 的差异）
-    /// 方案建议用 view provider 挂真正的 view，但本项目在图片上实测过它的坑：
-    /// 整篇替换内容后 TextKit 2 会把 attachment 的 view 摘掉、却**不再回调 `loadView()`**，
-    /// view 就永久消失了。所以复选框走的是和折叠三角同一条路 —— 文本流里只留标记，
-    /// 真正的按钮由 UI 层按字符矩形**叠**上去（见 `MarkdownTextView.positionCheckboxes()`）。
-    private func markCheckboxLiteral(in out: inout RenderedFragment,
-                                     hintStart: Int,
-                                     markerText: String,
-                                     markerRange: NSRange,
-                                     item: ListItem) {
-        guard let checkbox = item.checkbox,
-              let literal = checkboxLiteralRange(in: markerText, markerRange: markerRange) else { return }
-
-        let info = CheckboxInfo(sourceStart: blockOrigin + literal.location,
-                                isChecked: checkbox == .checked)
-        // hint 的第 0 个字符对应 markerRange.location，所以块内偏移直接平移过去就行
-        let offsetInHint = literal.location - markerRange.location
-        let range = NSRange(location: hintStart + offsetInHint, length: literal.length)
-        guard NSMaxRange(range) <= out.text.length else { return }
-        out.text.addAttribute(.markdownCheckbox, value: info, range: range)
+    /// ⚠️ `item.checkbox` 只用来判定「这一行是不是任务项」（这个判定在语法树上是准的，`- 正文里有 [x]` 不会被误判成任务项）；勾没勾**不能**看它 —— 原因见下面 `checkboxLiteral` 的注释。
+    private func taskListLiteral(of item: ListItem,
+                                 in markerText: String,
+                                 markerRange: NSRange) -> (range: NSRange, isChecked: Bool)? {
+        guard item.checkbox != nil else { return nil }
+        return checkboxLiteral(in: markerText, markerRange: markerRange)
     }
 
-    /// 在列表标记文本（`- [x] ` / `1. [ ] `）里找出 `[x]` / `[ ]` 这三个字符的源码范围。
+    /// 渲染任务项的列表标记：**不画圆点**，排成「浅灰 `-` → 复选框座位 → `[x]` → 正文」。
     ///
-    /// 标记文本的前导部分可能是 `- `、`* `、`1. `、`10. ` 等各种长度，
-    /// 所以不能写死偏移量，要真的去找那个 `[`。
-    private func checkboxLiteralRange(in markerText: String, markerRange: NSRange) -> NSRange? {
+    /// ### 文本流里的三段分别是什么
+    /// | 片段 | 源码对应 | 为什么要有它 |
+    /// |---|---|---|
+    /// | `- `（弱化灰） | 真实源码字符 | 用户要的「浅灰 `-`」，替换掉原来的圆点 |
+    /// | 座位（透明 attachment） | **不**消耗源码位置 | 在文本流里给复选框腾出位置，按钮才不会压住两边的字 |
+    /// | `[x] `（弱化灰） | 真实源码字符 | 用户要的「`[ ]` / `[x]` 都显示出来」 |
+    ///
+    /// ### 为什么按钮不直接盖在 `[x]` 上（老做法的问题）
+    /// 老做法（`coversCheckboxLiteral = true`）拿按钮盖住那三个字符，源码就看不见了；换成「并列」把按钮画到字面量左边，它又会挤到 `- ` 头上（实测）。让渲染层**先留一块空位**，按钮才有地方安安静静地站着。
+    ///
+    /// ### 为什么不用 `NSTextAttachmentViewProvider` 把按钮直接放进文本流
+    /// 本项目在图片上实测过它的坑：整篇替换内容后 TextKit 2 会把 attachment 的 view 摘掉、却**不再回调 `loadView()`**，view 就永久消失了。所以这里只留一个**空的座位**，真正的按钮仍由 UI 层叠上去（见 `MarkdownTextView.positionCheckboxes()`）。
+    private func appendTaskListMarker(to out: inout RenderedFragment,
+                                      markerText: String,
+                                      markerRange: NSRange,
+                                      literal: (range: NSRange, isChecked: Bool)) {
+        let nsText = markerText as NSString
+        let literalOffset = literal.range.location - markerRange.location
+
+        // 1) `- ` 照常显示（弱化灰）—— 只是不再画圆点
+        if theme.showsSourceHints {
+            out.append(.sourceHint(nsText.substring(to: literalOffset),
+                                   sourceStart: markerRange.location,
+                                   isSyntaxMarker: true,
+                                   attributes: theme.markerAttributes))
+        }
+
+        // 2) 复选框座位：文本流里凭空留出的一块位置（纯装饰，复制时跳过）
+        //
+        // ⚠️ `isSyntaxMarker: false` 是必须的，别「统一」成 true：座位左边 `- `、右边 `[ ] ` 各自是一段独立的语法标记，座位一旦也带上 `.markdownSyntaxMarker`，两段就会被连成**一段连续标记** —— 于是光标停在 `]` 右边按一次退格，扩展逻辑会一路跨过座位吃掉整段 `- [ ] `，源码从 `- [ ] 未完成的项` 直接变成 `未完成的项`（实测）。不带标记的座位同时充当两段标记之间的**边界**，见 `MarkdownDocumentStore.expandedSyntaxMarkerRange`。
+        let seatIndex = out.text.length
+        let seat = CheckboxSeatAttachment(side: theme.taskList.checkboxSide,
+                                          gap: theme.taskList.checkboxGap,
+                                          font: theme.bodyFont)
+        out.append(.decorationAttachment(seat, isSyntaxMarker: false, attributes: theme.bodyAttributes(font: theme.bodyFont)))
+
+        let info = CheckboxInfo(sourceStart: blockOrigin + literal.range.location,
+                                isChecked: literal.isChecked)
+
+        // 3) `[x] ` 照常显示（弱化灰），并在这三个字符上挂复选框信息
+        if theme.showsSourceHints {
+            let literalStart = out.text.length
+            out.append(.sourceHint(nsText.substring(from: literalOffset),
+                                   sourceStart: literal.range.location,
+                                   isSyntaxMarker: true,
+                                   attributes: theme.markerAttributes))
+            let literalRange = NSRange(location: literalStart, length: literal.range.length)
+            if NSMaxRange(literalRange) <= out.text.length {
+                out.text.addAttribute(.markdownCheckbox, value: info, range: literalRange)
+            }
+        }
+
+        // 座位也带同一个 info：UI 层靠它把按钮摆在座位正中
+        if seatIndex < out.text.length {
+            out.text.addAttribute(.markdownCheckboxSeat,
+                                  value: info,
+                                  range: NSRange(location: seatIndex, length: 1))
+        }
+    }
+
+    /// 任务项首行标记区的宽度（`- ` + 座位 + `[x] `），拿它当悬挂缩进用。
+    ///
+    /// 换行之后正文要跟**首行的正文起点**对齐，而任务项的标记区比普通列表项宽不少（多了整个复选框和一个 `[x]`），沿用 `listIndent` 会让第二行缩回标记底下。字面量取三种写法里最宽的，这样勾前勾后整行宽度都不变。
+    private var taskListMarkerWidth: CGFloat {
+        let font = theme.bodyFont
+        func width(_ string: String) -> CGFloat {
+            (string as NSString).size(withAttributes: [.font: font]).width
+        }
+        let seat = theme.taskList.checkboxSide + theme.taskList.checkboxGap * 2
+        let widestLiteral = ["[ ] ", "[x] ", "[X] "].map(width).max() ?? 0
+        return width("- ") + seat + widestLiteral
+    }
+
+    /// 在列表标记文本（`- [x] ` / `1. [ ] `）里找出 `[x]` / `[ ]` 这三个字符，并**直接从这三个字符本身**读出勾选状态。
+    ///
+    /// 标记文本的前导部分可能是 `- `、`* `、`1. `、`10. ` 等各种长度，所以不能写死偏移量，要真的去找那个 `[`。
+    ///
+    /// ### 为什么勾选状态不能取 `item.checkbox`（踩过的坑，别改回去）
+    /// cmark-gfm 判定任务项勾没勾，靠的是这一句（`extensions/tasklist.c`）：
+    /// ```c
+    /// parent_container->as.list.checked = (strstr((char *)input, "[x]") || strstr((char *)input, "[X]"));
+    /// ```
+    /// `input` 是**整行**，`strstr` 又在整行里搜 —— 所以只要这一行**别处**还出现一个 `[x]` / `[X]`，整项就被报成「已勾选」，哪怕真正的标记是 `[ ]`。实测：
+    ///
+    /// | 源码 | 语法树给的 | 真相 |
+    /// |---|---|---|
+    /// | `- [ ] 未完成的项` | unchecked | `[ ]` |
+    /// | `- [ ] 未完成的项，点一下变 [x]` | **checked** | `[ ]` |
+    /// | `- [ ] 第一行`⏎`  续行有 [x]` | unchecked | 只看第一行，续行不算 |
+    ///
+    /// 后果不只是「画错了」：复选框会顶着「已勾选」的绿底盖在 `[ ]` 上，点它时 `toggleCheckbox` 又按「已勾选」写回 `[ ]` —— 源码本来就是 `[ ]`，等于什么都没干。用户看到的就是**点了没反应**。
+    ///
+    /// 「这一行是不是任务项」那个判定语法树是准的（`- 正文里有 [x]` 不会被误判成任务项），所以保留；但**状态一律以源码里那三个字符为准** —— 这个编辑器的老规矩：源码才是唯一真相。
+    private func checkboxLiteral(in markerText: String,
+                                 markerRange: NSRange) -> (range: NSRange, isChecked: Bool)? {
         let nsText = markerText as NSString
         // 从左往右扫到第一个 `[`
         for offset in 0..<nsText.length {
@@ -659,14 +732,19 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             // 后面至少还得有「一个状态字符 + 一个 ]」
             guard offset + 2 < nsText.length,
                   nsText.character(at: offset + 2) == 0x5D /* ] */ else { return nil }
-            return NSRange(location: markerRange.location + offset, length: 3)
+            // 中间那个字符：`x` / `X` 算勾上，其余（正常是空格）算没勾
+            let state = nsText.character(at: offset + 1)
+            let isChecked = state == 0x78 /* x */ || state == 0x58 /* X */
+            return (NSRange(location: markerRange.location + offset, length: 3), isChecked)
         }
         return nil
     }
 
-    // MARK: 折叠（顶层块左侧的展开 / 折叠按钮）
+    // MARK: 折叠（按标题层级：三角挂在标题左边，点它收起/展开下面一整节）
 
     /// 给一个块的**第一个字符**打上「折叠锚点」标记。
+    ///
+    /// 只有标题块会打这个标记 —— 折叠是按标题层级来的，正文块自己不折叠。
     ///
     /// 注意这里**不插入任何字符**：三角由 UI 层画在正文左边的装订线里
     /// （详见 `FoldAnchorInfo` 的注释）。占字符位的旧做法会把第一行往右推，
@@ -686,47 +764,59 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                    range: NSRange(location: index, length: 1))
     }
 
-    /// 折叠状态下整块的内容：**一个「⋯」占位符**（一个字符位代替整块）。
+    /// 折叠状态下的**标题块**长什么样：标题文字 + 一个「⋯」占位符。
     ///
-    /// 三角不在文本里 —— 和展开态一样，只在占位符上打个锚点标记，
-    /// UI 层照样在装订线里画 ▶。
+    /// 和老版本「整块变成一个 ⋯」的区别：标题自己照常显示（用户看得见折叠了哪一节、
+    /// 还能点进去改标题），被收起来的只有它**下面那一节**。
     ///
     /// ### 折叠了源码还在吗？在
-    /// 折叠只是视图状态，`MarkdownBlock.sourceText` 一个字没动。
-    /// 占位符映射到「整块源码」（`.attachmentView(start: 0, length: 整块长度)`），
-    /// 所以复制时它这一个字符位会吐出整块源码 ——
+    /// 折叠只是视图状态，源码一个字没动。占位符那一个字符位映射的是
+    /// 「从标题文字结束处一直到整节结束」的全部源码（标题尾部的换行也算在里面），
+    /// 所以复制时它一个字符就把整节吐出来 ——
     /// **「全选复制 === 源文件」在折叠状态下依然成立**（有测试守着）。
-    func collapsedContent(blockID: UUID,
-                          sourceText: String) -> (text: NSAttributedString, mappings: [CharMapping]) {
-        let style = theme.paragraphStyle(indent: 0)
-        var fragment = RenderedFragment.empty
+    ///
+    /// - parameter headingSource:     标题自己的源码（尾部换行已去掉）
+    /// - parameter hiddenSourceLength: 「⋯」要代表的源码长度（**块内**偏移从
+    ///                                  `headingSource` 结尾开始算）
+    /// - parameter trailingBreaks:     要在末尾补几个换行（保持节与节之间的空档）
+    func collapsedHeadingContent(blockID: UUID,
+                                 headingSource: String,
+                                 blockOrigin: Int,
+                                 hiddenSourceLength: Int,
+                                 trailingBreaks: Int) -> (text: NSAttributedString, mappings: [CharMapping]) {
+        let (headingText, headingMappings) = render(blockSource: headingSource, blockOrigin: blockOrigin)
+        var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: headingText),
+                                        mappings: headingMappings)
 
         let placeholder = CollapsedBlockAttachment(width: theme.collapsedPlaceholderWidth,
                                                    color: theme.collapsedPlaceholderColor,
                                                    font: theme.bodyFont)
+        // 占位符从「标题文字结束处」开始吃源码，一直吃到整节结束。
+        // 标成 attachmentView：光标不会停在这个字符上（免得用户一敲键就把整节删了），
+        // 但复制时照样能吐出源码。
         fragment.append(.attachment(placeholder,
-                                    sourceStart: 0,
-                                    sourceLength: sourceText.utf16Length,
-                                    attributes: [.font: theme.bodyFont, .paragraphStyle: style]))
+                                    sourceStart: headingSource.utf16Length,
+                                    sourceLength: hiddenSourceLength,
+                                    attributes: [.font: theme.bodyFont]))
+        // 打标记：UI 层靠它认出「这个 ⋯ 点一下能展开」
+        fragment.text.addAttribute(.markdownCollapsedPlaceholder,
+                                   value: CollapsedSectionInfo(blockID: blockID),
+                                   range: NSRange(location: fragment.text.length - 1, length: 1))
 
-        // 把块尾的换行补回来 —— 不补的话下一个块会直接贴在「⋯」后面，一行挤两块。
-        // 这些换行是**装饰**：源码里那个换行已经由占位符（映射了整块源码）代表了，
-        // 这里再映射一次会导致复制的时候多吐出一个空行。
-        let breaks = trailingLineBreaks(of: sourceText)
-        if breaks > 0 {
-            fragment.append(.decoration(String(repeating: "\n", count: breaks),
-                                        attributes: [.font: theme.bodyFont, .paragraphStyle: style]))
+        // 把换行补回来 —— 不补的话下一节会直接贴在「⋯」后面。
+        // 这些换行是**装饰**：源码里那几个换行已经由占位符代表了，
+        // 这里再映射一次会导致复制的时候多吐出空行。
+        if trailingBreaks > 0 {
+            fragment.append(.decoration(String(repeating: "\n", count: trailingBreaks),
+                                        attributes: [.font: theme.bodyFont]))
         }
-
-        // 锚点打在占位符上（它就是这个块的第一个字符），UI 层据此画 ▶
-        markFoldAnchor(on: &fragment, blockID: blockID, isCollapsed: true)
         return (fragment.text, fragment.mappings)
     }
 
     /// 源码结尾有几个连续的换行（最多数 2 个，再多也没必要留那么宽的空档）。
     ///
     /// markdown 里块与块之间通常是一个空行（`\n\n`），补回来视觉上才和展开时差不多。
-    private func trailingLineBreaks(of text: String) -> Int {
+    func trailingLineBreakCount(of text: String) -> Int {
         var count = 0
         for character in text.reversed() {
             if character == "\n" {

@@ -81,14 +81,17 @@ struct RenderedFragment {
 
     /// 构造一个「纯装饰性」attachment：只占 1 个字符位，不消耗任何源码位置。
     ///
-    /// 与 `attachment(...)` 的区别：复制粘贴时**不**输出任何源码字符，因为绿条这种东西
-    /// 在 markdown 源里根本没有对应物。`sourceStart = -1` 标记「跳过」。
-    /// `markdownSyntaxMarker = true` 标记是「行内结构标记」，退格时如果选中这一段，整段一起删。
+    /// 与 `attachment(...)` 的区别：复制粘贴时**不**输出任何源码字符，因为绿条这种东西在 markdown 源里根本没有对应物。`sourceStart = -1` 标记「跳过」。
+    ///
+    /// - parameter isSyntaxMarker: 要不要打上「行内结构标记」的属性 —— 打了之后，退格删到它身上会**连着左右整段一起删**（见 `sourceHint` 的注释）。引号竖条、代码块背景这类真·结构装饰保持默认 `true`；**任务列表的复选框座位必须传 `false`**：它是个纯占位，如果也打了标记，就会把左边 `- ` 和右边 `[ ] ` 两段本来独立的标记**粘成一段** —— 于是光标停在 `]` 右边按一下退格，`- [ ] ` 全被吃掉（实测源码从 `- [ ] 未完成的项` 变成 `未完成的项`）。
     static func decorationAttachment(_ attachment: NSTextAttachment,
+                                     isSyntaxMarker: Bool = true,
                                      attributes: [NSAttributedString.Key: Any]) -> RenderedFragment {
         let attributed = NSMutableAttributedString(attachment: attachment)
         attributed.addAttributes(attributes, range: NSRange(location: 0, length: attributed.length))
-        attributed.addAttribute(.markdownSyntaxMarker, value: true, range: NSRange(location: 0, length: 1))
+        if isSyntaxMarker {
+            attributed.addAttribute(.markdownSyntaxMarker, value: true, range: NSRange(location: 0, length: 1))
+        }
         return RenderedFragment(
             text: attributed,
             mappings: [.attachmentView(start: -1, length: 0)]

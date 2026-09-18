@@ -36,10 +36,11 @@ final class MarkdownCheckboxButton: UIButton {
     /// 这个复选框对应源码里的哪个 `[x]` / `[ ]`（点击时靠它改源码）
     var checkbox: CheckboxInfo?
 
-    /// 图标边长（对勾比方框小一圈，看着才不挤）
-    private static let symbolPointSize: CGFloat = 11
+    /// 方框边长（对勾的笔画粗细、四周留白都按它等比算）
+    private let side: CGFloat
 
     init(side: CGFloat) {
+        self.side = side
         super.init(frame: CGRect(x: 0, y: 0, width: side, height: side))
         layer.cornerRadius = side / 4
         backgroundColor = .clear
@@ -63,14 +64,12 @@ final class MarkdownCheckboxButton: UIButton {
         layer.borderWidth = style.borderWidth
         layer.cornerRadius = style.cornerRadius
 
-        let configuration = UIImage.SymbolConfiguration(pointSize: Self.symbolPointSize,
-                                                        weight: .bold)
         if isChecked {
             backgroundColor = style.checkedColor
             layer.borderColor = style.checkedColor.cgColor
+            // 颜色仍走 tintColor（对勾是模板图）；形状和尺寸由我们自己画，不看系统脸色
             tintColor = style.checkmarkColor
-            setImage(UIImage(systemName: "checkmark", withConfiguration: configuration),
-                     for: .normal)
+            setImage(checkmarkImage, for: .normal)
         } else {
             // 盖住模式用不透明底色挡住底下的 `[ ]`；不盖住模式保持透明，
             // 免得在源码旁边挖出一个白方块
@@ -79,5 +78,36 @@ final class MarkdownCheckboxButton: UIButton {
             setImage(nil, for: .normal)
         }
         accessibilityValue = isChecked ? "已完成" : "未完成"
+    }
+
+    // MARK: 对勾（自己画，不用 SF Symbol）
+
+    /// 对勾图：尺寸只跟方框边长有关。
+    ///
+    /// ### 为什么不用 `UIImage(systemName: "checkmark")`
+    /// SF Symbol 的大小由 `configuration.pointSize` 定死，**和方框边长没有关系** —— 而方框边长是主题里可配的（`taskList.checkboxSide`）。符号不会跟着方框变，只能写一个「凑出来正好」的 pointSize 去碰运气；系统换一套符号度量就偏了。这里按边长算出笔画粗细和四周留白、画进一张 `side × side` 的图，「对勾比方框小一圈、永远居中」由代码保证，不依赖任何外部度量。
+    ///
+    /// 画成黑色 + 模板模式：颜色照旧由 `tintColor`（主题的 `checkmarkColor`）决定。
+    private lazy var checkmarkImage = MarkdownCheckboxButton.makeCheckmarkImage(side: side)
+
+    private static func makeCheckmarkImage(side: CGFloat) -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
+        let image = renderer.image { _ in
+            // 笔画粗细和留白都按边长等比给：方框变大，对勾跟着变大
+            let lineWidth = max(1, side * 0.14)
+            let inset = side * 0.26
+
+            let path = UIBezierPath()
+            path.lineWidth = lineWidth
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            // 一个普通的对勾：左边起笔偏下 → 下方折点 → 右边收笔偏上
+            path.move(to: CGPoint(x: inset, y: side * 0.53))
+            path.addLine(to: CGPoint(x: side * 0.42, y: side - inset))
+            path.addLine(to: CGPoint(x: side - inset, y: inset))
+            UIColor.black.setStroke()
+            path.stroke()
+        }
+        return image.withRenderingMode(.alwaysTemplate)
     }
 }

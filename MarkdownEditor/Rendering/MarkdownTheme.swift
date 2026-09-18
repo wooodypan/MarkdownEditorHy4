@@ -397,7 +397,9 @@ extension MarkdownTheme {
     struct TaskListStyle {
         /// 复选框边长（同时也是点击热区大小）
         var checkboxSide: CGFloat = 16
-        /// 复选框和 `[x]` 之间的间距（只在「不遮盖」模式下生效）
+        /// 复选框左右两侧的间距（只在「不遮盖」模式下生效）。
+        ///
+        /// 渲染层按 `checkboxSide + checkboxGap × 2` 留出座位，按钮居中摆在座位里，所以这个值决定的是「按钮离左边的 `-` 和右边的 `[x]` 各有多远」。
         var checkboxGap: CGFloat = 3
         /// 勾选后的填充色
         var checkedColor: UIColor = .systemGreen
@@ -417,13 +419,11 @@ extension MarkdownTheme {
 
         /// **复选框要不要盖住 `[x]` / `[ ]` 这三个字符**。
         ///
-        /// - `true`（默认）：复选框正好盖在 `[x]` 上，源码字符仍然在文本里
-        ///   （复制、编辑都不受影响），只是视觉上被挡住 —— Bear / Obsidian 的常见样子。
-        /// - `false`：复选框画在 `[x]` **左边**，`[x]` 照常显示 ——
-        ///   源码看得更全，但实测复选框会挤到列表标记 `- ` 的位置，视觉比较挤。
+        /// - `false`（默认）：**不盖**。渲染层会在 `- ` 和 `[x]` 中间留出一块「座位」（透明占位 attachment），复选框就摆在座位正中 —— 看到的顺序是 `-`（浅灰）→ 复选框 → `[ ]`/`[x]`（浅灰）→ 正文，两边的源码都看得见；任务项也因此不再画圆点（标记换成了浅灰的 `-`）。
+        /// - `true`：复选框正好盖在 `[x]` 上，源码字符仍然在文本里（复制、编辑都不受影响），只是视觉上被挡住 —— Bear / Obsidian 的常见样子。
         ///
-        /// 想换效果只改这一个值即可，详见 `MarkdownTextView.positionCheckboxes()`。
-        var coversCheckboxLiteral: Bool = true
+        /// ⚠️ 这个开关会**改变渲染出来的文本流**（要不要插座位），所以它是渲染期读的，切换后要整篇重渲染才生效。详见 `MarkupToAttributedRenderer.appendTaskListMarker` 与 `MarkdownTextView.positionCheckboxes()`。
+        var coversCheckboxLiteral: Bool = false
     }
 }
 

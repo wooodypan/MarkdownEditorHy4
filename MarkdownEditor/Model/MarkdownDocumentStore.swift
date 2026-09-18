@@ -77,20 +77,25 @@ final class MarkdownDocumentStore {
     // MARK: 只读信息
 
     /// 整篇渲染出来的纯文本。UITextView 的实际内容和它做 diff，就能知道用户改了哪一段。
+    ///
+    /// ⚠️ 被折叠起来的块（`isHidden`）不参与 —— 它们现在在屏幕上一个字符都没有，
+    /// 算进去的话 diff 会以为用户「删掉了整节内容」，直接把源码改坏。
     var renderedString: String {
         var result = ""
-        result.reserveCapacity(blocks.reduce(0) { $0 + $1.renderedLength })
-        for block in blocks { result += block.renderedContent.string }
+        result.reserveCapacity(renderedLength)
+        for block in blocks where !block.isHidden { result += block.renderedContent.string }
         return result
     }
 
     /// 整篇渲染长度
-    var renderedLength: Int { blocks.reduce(0) { $0 + $1.renderedLength } }
+    var renderedLength: Int {
+        blocks.reduce(0) { $0 + ($1.isHidden ? 0 : $1.renderedLength) }
+    }
 
-    /// 整篇 attributed string
+    /// 整篇 attributed string（同样跳过被折叠隐藏的块）
     var attributedDocument: NSAttributedString {
         let result = NSMutableAttributedString()
-        for block in blocks { result.append(block.renderedContent) }
+        for block in blocks where !block.isHidden { result.append(block.renderedContent) }
         return result
     }
 
@@ -100,7 +105,8 @@ final class MarkdownDocumentStore {
         renderer.containerWidth = containerWidth
         fullSource = markdown
         blocks = buildBlocks(region: NSRange(location: 0, length: markdown.utf16Length), of: markdown)
-        recomputeRanges()
+        // 折叠状态在加载时统一算一遍（初始全是展开，但「哪些标题配挂三角」要在这里定）
+        refreshCollapseState()
     }
 
     // MARK: - 增量编辑
@@ -154,7 +160,9 @@ final class MarkdownDocumentStore {
         blocks.insert(contentsOf: newBlocks, at: affected.lowerBound)
         fullSource = newSource
         inheritCollapseStates(from: oldBlocks, to: newBlocks)
-        recomputeRanges()
+        // 折叠相关的渲染（谁隐藏、谁画成「标题 + ⋯」、谁挂三角）统一在这里刷新。
+        // 它会顺带把块的范围重算一遍，所以不用再单独调 recomputeRanges
+        refreshCollapseState()
 
         // 7) 拼出要替换进去的新内容
         let newContent = NSMutableAttributedString()
@@ -195,7 +203,7 @@ final class MarkdownDocumentStore {
 
         var result = ""
 
-        for block in blocks {
+        for block in blocks where !block.isHidden {
             guard let intersection = block.renderedRange.intersection(range), intersection.length > 0 else { continue }
             let localStart = intersection.location - block.renderedRange.location
 
@@ -209,7 +217,17 @@ final class MarkdownDocumentStore {
                 guard mapping.sourceStart >= 0, mapping.sourceLength > 0 else { continue }
                 // 同一个源码字符映射到了多个渲染字符位（emoji 的代理对），只输出一次
                 guard mapping.sourceStart >= lastSourceEnd else { continue }
-                result += block.sourceText.substring(utf16Offset: mapping.sourceStart, length: mapping.sourceLength)
+
+                // ⚠️ 从 `fullSource` 切，而不是从 `block.sourceText` 切。
+                // 折叠标题后面那个「⋯」占位符要代表**整节**的源码，而那一节属于后面
+                // 好几个块 —— 它的映射范围会越过本块的边界。源码块首尾相接拼起来就是
+                // `fullSource`，所以按「本块起点 + 块内偏移」从整篇里切，
+                // 结果和以前对每个块单独切完全一致，只是不再受块边界限制。
+                let absolute = block.sourceRange.location + mapping.sourceStart
+                let length = min(mapping.sourceLength, max(0, fullSource.utf16Length - absolute))
+                guard length > 0 else { continue }
+
+                result += fullSource.substring(utf16Offset: absolute, length: length)
                 lastSourceEnd = mapping.sourceStart + mapping.sourceLength
             }
         }
@@ -223,7 +241,7 @@ final class MarkdownDocumentStore {
 
     /// 渲染偏移（光标位置）→ 源码偏移
     func sourceCaret(forRenderedOffset offset: Int) -> Int {
-        for block in blocks {
+        for block in blocks where !block.isHidden {
             let range = block.renderedRange
             guard offset >= range.location, offset <= NSMaxRange(range) else { continue }
 
@@ -250,7 +268,7 @@ final class MarkdownDocumentStore {
 
     /// 源码偏移（光标位置）→ 渲染偏移
     func renderedCaret(forSourceOffset offset: Int) -> Int {
-        for block in blocks {
+        for block in blocks where !block.isHidden {
             let range = block.sourceRange
             // 注意这里是 `<` 不是 `<=`：块与块的源码首尾相接，边界那个偏移同时属于
             // 「前一块的末尾」和「后一块的开头」。用 `<=` 会命中前一块，
@@ -282,7 +300,7 @@ final class MarkdownDocumentStore {
     /// 拼出来的长度不可靠。这里直接查映射表，取「源码落在区间内的第一个渲染字符」
     /// 到「最后一个渲染字符」，长度才是精确的。
     func renderedRange(forSourceRange range: NSRange) -> NSRange? {
-        for block in blocks {
+        for block in blocks where !block.isHidden {
             guard let inter = block.sourceRange.intersection(range), inter.length > 0 else { continue }
             let localStart = inter.location - block.sourceRange.location
             let localEnd = NSMaxRange(inter) - block.sourceRange.location
@@ -324,6 +342,12 @@ final class MarkdownDocumentStore {
     ///
     /// 否则 `- ` 只删掉一个字符，会留下 `-一级列表项` 这种既不是列表、
     /// 行首又带着一个破折号的残片；整段删掉才是用户想要的「降级成段落」。
+    ///
+    /// ### 任务项里那个座位是**边界**，不是标记
+    /// 任务项的文本流是 `- ` + 座位（透明附件）+ `[ ] ` —— 这是**两段**独立标记。老版本给座位也打了 `.markdownSyntaxMarker`，两段就被粘成一段：光标停在 `]` 右边按一下退格，扩展会跨过座位把 `- [ ] ` 整段吃掉（实测：源码 `- [ ] 未完成的项` 变成 `未完成的项`，列表标记也没了）。现在遇到座位就停：`- ` 那段只能删自己，`[ ] ` 那段也只能删自己。
+    ///
+    /// ### 起点正好落在座位上
+    /// 座位是「不消耗源码」的纯装饰附件，直接拿它去算源码范围会得到空范围 —— 表现为「按了退格什么都没发生」。视觉上座位属于它右边那个 `[ ]`，所以这里先把起点挪到座位之后，再开始扩展。
     private func expandedSyntaxMarkerRange(_ renderedRange: NSRange) -> NSRange {
         guard renderedRange.length > 0 else { return renderedRange }
 
@@ -332,21 +356,29 @@ final class MarkdownDocumentStore {
             let length = block.renderedContent.length
             guard length > 0 else { continue }
 
-            let local = min(max(0, renderedRange.location - block.renderedRange.location), length - 1)
-            // 删除起点不在语法标记上 → 原样返回
-            guard block.renderedContent.attribute(.markdownSyntaxMarker, at: local, effectiveRange: nil) != nil else {
-                return renderedRange
+            let content = block.renderedContent
+            func hasMarker(_ index: Int) -> Bool {
+                content.attribute(.markdownSyntaxMarker, at: index, effectiveRange: nil) != nil
+            }
+            func isSeat(_ index: Int) -> Bool {
+                content.attribute(.markdownCheckboxSeat, at: index, effectiveRange: nil) != nil
             }
 
-            // 往前往后扩，把一整段连续的标记圈出来
+            var local = min(max(0, renderedRange.location - block.renderedRange.location), length - 1)
+            // 起点落在座位上 → 往后挪到第一格不是座位的地方（座位算它右边那段标记的）
+            while local < length, isSeat(local) { local += 1 }
+            guard local < length else { return renderedRange }
+
+            // 删除起点不在语法标记上 → 原样返回
+            guard hasMarker(local) else { return renderedRange }
+
+            // 往前往后扩，把一整段连续的标记圈出来；碰到座位停下 —— 那是另一段标记的开始
             var lower = local
             var upper = local + 1
-            while lower - 1 >= 0,
-                  block.renderedContent.attribute(.markdownSyntaxMarker, at: lower - 1, effectiveRange: nil) != nil {
+            while lower - 1 >= 0, hasMarker(lower - 1), !isSeat(lower - 1) {
                 lower -= 1
             }
-            while upper < length,
-                  block.renderedContent.attribute(.markdownSyntaxMarker, at: upper, effectiveRange: nil) != nil {
+            while upper < length, hasMarker(upper), !isSeat(upper) {
                 upper += 1
             }
             return NSRange(location: block.renderedRange.location + lower, length: upper - lower)
@@ -409,64 +441,210 @@ final class MarkdownDocumentStore {
             block.headingLevel = heading.level
             block.headingTitle = heading.plainText
         }
-        // 给块首打一个「折叠锚点」—— UI 层据此在左边装订线里画小三角。
-        // 但只有**多行的块**才打，单行块（标题、单行段落、分隔线）折起来没意义，
-        // 每行挂个三角也太吵。
-        if canCollapse(blockSource) {
-            var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: text),
-                                            mappings: mappings)
-            renderer.markFoldAnchor(on: &fragment, blockID: block.id, isCollapsed: false)
-            block.renderedContent = fragment.text
-            block.charMappings = fragment.mappings
-        }
+        // 折叠三角**不在这里打**：它只挂在标题上，而「这个标题下面有没有东西可折」
+        // 要等所有块都建好才知道（见 `refreshCollapseState` 的注释）。
         return block
     }
 
-    // MARK: - 折叠（展开 / 折叠某一块）
+    // MARK: - 折叠（按标题层级：折叠一个标题 = 收起它下面的一整节）
 
-    /// 切换某个块的折叠状态。
+    /// 某个标题管到哪儿：**不含标题自己**的那些块的下标范围。
     ///
-    /// - returns: 局部替换需要的东西：**旧**渲染范围的旧坐标 + 该块的新渲染内容。
-    ///            UI 层拿到后把 textStorage 里那一段换掉即可，不用整篇重排。
-    ///            返回 nil 表示下标越界（调用方忽略就行）。
-    func toggleCollapse(blockAt index: Int) -> (replacedRange: NSRange, newContent: NSAttributedString)? {
-        guard blocks.indices.contains(index) else { return nil }
-
-        let block = blocks[index]
-        let oldRange = block.renderedRange
-        block.isCollapsed.toggle()
-        rerender(block)
-        // 这一块长度变了，后面所有块的渲染起点都得重算
-        recomputeRanges()
-        return (oldRange, block.renderedContent)
+    /// 规则就是用户要的那条 —— 一直往后吃，直到遇到「层级 ≤ 自己」的标题为止：
+    /// 折叠 H2 会连它底下的正文、H3、H4 一起收起来，遇到下一个 H2 或 H1 就停。
+    ///
+    /// - returns: 这一节包含的**后续块**范围；不是标题块时返回 nil
+    func sectionBlockRange(forHeadingAt index: Int) -> Range<Int>? {
+        guard blocks.indices.contains(index), let level = blocks[index].headingLevel else { return nil }
+        var end = index + 1
+        while end < blocks.count {
+            // 遇到同级（level 相同）或更高级（level 更小）的标题 → 这一节到此为止
+            if let next = blocks[end].headingLevel, next <= level { break }
+            end += 1
+        }
+        return (index + 1)..<end
     }
 
-    /// 按**当前的** `isCollapsed` 重新渲染一个块（源码没变，只是展开/折叠切换了）。
-    private func rerender(_ block: MarkdownBlock) {
-        // 编辑可能把一个多行块改成单行块（比如把列表项删到只剩一个）。
-        // 单行块没有折叠按钮，要是让它继续折叠着，用户就再也点不回来了 —— 强制展开。
-        if !canCollapse(block.sourceText) { block.isCollapsed = false }
+    /// 这一节里有没有实际内容（**只有空行的节不给折叠三角**）。
+    ///
+    /// 「两个标题挨在一起」（`# A\n# B`）是很常见的写法，给 A 挂个三角却什么也折不动，
+    /// 只会让界面变吵 —— 所以这里先数一数下面有没有非空白的块。
+    ///
+    /// 判据用**块源码**（和原来「多行块才能折叠」一样不看排版结果，那时候还没排版），
+    /// 而且一找到有内容的块就返回，长文档里也不会拖慢输入。
+    func hasSectionContent(_ range: Range<Int>) -> Bool {
+        for index in range where index < blocks.count {
+            if !isBlank(blocks[index].sourceText) { return true }
+        }
+        return false
+    }
 
-        if block.isCollapsed {
-            let (text, mappings) = renderer.collapsedContent(blockID: block.id,
-                                                             sourceText: block.sourceText)
-            block.renderedContent = text
-            block.charMappings = mappings
-            return
+    /// 切换某个**标题块**的折叠状态。
+    ///
+    /// - returns: 局部替换需要的东西：**旧**渲染范围的旧坐标 + 这一节的新渲染内容。
+    ///            UI 层拿到后把 textStorage 里那一段换掉即可，不用整篇重排。
+    ///            返回 nil 表示这个位置不是「能折叠的标题」（越界 / 不是标题 / 下面没内容）。
+    func toggleCollapse(blockAt index: Int) -> (replacedRange: NSRange, newContent: NSAttributedString)? {
+        guard let section = sectionBlockRange(forHeadingAt: index),
+              hasSectionContent(section) else { return nil }
+
+        // 受影响的块 = 标题自己 + 它这一节里所有的块。
+        // 折叠时：它们全变成隐藏（新内容只剩「标题 + ⋯」）；
+        // 展开时：它们全部回来（新内容 = 标题 + 整节）。
+        // 两种情况都用「同一个范围换一段新内容」表达，调用方不用区分方向。
+        let affected = index..<section.upperBound
+        // 旧坐标必须在改状态**之前**取
+        let oldRange = unionRenderedRange(of: affected)
+
+        blocks[index].isCollapsed.toggle()
+        refreshCollapseState()
+
+        let content = NSMutableAttributedString()
+        for index in affected { content.append(blocks[index].renderedContent) }
+        return (oldRange, content)
+    }
+
+    /// 把「每个标题的折叠意图」变成**实际的渲染结果**：谁该隐藏、谁该画成「标题 + ⋯」、
+    /// 谁该挂三角。所有会改动块的场合（加载、编辑、折叠切换）最后都要跑一遍这个。
+    ///
+    /// ### 为什么要单独一步，而不是建块时就定好
+    /// 三件事都得等**所有块都就位**才能判断：
+    /// 1. 一个标题管到哪儿（要看后面有没有同级/更高级的标题）；
+    /// 2. 哪些块落在某个已折叠的标题底下（要看前面的标题有没有折起来）；
+    /// 3. 这个标题配不配挂三角（要看下面有没有内容）。
+    /// 而 `makeBlock` 建块时后面的块还没生成，所以全部挪到这里统一算。
+    ///
+    /// ### 刷新是幂等的、也尽量不干活
+    /// 只有当「该不该隐藏」「该不该折叠」「该不该有三角」和现在渲染出来的样子不一致时
+    /// 才重新渲染，所以每敲一个字最多重画受影响的那一两个标题，不会整篇重来。
+    private func refreshCollapseState() {
+        updateHiddenStates()
+
+        for index in blocks.indices {
+            let block = blocks[index]
+
+            // 1) 隐藏 / 显示：渲染内容要不要清空
+            if block.isHidden != block.renderedAsHidden {
+                if block.isHidden {
+                    block.renderedContent = NSAttributedString()
+                    block.charMappings = []
+                    block.renderedAsHidden = true
+                    block.renderedIsCollapsed = false
+                    block.hasFoldAnchor = false
+                } else {
+                    rerenderExpanded(block)
+                    block.renderedAsHidden = false
+                }
+                // 刚重新显示出来的块，下面的标题分支会接着决定它要不要画成折叠态
+            }
+
+            guard !block.isHidden, block.headingLevel != nil else { continue }
+
+            // 2) 标题：折叠态（标题 + ⋯）还是完整渲染？三角要不要挂？
+            guard let section = sectionBlockRange(forHeadingAt: index) else { continue }
+            let eligible = hasSectionContent(section)
+            let shouldCollapse = block.isCollapsed && eligible
+            guard shouldCollapse != block.renderedIsCollapsed || eligible != block.hasFoldAnchor else { continue }
+
+            if shouldCollapse {
+                rerenderCollapsed(block, at: index)
+            } else {
+                rerenderExpanded(block)
+                if eligible { markFoldAnchor(on: block, isCollapsed: false) }
+            }
         }
 
+        recomputeRanges()
+    }
+
+    /// 算出每个块「是不是落在某个已折叠标题底下」。
+    ///
+    /// ### 算法
+    /// 拿一个栈存「当前生效的折叠层级」，从头往后扫：
+    /// - 遇到标题：先把栈里**层级 ≥ 它**的都弹掉（同级/更高级的标题结束了那一节），
+    ///   然后它自己如果折着就压栈；它自己**永远可见**（折叠时以「标题 + ⋯」的形式显示），
+    ///   除非它本来就身处某个更外层的折叠节里 —— 那种情况下它整块都被收起来了；
+    /// - 遇到普通块：栈不为空就说明在某个折叠节里面 → 隐藏。
+    ///
+    /// ### 为什么标题自己的可见性要先判断再压栈
+    /// 顺序反了的话，被折叠的 H2 会把自己也算进「H2 这一节」里、变成不可见，
+    /// 屏幕上就只剩一个「⋯」、连标题都看不到了。
+    private func updateHiddenStates() {
+        var collapsedLevels: [Int] = []
+
+        for block in blocks {
+            guard let level = block.headingLevel else {
+                block.isHidden = !collapsedLevels.isEmpty
+                continue
+            }
+            while let top = collapsedLevels.last, level <= top { collapsedLevels.removeLast() }
+            block.isHidden = !collapsedLevels.isEmpty
+            if block.isCollapsed { collapsedLevels.append(level) }
+        }
+    }
+
+    /// 按**展开态**重新渲染一个块（源码没变，只是从隐藏/折叠切回正常显示）
+    private func rerenderExpanded(_ block: MarkdownBlock) {
         let (text, mappings) = renderer.render(blockSource: block.sourceText,
-                                                blockOrigin: block.sourceRange.location)
-        guard canCollapse(block.sourceText) else {
-            block.renderedContent = text
-            block.charMappings = mappings
-            return
-        }
-        var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: text),
-                                        mappings: mappings)
-        renderer.markFoldAnchor(on: &fragment, blockID: block.id, isCollapsed: false)
+                                               blockOrigin: block.sourceRange.location)
+        block.renderedContent = text
+        block.charMappings = mappings
+        block.renderedIsCollapsed = false
+        block.hasFoldAnchor = false
+    }
+
+    /// 把一个标题块渲染成**折叠态**：标题文字 + 一个「⋯」占位符。
+    ///
+    /// 标题自己的源码照常渲染（用户还能看见、还能点进去改标题），
+    /// 后面那一整节——包括标题尾部那些换行——全交给「⋯」那一个字符位代表。
+    private func rerenderCollapsed(_ block: MarkdownBlock, at index: Int) {
+        // 标题文字：只去掉**尾部**的换行和空白（不能去头部！块源码开头可能带着上一块
+        // 留下的空行，去掉会让映射偏移整体错位）
+        let headingSource = trailingTrimmed(block.sourceText)
+        let hiddenLength = sectionSourceEnd(forHeadingAt: index)
+            - (block.sourceRange.location + headingSource.utf16Length)
+
+        let (text, mappings) = renderer.collapsedHeadingContent(
+            blockID: block.id,
+            headingSource: headingSource,
+            blockOrigin: block.sourceRange.location,
+            hiddenSourceLength: max(0, hiddenLength),
+            trailingBreaks: renderer.trailingLineBreakCount(of: block.sourceText)
+        )
+        block.renderedContent = text
+        block.charMappings = mappings
+        block.renderedIsCollapsed = true
+        markFoldAnchor(on: block, isCollapsed: true)
+    }
+
+    /// 给一个块的渲染内容打上折叠锚点（UI 层据此在左边装订线里画三角）
+    private func markFoldAnchor(on block: MarkdownBlock, isCollapsed: Bool) {
+        var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: block.renderedContent),
+                                        mappings: block.charMappings)
+        renderer.markFoldAnchor(on: &fragment, blockID: block.id, isCollapsed: isCollapsed)
         block.renderedContent = fragment.text
         block.charMappings = fragment.mappings
+        block.hasFoldAnchor = true
+    }
+
+    /// 某一节的源码结束位置（绝对偏移）：这一节最后一个块的结尾
+    private func sectionSourceEnd(forHeadingAt index: Int) -> Int {
+        guard let section = sectionBlockRange(forHeadingAt: index) else { return 0 }
+        guard let last = section.last, last < blocks.count else {
+            return NSMaxRange(blocks[index].sourceRange)
+        }
+        return NSMaxRange(blocks[last].sourceRange)
+    }
+
+    /// 去掉字符串**尾部**的换行 / 空格 / 制表符（头部一个字都不动）
+    private func trailingTrimmed(_ text: String) -> String {
+        var end = text.utf16Length
+        while end > 0 {
+            let character = text.substring(utf16Offset: end - 1, length: 1)
+            guard character == "\n" || character == " " || character == "\t" || character == "\r" else { break }
+            end -= 1
+        }
+        return text.substring(utf16Offset: 0, length: end)
     }
 
     /// 把旧块的折叠状态传给新块。
@@ -480,6 +658,10 @@ final class MarkdownDocumentStore {
     /// 1. **源码起点相同**：编辑发生在这个块内部时起点不会变 —— 最常见的情况。
     /// 2. **源码文本完全相同**：编辑发生在它前面，块整体位移了，起点变了但内容没变。
     ///    文本太短不参与匹配（`- a` 这种短块太容易和别处重复，误折叠更烦）。
+    ///
+    /// ### 这里只搬 `isCollapsed`，不重新渲染
+    /// 渲染统一交给后面的 `refreshCollapseState()` —— 它要等所有块都就位才能算清楚
+    /// 「谁在折叠节里」，在这里提前渲染会得到错误的结果。
     private func inheritCollapseStates(from oldBlocks: [MarkdownBlock], to newBlocks: [MarkdownBlock]) {
         let collapsed = oldBlocks.filter { $0.isCollapsed }
         guard !collapsed.isEmpty else { return }
@@ -490,31 +672,13 @@ final class MarkdownDocumentStore {
                 || (old.sourceText == newBlock.sourceText && old.sourceText.count >= 4)
             }
             guard matched else { continue }
-
             newBlock.isCollapsed = true
-            rerender(newBlock)
         }
     }
 
-    /// 这个块的源码是不是只有空白（空块不配拥有折叠按钮）
+    /// 这个块的源码是不是只有空白（空白块不算「这一节有内容」）
     private func isBlank(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// 这个块配不配拥有折叠按钮：**源码超过一行**的块才有。
-    ///
-    /// ### 为什么按「源码行数」判断，而不是「渲染后占几行」
-    /// 渲染占几行要等 TextKit 排完版才知道，而块是在渲染阶段组装的，那时候还没有布局结果；
-    /// 拿容器宽度去估算又很不靠谱（中英文混排、图片、缩进都会影响）。
-    /// 按源码行数判断既简单又可预测：列表、引用、代码块、多行段落有按钮，
-    /// 标题和单行段落没有 —— 后者折起来本来就没什么意义。
-    ///
-    /// 注意尾部要 trim：每个块的源码都自带结尾的换行和空行（切块约定），
-    /// 不 trim 的话 `# 标题一\n\n` 会被算成 3 行，那就没有单行块了。
-    private func canCollapse(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        return trimmed.contains("\n")
     }
 
     /// 整块都是空行/空白时，原样渲染（1 个字符对 1 个源码字符，天然保证复制还原）
@@ -590,7 +754,10 @@ final class MarkdownDocumentStore {
         var lower = Int.max
         var upper = Int.min
 
-        for (index, block) in blocks.enumerated() {
+        for (index, block) in blocks.enumerated() where !block.isHidden {
+            // ⚠️ 被折叠隐藏的块必须跳过：它们的 `renderedRange` 是**零长度**的，
+            // 光标正好停在「⋯」后面时会被误判成命中，于是每敲一个字都要把整节
+            // 重新解析一遍（长文档下输入会卡，还可能把收起来的内容又吐回屏幕）
             let range = block.renderedRange
             let hit: Bool
             if renderedRange.length == 0 {

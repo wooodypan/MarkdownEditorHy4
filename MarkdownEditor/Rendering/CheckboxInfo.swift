@@ -49,5 +49,16 @@ final class CheckboxInfo: NSObject {
 
 extension NSAttributedString.Key {
     /// 标记「这三个字符是一个任务列表的 `[x]` / `[ ]`」的自定义属性，值类型是 `CheckboxInfo`。
+    ///
+    /// 挂在**源码字符**上，所以它能被用户看见、被光标选中 —— 语义是「这三个字符是复选框字面量」。
     static let markdownCheckbox = NSAttributedString.Key("com.markdowneditor.checkbox")
+
+    /// 标记「这一个字符位是渲染层给复选框留的座位」（透明占位 attachment），值类型同样是 `CheckboxInfo`。
+    ///
+    /// 和 `.markdownCheckbox` 的分工：
+    /// - `.markdownCheckbox` 说明**状态和源码位置**（挂在 `[x]` 上，跟显示无关）；
+    /// - `.markdownCheckboxSeat` 说明**按钮该摆哪儿**（挂在座位上，跟源码无关）。
+    ///
+    /// `MarkdownTextView` 优先按座位摆按钮；没有座位时（遮盖模式）才回退到字面量矩形。
+    static let markdownCheckboxSeat = NSAttributedString.Key("com.markdowneditor.checkboxSeat")
 }
