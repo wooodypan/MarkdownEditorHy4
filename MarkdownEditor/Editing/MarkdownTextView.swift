@@ -1060,7 +1060,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             button.anchor = anchor.info
             button.apply(isCollapsed: anchor.info.isCollapsed)
             button.frame = CGRect(x: x,
-                                  y: line.midY - side / 2,
+                                  y: line.midY + side/2 - 5,
                                   width: side,
                                   height: side)
             button.addTarget(self, action: #selector(foldButtonTapped(_:)), for: .touchUpInside)

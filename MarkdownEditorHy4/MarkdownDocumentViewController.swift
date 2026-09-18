@@ -264,6 +264,51 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         ])
     }
 
+    // MARK: 调试菜单项
+
+    /// 「TextKit 调试层」开关（只在 Debug 版本里存在）。
+    ///
+    /// ### 为什么必须存成一个属性，而不是在 `makeActionMenu()` 里现造一个
+    /// 菜单项左边的那个勾，是记在 **action 对象自己** 身上的（`UIAction.state`）。
+    /// 每次弹菜单都新建一个 action 的话，勾会永远停在创建时的初始值 ——
+    /// 明明已经打开了，菜单里却不显示勾，看着像「点了没反应」。
+    /// 所以整个控制器生涯只用这一个实例，每次点击就地改它的 `state`。
+    #if DEBUG
+    private lazy var textKitDebugAction = UIAction(
+        title: "TextKit 调试层",
+        image: UIImage(systemName: "rectangle.dashed"),
+        state: .off
+    ) { [weak self] action in
+        // 先把 self 解开：下面既要调编辑器，又要更新状态栏
+        guard let self else { return }
+        // 返回值就是「现在开着吗」：true = 刚装上，false = 刚摘掉
+        let isOn = self.editor.installLineFragmentDebugOverlay()
+        action.state = isOn ? .on : .off
+        self.flashStatus(isOn ? "已显示：红=行框 蓝=usedRect 绿=附件 橙=容器" : "已隐藏 TextKit 调试层")
+    }
+    #endif
+
+    /// 「视图描边」开关（只在 Debug 版本里存在）。
+    ///
+    /// 这就是网页里那句 `*{outline:1px dashed red}` 书签的等价物：递归走一遍窗口里的视图树，给每个 layer 描一圈极细的边，用来查「这个控件到底占了多大、有没有伸出父视图、谁盖住了谁」。
+    ///
+    /// 和上面那条一样，必须存成属性而不是每次现造一个 —— 勾（`UIAction.state`）是记在 action 对象自己身上的，新建一个就永远停在初始值。
+    #if DEBUG
+    private lazy var viewBordersAction = UIAction(
+        title: "视图描边",
+        image: UIImage(systemName: "square.dashed"),
+        // 初始的勾按「现在是不是真描着边」来：`ViewBorders.installIfRequested` 那条环境变量 (`VIEW_BORDERS=1`) 的路子可能已经在启动时描上了，菜单里的勾得和实际状态一致，否则第一次点下去看着像「点了没反应」
+        state: ViewBorders.isVisible ? .on : .off
+    ) { [weak self] action in
+        guard let self else { return }
+        // 传 window 而不是 self.view：从窗口根开始描，才能把状态栏、弹出菜单这些不在本控制器视图树里的东西一起描上。
+        // ⚠️ 窗口还没挂上时这里是 nil —— 此时 ViewBorders 会退化成「所有活跃窗口」，正好也是我们要的效果，不用额外兜底
+        let isOn = ViewBorders.toggle(in: self.view.window)
+        action.state = isOn ? .on : .off
+        self.flashStatus(isOn ? "已显示视图描边（颜色按层级轮换）" : "已隐藏视图描边")
+    }
+    #endif
+
     /// 组装弹出菜单里的条目。
     /// 每个 UIAction 就是一行：标题 + 图标 + 点击后要执行的代码
     private func makeActionMenu() -> UIMenu {
@@ -293,7 +338,20 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
                 self?.showSettings()
             }
         ]
+
+        #if DEBUG
+        // 调试项单独成一组：`.displayInline` 让它就地展开（不变成二级菜单），
+        // 菜单里会在它上面画一条分隔线，免得和上面那些正常功能混在一起被误点。
+        // 整个 `#if DEBUG` 都删掉，Release 包里就没有这一项了。
+        // 以后再加调试开关，只往这个数组里塞一个 action 就行，别的不用动
+        let debugSection = UIMenu(
+            options: .displayInline,
+            children: [textKitDebugAction, viewBordersAction]
+        )
+        return UIMenu(children: actions + [debugSection])
+        #else
         return UIMenu(children: actions)
+        #endif
     }
 
     // MARK: 设置

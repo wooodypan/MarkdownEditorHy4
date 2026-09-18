@@ -33,6 +33,7 @@
 | [12](#12-任务项正文里带-x复选框却显示成已勾选2026-09-18) ★ | 2026-09-18 | 勾选状态取了解析器给的 `item.checkbox`，而它是用 `strstr(整行, "[x]")` 算的 —— 正文里有个 `[x]` 就把整项报成已勾选 | `MarkupToAttributedRenderer.swift`、`MarkdownEditorHy4Tests.swift` |
 | [13](#13-点一下复选框方框就变宽2026-09-18) ★ | 2026-09-18 | 方框宽度写成「按**当前**那个字面量取宽」，而 `[ ]` 和 `[x]` 在图里宽度本来就不同（15.95 / 20.09pt）—— 点一下方框就长 4pt | `MarkdownTextView.swift`、`CheckboxControl.swift`、`MarkdownEditorHy4Tests.swift` |
 | [14](#14-任务项里按一次退格-整段被吃掉2026-09-18) ★ | 2026-09-18 | 复选框座位是无条件打了语法标记的装饰附件，把 `- ` 和 `[ ] ` 两段标记**粘成一段** —— 在 `]` 右边按一次退格，`- [ ] ` 整段被吃掉；装饰层又没及时重刷，按钮还残留在屏幕上 | `RenderedFragment.swift`、`MarkupToAttributedRenderer.swift`、`MarkdownDocumentStore.swift`、`MarkdownTextView.swift`、`TaskListBackspaceTests.swift`（新增） |
+| [15](#15-点开目录一条标题都不显示2026-09-18) ★ | 2026-09-18 | 面板收着（46 点宽）时按这个宽度量好了「每行 36 点」，展开成 210 点宽之后没人重问 —— 减去缩进和三角，标题的可用宽度成了负数，一个字都画不出来 | `MarkdownOutlineView.swift`、`MarkdownOutlineHeightTests.swift` |
 
 ---
 
@@ -1514,6 +1515,113 @@ layout 里触发同一件事，这次只是把「下一次」提前到「这一�
    本次是座位，下次可能是图片占位、折叠三角 ⋯ 任何一个装饰。
 3. **改了文本就主动刷一次装饰层。** TextKit 改文本 ≠ view 会重新布局 ——
    「数据对了，屏幕没跟上」这种 bug 全靠这一条防。
+
+---
+
+## 15. 点开目录，一条标题都不显示（2026-09-18）★
+
+### 15.1 现象
+
+冷启动时右上角只有一个展开小方块（`MarkdownDocumentViewController.setupOutline` 里
+`outlineView.setCollapsed(true, animated: false)`）。点它展开目录：
+
+- 面板**确实变高变宽了**（46×36 → 210×224），
+- 可里面**一个字都没有** —— 六条标题像是凭空消失了。
+
+### 15.2 类比
+
+面板是块能伸缩的画板。收起来时只有 46 点宽，画板照着这个宽度量好了「每一行该多宽（36 点）」，
+把结果写在便签上。展开成 210 点宽之后，**便签没人重写** —— 画板继续按 36 点排行。
+
+一行只有 36 点宽，左边缩进 15 点、右边要给折叠三角留 26 点，留给标题文字的宽度是
+**负数**。字自然一个都画不出来。
+
+### 15.3 为什么会这样（根因）
+
+`MarkdownOutlineView.layoutSubviews` 里那段「宽度变了就重新问一遍行宽」的判据，
+量错了对象：
+
+```swift
+let width = effectiveWidth          // ← 问题就在这一行
+if abs(width - lastLaidOutWidth) > 0.5 {
+    lastLaidOutWidth = width
+    collectionView.collectionViewLayout.invalidateLayout()
+}
+```
+
+`effectiveWidth` 是「**展开时该有多宽**」，它压根不认识收起态 —— 面板收着（真身只有 46 点宽）的
+时候，它返回的照样是 210。于是：
+
+| 时刻 | `effectiveWidth` | `lastLaidOutWidth` | 差值 | 结果 |
+|---|---|---|---|---|
+| 首次布局（收起态） | 210 | 0 → 210 | 210 | 作废一次布局，行按 46 点宽算 → **36** |
+| 后续布局（仍是收起） | 210 | 210 | 0 | 什么都不做 |
+| **展开（真身 46 → 210）** | **210** | **210** | **0** | **什么都不做 —— flow layout 继续用 36 点那个缓存** |
+
+Probe 打出来的行 frame 一眼能看出问题（面板已经是 210 宽了，行却只有 36 宽，
+六个被横着挤到一行里）：
+
+```
+PROBE 展开后: panelH=224.0 bounds=(0.0, 0.0, 210.0, 224.0)
+  row frame=(5.0,   4.0, 36.0, 30.0)   一级标题
+  row frame=(46.0,  4.0, 36.0, 30.0)   二级标题
+  row frame=(87.0,  4.0, 36.0, 30.0)   三级标题
+  …
+  row frame=(5.0,  34.0, 36.0, 30.0)   六级标题   ← 挤到第二行了
+```
+
+修好之后是正常的竖排：
+
+```
+  row frame=(5.0, 4.0,   200.0, 30.0)  一级标题
+  row frame=(5.0, 34.0,  200.0, 30.0)  二级标题
+  …
+```
+
+### 15.4 怎么修的（两处）
+
+| 文件 | 改动 |
+|---|---|
+| `MarkdownOutlineView.layoutSubviews` | 改成量 `panelWidthConstraint.constant`（收起 46 / 展开 210，**任何状态下都是真值**），不再量 `effectiveWidth` |
+| `MarkdownOutlineView.setCollapsed` | 收起 / 展开时**主动**作废一次行宽布局。⚠️ 必须排在 `refreshPanelSize` **之前** —— 后者会触发布局，顺序反了这次布局还是照旧尺寸摆行 |
+
+### 15.5 怎么验证
+
+两条回归测试放在 `MarkdownEditorHy4Tests/MarkdownOutlineHeightTests.swift`：
+
+| 测试 | 盯的是什么 |
+|---|---|
+| `testRowsReflowToFullWidthWhenExpandedFromCollapsed` | 收起 → 灌标题 → 展开，每一行必须占满面板宽度，且行与行正好差一个行高 |
+| `testRowsKeepFullWidthAfterCollapseAndExpandAgain` | 来回收起展开一次，行宽不许跑掉 |
+
+**反向验证**（把两处修复都撤掉重跑）：两条都红，报的正是
+`36.0 is not equal to 200.0` 和「第 2 行没排在下一行」。
+
+#### ⚠️ 这个 bug 极难写出「能复现的测试」，下面两个坑都真踩过
+
+1. **展开那一步必须走 `animated: true`**（真实点按钮走的就是它 —— 只靠 `refreshPanelSize`
+   里那个动画块触发布局）。换成 `animated: false` 再手工 `layoutIfNeeded()`，
+   那次全量布局会顺带把行宽重算一遍 → 测试变绿，而 bug 照样在用户手里。
+2. **面板必须「从出生就是收起态」**。拿现成的 `makeOutlineView()` 建出来的面板默认是展开的，
+   会先以 210 点宽布局一次 —— 那一次就把「展开后每行该多宽（200）」缓存进 flow layout 了，
+   之后再展开正好命中缓存 → 又是绿的。为此专门加了 `makeCollapsedOutlineView()`，
+   在**第一次布局之前**就 `setCollapsed(true)`，和 App 里 `setupOutline` 的顺序一致。
+
+第一版测试就是这么写的，撤掉修复仍然全绿，等于什么都没测到。
+
+### 15.6 以后注意什么
+
+1. **「该有多宽」和「现在是多宽」是两回事。** 拿 `effectiveWidth` / `effectiveMaximumHeight`
+   这类「算值」当「变了没有」的判据，只要一出现「某个状态下的算值恰好等于另一个状态的真值」
+   就会静默漏判（本例正是如此）。要检测变化，就老老实实量真值 —— 这里量的是约束上的 constant。
+2. **`UICollectionViewFlowLayout` 会缓存 `sizeForItemAt` 的结果**，容器尺寸变了它不会自动重问。
+   凡是「容器的宽高是自己算出来、会突然变化」的地方（本例的收起 / 展开，还有设置页改高度），
+   都得**显式** `invalidateLayout()`，而且顺序要排在「触发布局的那次调用」之前。
+
+### 15.7 改动文件
+
+- `MarkdownEditor/Outline/MarkdownOutlineView.swift`（两处 + 一处注释订正）
+- `MarkdownEditorHy4Tests/MarkdownOutlineHeightTests.swift`（新增 2 条测试 + 1 个 helper）
 
 ---
 

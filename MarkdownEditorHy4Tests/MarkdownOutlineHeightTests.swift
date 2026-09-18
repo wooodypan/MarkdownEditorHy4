@@ -171,6 +171,95 @@ final class MarkdownOutlineHeightTests: XCTestCase {
                        "收起后只剩标题栏那么高")
     }
 
+    /// ⚠️ 回归：从「收起」展开回来时，每一行必须按**展开后**的宽度重排。
+    ///
+    /// ### 曾经出过的事（症状：点开目录后一条标题都不显示）
+    /// `layoutSubviews` 里拿 `effectiveWidth` 去和「上一次的宽度」比 —— 而 `effectiveWidth`
+    /// **在收起态返回的也是展开后的理想宽度**（它压根不认识收起态）。于是收起时就被记成 210，
+    /// 展开时差值 0，一次都不作废布局：flow layout 继续用收起态算出来的 36 点宽排行，
+    /// 减去左边缩进和右边给三角留的位之后，标题的可用宽度成了**负数**。
+    /// 面板明明变高变宽了，里面一个字都看不到。
+    ///
+    /// ### ⚠️ 展开这一步必须走 `animated: true`（真实点按钮走的就是它）
+    /// 它只靠 `refreshPanelSize` 里的动画块触发布局；换成 `animated: false` 再手工
+    /// `layoutIfNeeded()` 的话，那次全量布局会顺带把行宽重算一遍 —— 测试就变绿了，
+    /// 而这个 bug 照样在用户手里（实测踩过：撤掉修复这条用例仍全绿）
+    func testRowsReflowToFullWidthWhenExpandedFromCollapsed() {
+        let (view, host) = makeCollapsedOutlineView()
+        // 顺序和 App 里一致：先收起、再灌标题（此时行列表高度是 0）
+        view.updateOutlineItems(makeItems(6))
+        host.layoutIfNeeded()
+
+        view.setCollapsed(false, animated: true)
+        spinRunLoop()
+
+        let rows = view.createdRowCells
+        XCTAssertEqual(rows.count, 6, "展开之后六行都该建出来")
+
+        let expectedWidth = view.bounds.width - view.appearance.bodyHorizontalPadding * 2
+        for (index, row) in rows.enumerated() {
+            XCTAssertEqual(row.frame.width, expectedWidth, accuracy: 1,
+                           "第 \(index + 1) 行宽 \(row.frame.width)，该占满面板（\(expectedWidth)）——"
+                           + "行太窄的话标题会被挤成负数宽度，屏幕上一条都看不见")
+        }
+        // 竖排：每一行正好比上一行低一个行高。行宽不对时它们会被横向挤在一行里
+        for index in 1..<rows.count {
+            XCTAssertEqual(rows[index].frame.minY - rows[index - 1].frame.minY,
+                           view.appearance.rowHeight, accuracy: 1,
+                           "第 \(index + 1) 行没排在下一行，行被横着挤到一起了")
+        }
+    }
+
+    /// 收起再展开一次（用户来回点）也得保持正确 —— 这条守的是
+    /// `setCollapsed` 里那次「作废布局」不能只在某一种切换方向上生效
+    func testRowsKeepFullWidthAfterCollapseAndExpandAgain() {
+        let (view, host) = makeCollapsedOutlineView()
+        view.updateOutlineItems(makeItems(6))
+        host.layoutIfNeeded()
+
+        view.setCollapsed(false, animated: true)
+        spinRunLoop()
+        view.setCollapsed(true, animated: true)
+        spinRunLoop()
+        view.setCollapsed(false, animated: true)
+        spinRunLoop()
+
+        let expectedWidth = view.bounds.width - view.appearance.bodyHorizontalPadding * 2
+        for row in view.createdRowCells {
+            XCTAssertEqual(row.frame.width, expectedWidth, accuracy: 1,
+                           "来回收起展开一次，行宽就跑掉了")
+        }
+    }
+
+    /// 造一个**从出生就是收起态**的目录面板（挂法同样只在外面定位置、不给定尺寸）。
+    ///
+    /// ### ⚠️ 为什么不能直接用 `makeOutlineView()`
+    /// 它建出来的面板默认是展开的，会先以 210 点宽布局一次 —— 那一次就把「展开后每一行
+    /// 该多宽」缓存进 flow layout 了，之后再展开正好命中缓存，本文件下面那两个回归用例
+    /// 就永远绿（撤掉修复也绿，实测踩过这个坑）。App 里 `setupOutline` 是先
+    /// `setCollapsed(true)` 再布局的，这里必须照那个顺序来，否则测的不是真实路径
+    private func makeCollapsedOutlineView() -> (view: MarkdownOutlineView, host: UIWindow) {
+        let host = UIWindow(frame: CGRect(x: 0, y: 0, width: 700, height: defaultParentHeight))
+        let view = MarkdownOutlineView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: host.topAnchor),
+            view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            view.leadingAnchor.constraint(greaterThanOrEqualTo: host.leadingAnchor)
+        ])
+        host.makeKeyAndVisible()
+        // 关键的一行：第一次布局之前就收起来
+        view.setCollapsed(true, animated: false)
+        host.layoutIfNeeded()
+        return (view, host)
+    }
+
+    /// 等一小会儿 runloop，让展开动画和它触发的布局跑完（不做手工布局）
+    private func spinRunLoop(_ seconds: TimeInterval = 0.4) {
+        RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    }
+
     // MARK: - 启动时的默认状态
 
     /// 需求：默认不展开，只显示那个展开小方块。

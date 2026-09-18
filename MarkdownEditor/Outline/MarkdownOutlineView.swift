@@ -182,8 +182,16 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 卡片宽高（收起 / 展开都靠改这两个的 constant）
     private var panelWidthConstraint: NSLayoutConstraint!
     private var panelHeightConstraint: NSLayoutConstraint!
-    /// 上一次算行宽时用的面板宽度。宽度变了得让 flow layout 重新问一遍尺寸
+    /// 上一次算行宽时用的面板宽度（读的是 `panelWidthConstraint` 的值）。
+    /// 它一变就得让 flow layout 重新问一遍每一行该多宽
     private var lastLaidOutWidth: CGFloat = 0
+
+    /// 标题栏「全部折叠 / 全部展开」按钮的图标尺寸。
+    ///
+    /// 自绘图标按这个边长等比缩放（按钮本身是 26×26，图标留出呼吸空间）。
+    /// ⚠️ 图形在它那张 256×256 的画布上只占中间 224×224，所以**实际看到的大小**是
+    /// 这里的 87.5% 左右 —— 觉得图标偏小就调大这个数，别去改绘制代码里的坐标
+    private static let collapseAllIconSize = CGSize(width: 18, height: 18)
 
     // MARK: 初始化
 
@@ -339,6 +347,11 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         guard collapsed != isCollapsed else { return }
         isCollapsed = collapsed
         applyCollapseState()
+        // 面板宽度会在「小方块」和完整面板之间切换，行宽跟着变 —— flow layout 必须重新问一遍
+        // 每一行该多宽。⚠️ 这一步必须在下面触发布局**之前**做：收起时行是按 46 点宽算好的，
+        // 不重问的话展开后还是那个尺寸；减去左边缩进和右边给三角留的位之后，
+        // 标题的可用宽度成了负数，屏幕上一条标题都看不到（看着像「目录里什么都没有」）
+        collectionView.collectionViewLayout.invalidateLayout()
         refreshPanelSize(animated: animated)
     }
 
@@ -436,7 +449,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         collapseAllButton.addTarget(self, action: #selector(toggleCollapseAll), for: .touchUpInside)
         headerBar.addSubview(collapseAllButton)
 
-        collapseButton.setImage(UIImage(systemName: "chevron.right"), for: .normal)
+//        collapseButton.setImage(UIImage(systemName: "chevron.right"), for: .normal)
+        collapseButton.setTitle("x", for: .normal)
         collapseButton.translatesAutoresizingMaskIntoConstraints = false
         collapseButton.addTarget(self, action: #selector(toggleCollapsed), for: .touchUpInside)
         collapseButton.accessibilityLabel = "收起大纲"
@@ -469,7 +483,7 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
                                                   constant: -4),
 
             collapseAllButton.trailingAnchor.constraint(equalTo: collapseButton.leadingAnchor,
-                                                        constant: -2),
+                                                        constant: -12),
             collapseAllButton.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
             collapseAllButton.widthAnchor.constraint(equalToConstant: 26),
             collapseAllButton.heightAnchor.constraint(equalToConstant: 26),
@@ -630,8 +644,11 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         headerLabel.text = items.isEmpty ? "大纲" : "大纲 · \(items.count)"
 
         let allCollapsed = isAllCollapsed
-        let symbol = allCollapsed ? "rectangle.expand.vertical" : "rectangle.compress.vertical"
-        collapseAllButton.setImage(UIImage(systemName: symbol), for: .normal)
+        // 自绘图标（见 VectorIcon.outlineExpandAll / .outlineCollapseAll）：
+        // 系统那个 rectangle.compress.vertical 是「方框 + 居中横条」的通用图形，
+        // 和大纲这个面板的气质不太搭，换成设计稿给的两个
+        let icon: VectorIcon = allCollapsed ? .outlineExpandAll : .outlineCollapseAll
+        collapseAllButton.setVectorIcon(icon, size: Self.collapseAllIconSize)
         collapseAllButton.accessibilityLabel = allCollapsed ? "全部展开" : "全部折叠"
         // 一条能折的都没有（比如全文只有单层标题）→ 按钮置灰，明说这儿没得可折
         collapseAllButton.isEnabled = !collapsibleIDs.isEmpty
@@ -746,9 +763,13 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         // 算出来的值只依赖父视图，所以改一次就收敛，不会来回抖
         refreshPanelSize(animated: false)
 
-        // 行宽 = 可视宽度 - 左右留白。宽度变了得让 layout 重新问一遍尺寸，
-        // 否则会沿用上一次的宽度（Catalyst 拉窗口时行会「短一截」）
-        let width = effectiveWidth
+        // 行宽 = 面板宽度 - 左右留白。宽度变了得让 layout 重新问一遍尺寸，
+        // 否则会沿用上一次的宽度（Catalyst 拉窗口时行会「短一截」）。
+        //
+        // ⚠️ 这里量的是**面板宽度约束上的值**，不能用 `effectiveWidth`：
+        // 后者在收起态返回的也是展开后的理想宽度（210），于是收起时就被记成 210，
+        // 展开时差值 0、一次都不作废布局 —— 症状就是「点开目录后一条标题都不显示」
+        let width = panelWidthConstraint.constant
         if abs(width - lastLaidOutWidth) > 0.5 {
             lastLaidOutWidth = width
             collectionView.collectionViewLayout.invalidateLayout()
