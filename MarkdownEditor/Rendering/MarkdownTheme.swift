@@ -54,6 +54,14 @@ struct MarkdownTheme {
     var quoteTextColor: UIColor
     var bulletColor: UIColor
     var separatorColor: UIColor
+    /// 查找命中的底色（「当前命中」之外的那些）
+    ///
+    /// 和项目里其它颜色一样，这里是唯一一处决定「命中给什么颜色」的地方，改这儿就够了。
+    /// 和行内代码那个底色不同，这里**可以**用不透明实色：它是 `SearchHighlightLayer`
+    /// 画在文字**下面**的一层，不像挂在文字上的 `.backgroundColor` 那样会盖住系统选中高亮。
+    var searchMatchBackground: UIColor = UIColor.systemYellow.withAlphaComponent(0.55)
+    /// 当前那一个命中的底色（比其它命中更重，好让用户看清「现在在第几个」）
+    var searchCurrentMatchBackground: UIColor = UIColor.systemOrange.withAlphaComponent(0.85)
 
     // MARK: 尺寸
 

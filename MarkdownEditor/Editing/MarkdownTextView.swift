@@ -81,6 +81,24 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 所以不能标 `private`（跨文件扩展够不到）—— 它只在本模块内可见，不外泄。
     var outlineCursorWork: DispatchWorkItem?
 
+    // MARK: 查找 / 替换
+
+    /// 查找事件的出口（同样是协议，理由和大纲那边的完全一致）。
+    ///
+    /// 编辑器只在「内容被编辑过」时通过它喊一声 —— 命中项记的是源码偏移，一改就要重新算，这条链路缺了就会出现「高亮停在错词上」。
+    weak var searchEventSink: MarkdownSearchEventSink?
+
+    /// 查找 / 替换的运行时状态。
+    ///
+    /// ### 为什么打包成一个结构体而不是五个散装的存储属性
+    /// Swift 的 extension 里不能声明存储属性，而查找逻辑打算整个放在 `MarkdownTextView+Search.swift` 里（和大纲分文件的做法一致）。
+    /// 这里只声明一个坑位，里面的字段见那个文件里的 `SearchState`。
+    var searchState = SearchState()
+
+    /// 命中项的高亮层：一个自己画矩形的 UIView，夹在「引用竖条」和「文字」之间。
+    /// 读写发生在 `MarkdownTextView+Search.swift`，所以不能标 `private`。
+    let searchHighlightLayer = SearchHighlightLayer()
+
     // MARK: 状态
 
     /// 上一次同步给模型的渲染文本。textView 的实际内容和它 diff，就能定位用户改了哪一段。
@@ -89,8 +107,6 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private(set) var isApplyingModelChange = false
     /// 上一次渲染时用的容器宽度，窗口尺寸变了要整篇重排
     private var renderedWidth: CGFloat = 0
-    /// 上一次渲染时用的容器**高度**。图片的最大高度跟着它走，所以窗口变高变矮也要重排
-    private var renderedHeight: CGFloat = 0
     /// 程序自己发起的编辑正在进行（比如点复选框）。
     ///
     /// 这种编辑**不是系统记的**，`applyEdit` 里 disable/enable undo 的配对在这种时机
@@ -147,12 +163,14 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     // MARK: 大纲跳转（见 MarkdownTextView+Outline.swift）
 
-    /// 当前正在进行的那次「跳到某个标题」的序号。
+    /// 当前正在进行的那次「滚到某个位置」的序号。
     ///
     /// 跳转要分好几轮滚动才能收敛（原因见 `MarkdownTextView+Outline.swift` 里的说明），
-    /// 而这期间用户可能又点了别的标题 —— 用序号把上一轮的残余步骤作废，
-    /// 免得两个目标互相拉扯。
-    var outlineJumpToken = 0
+    /// 而这期间用户可能又点了别的标题、或者在查找里按了「下一个」—— 用序号把上一轮的残余步骤作废，免得两个目标互相拉扯。
+    ///
+    /// ### 为什么目录跳转和查找跳转共用这一个序号
+    /// 它们滚动的是**同一个 textView**，目标只能有一个。共用一个序号意味着「点了标题」会自动作废上一次「查找下一个」的滚动，反之亦然 —— 正是想要的效果。
+    var jumpToken = 0
 
     // MARK: 初始化
 
@@ -175,6 +193,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
         configureTextView()
         setupCodeBlockDecorations()
+        setupSearchDecorations()
         setupFoldDecorations()
         setMarkdown(markdown)
     }
@@ -202,6 +221,19 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         autocapitalizationType = .none
 
         setupImageTapGesture()
+    }
+
+    // MARK: 查找命中的高亮层
+
+    /// 铺查找高亮层。绘制逻辑本身在 `MarkdownTextView+Search.swift`，这里只管插队秩序。
+    ///
+    /// ### 为什么必须夹在引用竖条上面、文字下面
+    /// - 插到最底层的话，命中落在代码块里时会被那块**不透明**的灰背景整块盖住，看着像没命中；
+    /// - 加在最上层的话又会压住文字。
+    /// 所以它排在 `quoteBarLayer`（引用竖条）之后 —— 竖条和代码块背景都在它下面，文字仍在它上面。
+    private func setupSearchDecorations() {
+        searchHighlightLayer.isUserInteractionEnabled = false
+        insertSubview(searchHighlightLayer, aboveSubview: quoteBarLayer)
     }
 
     // MARK: 点图片预览
@@ -314,6 +346,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 整篇换掉了，标题列表一定变了；光标也被重置。这两件事一起告诉目录
         publishOutlineItems()
         publishOutlineCursor()
+        // 整篇换过之后，上一次查找记的源码偏移全都不作数了，直接收摊（不试图保留：换文档 / 撤销这类场景下「接着上一次那个词继续查」没有意义）
+        clearSearchHighlight()
     }
 
     /// 把模型里的渲染结果整篇写进 textStorage。
@@ -425,6 +459,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         updateCodeBlockDecorationsIfNeeded()
         // 折叠三角 / 「⋯」热区同理，只是它每次都按 fragment 的当前位置重摆
         positionFoldControls()
+        // 查找命中的黄块：只有当某一处滚进视野附近时才去 TextKit 那儿量它的矩形
+        updateSearchHighlightsIfNeeded()
 
         // 容器宽度变了（转屏、Catalyst 拉窗口）→ 图片尺寸要跟着变，整篇重排一次
         let width = currentContainerWidth
@@ -473,6 +509,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             self?.positionQuoteBars()
             self?.positionCheckboxes()
             self?.positionFoldControls()
+            self?.positionSearchHighlights()
             // 2) 再要一轮布局：重算必须发生在 `layoutSubviews` 里（**在 super.layoutSubviews()
             //    之后**）—— TextKit 是在那一轮里更新 viewport 的，在滚动回调里直接算拿到的是
             //    上一次 viewport 的估算值，等于白算。重算逻辑见 refreshDecorationsNearViewport。
@@ -1435,6 +1472,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 那时候标题一个都没动，目录不用白跑一趟，长文档连续打字也就不会被拖慢。
         if outcome.headingsChanged { publishOutlineItems() }
 
+        // 内容一改，查找命中记的那批源码偏移就可能整体平移，通知外面（查找协调者）重新查一遍。
+        // 只有真的有人在听时才发 —— 没开查找框时不该为这个付任何代价。
+        if searchEventSink != nil, !searchState.suppressesChangeNotice {
+            searchEventSink?.editorContentDidChange()
+        }
+
         // 内容变了，装饰层（复选框按钮、代码块背景、引用竖条、折叠三角）可能整体失效，要**马上**重算一遍。
         //
         // 为什么不能只靠 `needsCodeBlockRefresh = true`：装饰层平时只挂在 `layoutSubviews` 里刷新，而我们用的是 TextKit 2 的 `performEditingTransaction` 改文本 —— 它会让 TextKit 的排版失效，但**不保证**系统会给 textView 排一次布局。实测：删掉文档里最后一个任务项后，渲染文本里座位已经没了，屏幕上那个复选框按钮却一直留在原地，要等下一次滚动（那时才走 layout）才消失。
@@ -1542,7 +1585,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// （见 `applyEdit` 里 disable/enable 那段注释）。
     ///
     /// - parameter actionName: 撤销菜单上显示的名字（Edit 菜单会显示「撤销 粘贴」）
-    private func performUndoableModelEdit(actionName: String, _ edit: () -> Void) {
+    ///
+    /// 不开 `private` 是因为查找 / 替换也算「命令类编辑」，要用同一套「整篇源码快照」的撤销登记方式（见 `MarkdownTextView+Search.swift`）。
+    func performUndoableModelEdit(actionName: String, _ edit: () -> Void) {
         // 快照：撤销就是「把整篇源码恢复成现在这样」
         let previousSource = documentStore.sourceDocument
         let previousCaret = selectedRange.location
@@ -1582,7 +1627,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 用 `setMarkdown` 而不是逐块替换：快照存的就是整篇源码，
     /// 整篇重建最省心，而且渲染结果和当初逐字符一致
     /// （`setMarkdown` 只动 storage，完全不会碰撤销栈，见 `replaceWholeStorage`）。
-    private func restoreDocument(source: String, caret: Int) {
+    ///
+    /// 不开 `private`：替换也需要这个「整篇回到某个源码快照」的动作。
+    func restoreDocument(source: String, caret: Int) {
         setMarkdown(source)
         let length = (text as NSString).length
         selectedRange = NSRange(location: min(max(0, caret), length), length: 0)

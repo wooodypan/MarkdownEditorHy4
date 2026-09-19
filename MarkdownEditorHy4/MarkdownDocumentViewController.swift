@@ -58,6 +58,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     private let outlineView = MarkdownOutlineView()
     /// 大纲协调者：把编辑器和目录面板连起来
     private let outlineCoordinator = OutlineCoordinator()
+    /// 顶部的查找 / 替换横条（纯 UI 层，不认识编辑器）
+    private let findBar = MarkdownFindBarView()
+    /// 查找协调者：把编辑器和查找横条连起来
+    private let searchCoordinator = SearchCoordinator()
     /// 用户配置（「记住目录大纲滚动位置」等）。改完会发通知，下面挂了监听同步给大纲面板
     private let settings = MarkdownEditorSettings.shared
     /// 每份文档「上次读到哪儿」的记忆
@@ -83,8 +87,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
 
-        // 顺序有讲究：菜单按钮要先建好，编辑器的顶部约束要挂在它下面
+        // 顺序有讲究：菜单按钮要先建好，查找条挂在它下面、编辑器的顶部又挂在查找条下面
         setupMenuButton()
+        setupFindBar()
         setupEditor()
         setupStatusLabel()
         // 套用宿主送来的内容项。到这一步才做，是因为下面的界面这时才建好 ——
@@ -122,8 +127,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
         bottomConstraint = editor.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         NSLayoutConstraint.activate([
-            // 顶部对齐菜单按钮的下边，这样按钮不会盖住正文第一行
-            editor.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 2),
+            // 顶部对齐查找条的下边 —— 查找条被钉成 0 高时，这行等价于原来「对齐菜单按钮下边」
+            editor.topAnchor.constraint(equalTo: findBar.bottomAnchor),
             editor.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             editor.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bottomConstraint!
@@ -134,6 +139,60 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         editor.onImageTapped = { [weak self] attachment in
             self?.previewImage(attachment)
         }
+    }
+
+    // MARK: 查找 / 替换
+
+    /// 铺查找条，并把 **编辑器 — 协调者 — 查找条** 三者接起来。
+    ///
+    /// 装配代码放在这里的原因和 `setupOutline` 完全一样：协调者刻意不在编辑器或者查找条内部创建，那样组件之间就互相认识了。把这层连接集中在这一处，两个组件各自的初始化都不需要对方的实例。
+    ///
+    /// ### 收起时它是怎么做到「一点高度都不占」的
+    /// 横条的高度由它自己内部那一条 `heightAnchor` 约束独裁（详见 `MarkdownFindBarView`
+    /// 头上的说明），收起时 constant 调成 0。外面**只钉上 / 左 / 右，绝不在这儿再钉一条 height**：两条 required 的 height 撞在一起，Auto Layout 会悄悄丢掉一条，收起就失效了（实测丢过一次，查找条一直占着 50pt 把正文顶下去）。
+    /// 正文那边的 `editor.top = findBar.bottom` 不用管，横条一收它就自动顶上来。
+    private func setupFindBar() {
+        findBar.translatesAutoresizingMaskIntoConstraints = false
+        findBar.setCollapsed(true)
+        view.addSubview(findBar)
+
+        NSLayoutConstraint.activate([
+            // 上沿贴在菜单按钮下面；收起态高度为 0，这条等价于「菜单栏下面」
+            findBar.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 2),
+            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            findBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -60)
+        ])
+
+        // 三根线：数据源、展示方、以及编辑器往外报「内容变了」的出口
+        searchCoordinator.searchDataSource = editor
+        searchCoordinator.findBar = findBar
+        findBar.delegate = searchCoordinator
+        editor.searchEventSink = searchCoordinator
+
+        // 「把它藏起来」是布局层的事，所以最后一步还是回到这里执行
+        findBar.onDismiss = { [weak self] in self?.hideFindBar() }
+    }
+
+    /// 显示查找条（⌘F / 菜单里的「查找」都走到这里）
+    @objc private func showFindBar() {
+        guard findBar.isCollapsed else {
+            // 已经开着：再按一次 ⌘F 就只是把焦点交还给查找框（常见的查找框行为）
+            findBar.beginSearch()
+            return
+        }
+        findBar.setCollapsed(false)
+        UIView.animate(withDuration: 0.18) { self.view.layoutIfNeeded() }
+        findBar.beginSearch()
+    }
+
+    /// 收起查找条：先撤焦点（免得键盘一直挂在它上面），再收回高度。
+    ///
+    /// 标 `@objc` 是为了让测试能直接驱动它（查找框那条关闭链路是异步的，测起来不方便）
+    @objc private func hideFindBar() {
+        guard !findBar.isCollapsed else { return }
+        findBar.endSearch()
+        findBar.setCollapsed(true)
+        UIView.animate(withDuration: 0.18) { self.view.layoutIfNeeded() }
     }
 
     // MARK: 图片预览（QuickLook）
@@ -325,6 +384,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
                 // 新开一页展示当前 markdown 源码
                 self?.showSource()
             },
+            UIAction(title: "查找", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
+                // 顶部滑出查找 / 替换横条
+                self?.showFindBar()
+            },
             UIAction(title: "校验", image: UIImage(systemName: "checkmark.seal")) { [weak self] _ in
                 // 全选复制，比对复制出来的文本和源码是否逐字符一致
                 self?.verifyRoundTrip()
@@ -502,6 +565,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         updateWindowTitle()
         // 换文档 → 大纲从「全部展开」开始（上一份文档折过什么，跟这一份没关系）
         outlineView.resetFolding()
+        // 查找还开着的话，按原来那个词在新文档里重查一遍 —— 换文档时编辑器已经把自己的命中清掉了，不补这一下，计数会停在上一份文档的旧数字上
+        searchCoordinator.rerunIfNeeded()
         // 同一份文档被重新配置（预览 Tab 复用回它自己）就别乱滚，免得跳走
         if !isSameDocument { restoreScrollPositionIfNeeded() }
     }
@@ -745,7 +810,11 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
                                 action: #selector(saveDocument),
                                 input: "s",
                                 modifierFlags: .command)
-        return [new, open, save]
+        let find = UIKeyCommand(title: "查找",
+                                action: #selector(showFindBar),
+                                input: "f",
+                                modifierFlags: .command)
+        return [new, open, save, find]
     }
     #endif
 

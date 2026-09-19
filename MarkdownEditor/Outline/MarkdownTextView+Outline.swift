@@ -66,8 +66,8 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
 
         // 一次点击内部要滚好几轮（原因见下面的注释），期间用户可能又点了别的标题，
         // 用序号把上一轮的残余步骤作废，免得两个目标互相拉扯
-        outlineJumpToken &+= 1
-        jumpStep(token: outlineJumpToken,
+        jumpToken &+= 1
+        jumpStep(token: jumpToken,
                  targetRendered: caret,
                  round: 1,
                  previousGap: 0,
@@ -91,11 +91,11 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
         let length = (text as NSString).length
         let target = min(max(0, documentStore.renderedCaret(forSourceOffset: sourceOffset)), length)
 
-        outlineJumpToken &+= 1
-        let token = outlineJumpToken
+        jumpToken &+= 1
+        let token = jumpToken
         DispatchQueue.main.async { [weak self] in
             // 期间用户又点了目录 / 又换了文档 → 这一轮作废，别和新的滚动目标互相拉扯
-            guard let self, token == self.outlineJumpToken else { return }
+            guard let self, token == self.jumpToken else { return }
             self.layoutIfNeeded()
             self.jumpStep(token: token,
                           targetRendered: target,
@@ -118,6 +118,27 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
     var topVisibleSourceOffset: Int {
         guard let viewport = renderedRangeInViewport() else { return 0 }
         return documentStore.sourceCaret(forRenderedOffset: viewport.start)
+    }
+
+    /// 把某个**渲染位置**滚进视野并停在「屏幕上沿往下 `topPadding`」处。
+    ///
+    /// ### 谁在用它
+    /// - 大纲：`scrollToOutlineItem` 跳到某个标题；
+    /// - 查找：按「下一个」时要跳到第 n 个命中。
+    ///
+    /// 两边都要同一套迭代滚动（不能一次滚到位，原因见下面 `jumpStep` 的注释），所以把这个入口单独拎出来共用 —— 复制一份必然会在某次修 bug 之后漏改其中一边。
+    ///
+    /// - parameter topPadding: 目标停在屏幕上沿往下多少点；不传就用跳转标题时的那个默认值（ Swift 不允许在默认参数里写 `Self.xxx`，所以用可选值表达「没传」）
+    func scrollToRenderedOffset(_ offset: Int, topPadding: CGFloat? = nil) {
+        let padding = topPadding ?? Self.jumpTopPadding
+        let target = min(max(0, offset), totalRenderedLength())
+        jumpToken &+= 1
+        jumpStep(token: jumpToken,
+                 targetRendered: target,
+                 round: 1,
+                 previousGap: 0,
+                 referenceSpan: 0,
+                 topPadding: padding)
     }
 
     /// 迭代滚动：每一轮看「视口顶部现在停在哪」，算出还差多少，再滚过去。
@@ -155,7 +176,7 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
                           previousGap: Int,
                           referenceSpan: Int,
                           topPadding: CGFloat) {
-        guard token == outlineJumpToken, round <= Self.maxJumpRounds else { return }
+        guard token == jumpToken, round <= Self.maxJumpRounds else { return }
         guard markedTextRange == nil else { return }
         guard let viewport = renderedRangeInViewport() else {
             // 量不到视口（还没排版完）—— 退回系统的最小滚动，至少保证光标可见
@@ -259,8 +280,11 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
         }
     }
 
-    /// 视口里当前渲染的文本范围（渲染坐标）。量不到返回 nil
-    private func renderedRangeInViewport() -> (start: Int, end: Int)? {
+    /// 视口里当前渲染的文本范围（渲染坐标）。量不到返回 nil。
+    ///
+    /// 不开 `private` 是为了让查找那边（同一个文件的另一个扩展）也能用：
+    /// 它要按「命中落在哪几个字符」判断该不该去 TextKit 那儿量矩形。
+    func renderedRangeInViewport() -> (start: Int, end: Int)? {
         guard let layoutManager = textLayoutManager,
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
               let viewport = layoutManager.textViewportLayoutController.viewportRange else { return nil }

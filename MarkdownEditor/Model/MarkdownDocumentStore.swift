@@ -299,7 +299,24 @@ final class MarkdownDocumentStore {
     /// `renderedCaret` 是给光标用的：它会主动跳过 attachment、在块边界上做取舍，
     /// 拼出来的长度不可靠。这里直接查映射表，取「源码落在区间内的第一个渲染字符」
     /// 到「最后一个渲染字符」，长度才是精确的。
+    /// 单段的源码 → 渲染换算（大多数调用方只要这一个）。
+    ///
+    /// 命中项跨了块时（比如查找串里带空行，正好跨在两个块中间）会得到**多段**，这种时候这里返回第一段（给复选框那种「一定在块内」的场景用正好）。
+    /// 需要全部段落的调用方请用 `renderedRanges(forSourceRange:)`。
     func renderedRange(forSourceRange range: NSRange) -> NSRange? {
+        renderedRanges(forSourceRange: range).first
+    }
+
+    /// 源码区间 → 渲染区间，**支持跨块**：一段源码被切进两个渲染块时返回两段。
+    ///
+    /// ### 为什么 scan 要遍历所有块而不像以前那样「命中第一个就返回」
+    /// 查找串有可能横跨两个顶层块（例如 `\n\n` 正好落在块的边界上），那时候只取第一块会让高亮画一半、替换替一半。查找 / 替换要的就是全部段落，所以这里老老实实把每一段的都算出来。
+    ///
+    /// ### 每段的算法和以前完全一致：在块里找「源码落在区间内的第一个渲染字符」
+    /// 到「最后一个渲染字符」，长度才是精确的（这也是它和 `renderedCaret` 的区别 —— 后者会跳过 attachment、还会为了给光标找位置而在块边界上做取舍）。
+    func renderedRanges(forSourceRange range: NSRange) -> [NSRange] {
+        var pieces: [NSRange] = []
+
         for block in blocks where !block.isHidden {
             guard let inter = block.sourceRange.intersection(range), inter.length > 0 else { continue }
             let localStart = inter.location - block.sourceRange.location
@@ -315,9 +332,9 @@ final class MarkdownDocumentStore {
                 last = index
             }
             guard let first, let last else { continue }
-            return NSRange(location: block.renderedRange.location + first, length: last - first + 1)
+            pieces.append(NSRange(location: block.renderedRange.location + first, length: last - first + 1))
         }
-        return nil
+        return pieces
     }
 
     /// 在一个块里找「源码偏移 local」对应的渲染位置
