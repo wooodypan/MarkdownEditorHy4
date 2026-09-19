@@ -455,15 +455,15 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         if let firstNewline = source.nsRange(of: "\n", fromUTF16Offset: 0) {
             searchStart = NSMaxRange(firstNewline)
         }
+        // 顺手记下代码正文在**块源码**里的起点：上色被挪到最后了，那时 fragment 里
+        // 已经混进了首尾的 ``` 行，token 的偏移不能再当 0 用，要靠这个值反查真正的起点
+        var codeSourceStart: Int?
         if let codeRange = source.nsRange(of: code, fromUTF16Offset: searchStart), !code.isEmpty {
+            codeSourceStart = codeRange.location
             out.append(.sourceSliced(code, sourceStart: codeRange.location, attributes: theme.codeBlockAttributes))
         } else if !code.isEmpty {
             out.append(.decoration(code, attributes: theme.codeBlockAttributes))
         }
-
-        // 给代码正文上语法色。要**在 reconciled 之前**做：此刻 out 里只有代码正文，
-        // token 的偏移可以直接当 out 内部的偏移用，不用再换算一次
-        applySyntaxHighlighting(to: &out, code: code, language: codeBlock.language)
 
         // 首尾的 ``` 由补漏步骤补进来
         var orphanAttributes = theme.markerAttributes
@@ -477,6 +477,17 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         // UI 层算矩形时能精确认出哪两行是围栏、把它们从背景里抠掉——背景只罩代码正文）。
         // UI 层靠它算出矩形位置、画出背景并放复制按钮，详见 CodeBlockInfo 的注释。
         out.setAttributes([.markdownCodeBlock: CodeBlockInfo(code: code, language: codeBlock.language)])
+
+        // ⚠️ 上色**必须排在最后**，顺序反了会白白慢两个数量级。
+        // 上面那几步（补漏、补段落样式）里有「挨个遍历所有属性、再逐段重设」的写法，
+        // 那种活儿的速度跟「文字被切成了多少小段」直接相关：1 个小段 0.005 毫秒、
+        // 1140 个小段 6.4 毫秒（差约 1280 倍）。先上色就等于把后面几步全逼到碎渣上跑。
+        // 而这一步只写一个 `.foregroundColor`，放在最后不会被谁覆盖，所以是纯赚。
+        // 详细数字见 applySyntaxHighlighting 的注释
+        applySyntaxHighlighting(to: &out,
+                                code: code,
+                                language: codeBlock.language,
+                                codeSourceStart: codeSourceStart)
         return out
     }
 
@@ -486,12 +497,21 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     /// 显示的文字是源码本身（`sourceSliced`），映射一个字都没动，
     /// 所以「全选复制 === 源文件」这条不变式自动成立，不需要为高亮补任何逻辑。
     ///
-    /// - parameter fragment: 只装着这段代码的片段（调用点在 reconciled 之前，满足这个前提）
-    /// - parameter code:     代码正文（**不含**首尾围栏行）
-    /// - parameter language: 围栏后面写的语言标识，没写就 nil
+    /// ### ⚠️ 为什么必须排在「全量属性操作」之后
+    /// 上色会把整段文字切成上千个 attribute run（属性小段）。而 `addAttributesIfAbsent`
+    /// 内部是 `enumerateAttributes` + 逐个小段 `setAttributes`，**耗时跟小段数量强相关** ——
+    /// 实测 1 个小段 0.005 毫秒、1140 个小段 6.4 毫秒（约 1280 倍）。
+    /// 上色放在前头，后面那几步就全跑在碎渣上；而这一步只写一个 `.foregroundColor`，
+    /// 放在最后不会被谁覆盖，所以把顺序调过来是纯赚（19k 字符的代码块约省 6 毫秒）。
+    ///
+    /// - parameter fragment:        代码块渲染完的片段（此时已含首尾的 ``` 行）
+    /// - parameter code:            代码正文（**不含**首尾围栏行）
+    /// - parameter language:        围栏后面写的语言标识，没写就 nil
+    /// - parameter codeSourceStart: 代码正文在**块源码**里的起始偏移，用来反查它在 fragment 里的位置
     private func applySyntaxHighlighting(to fragment: inout RenderedFragment,
                                          code: String,
-                                         language: String?) {
+                                         language: String?,
+                                         codeSourceStart: Int?) {
         guard theme.enablesCodeHighlighting,
               let language,
               let highlighter = codeHighlighter,
@@ -500,18 +520,38 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         let tokens = highlighter.highlight(code, language: language)
         guard !tokens.isEmpty else { return }
 
-        // token 的坐标原点就是这段代码的首字符，和 fragment 内部坐标一致。
+        // token 的坐标原点在代码正文的首字符，而代码正文前面还压着 ``` 那一行
+        // （补漏步骤补进来的），所以要先找出代码正文在 fragment 里的起点，把坐标平移过去
+        let shift = codeTextStart(in: fragment, codeSourceStart: codeSourceStart)
+        let codeLength = min(code.utf16Length, max(0, fragment.text.length - shift))
+        guard codeLength > 0 else { return }
+
         // 夹一段范围是防御：万一高亮器越界，也不能让 addAttribute 直接崩掉整篇渲染
-        let limit = NSRange(location: 0, length: min(fragment.text.length, code.utf16Length))
+        let codeLimit = NSRange(location: 0, length: codeLength)
         for token in tokens {
-            let range = NSIntersectionRange(token.range, limit)
-            guard range.length > 0 else { continue }
-            // 注意用 addAttributes 而不是 addAttributesIfAbsent —— 代码正文早就带上
+            let clamped = NSIntersectionRange(token.range, codeLimit)
+            guard clamped.length > 0 else { continue }
+            // 注意用 addAttribute 而不是 addAttributesIfAbsent —— 代码正文早就带上
             // 了默认前景色，这里是要**盖掉**它（详见 RenderedFragment 那两个函数的注释）
             fragment.text.addAttribute(.foregroundColor,
                                        value: theme.color(for: token.role),
-                                       range: range)
+                                       range: NSRange(location: clamped.location + shift,
+                                                      length: clamped.length))
         }
+    }
+
+    /// 代码正文在 fragment 里的起始偏移（从 fragment 开头的第几个字符位开始）。
+    ///
+    /// 靠映射表反查：源码偏移在块内是唯一的，找「第一条既不是装饰、也不是附件、
+    /// 且源码起点正好等于代码正文起点」的记录，它的下标就是答案。
+    ///
+    /// 反查不到时退化成 0 —— 那是「源码里找不到这段代码」的异常路径（整段退化成装饰文本），
+    /// 那些字复制不到、用户也改不了，颜色不重要，保持和以前一样就行。
+    private func codeTextStart(in fragment: RenderedFragment, codeSourceStart: Int?) -> Int {
+        guard let codeSourceStart else { return 0 }
+        return fragment.mappings.firstIndex {
+            !$0.isDecoration && !$0.isAttachmentView && $0.sourceStart == codeSourceStart
+        } ?? 0
     }
 
     // MARK: 表格

@@ -22,10 +22,10 @@ import Foundation
 /// 所以这里只让高亮器回答「哪段字符是什么角色」，上色那一步始终在渲染器里用主题完成。
 ///
 /// ### 暂时没做「增量高亮」
-/// 方案文档里设计了 `highlightIncrementally(edit:previousState:)`。
-/// 我们当前的实现是纯手写扫描，整块扫一遍本来就是微秒级，
-/// 引入 Tree-sitter 的 `Tree` 状态反而要额外内存和生命周期管理 —— 收益不够，先不做。
-/// 等真的接入解析器型实现时再往协议里加那一条即可。
+/// 方案文档里设计过 `highlightIncrementally(edit:previousState:)`。我们当前的实现是纯手写扫描，整块扫一遍本来就是微秒级（1.9 万字符实测约 6 毫秒），引入 Tree-sitter 的 `Tree` 状态反而要额外内存和生命周期管理 —— 收益不够，先不做。等真的接入解析器型实现时再往协议里加那一条即可。
+///
+/// ### 支持哪些语言
+/// 由具体实现说了算（`SimpleCodeHighlighter` 认 `CodeLanguageProfile` 里列的那一票）。渲染器只问 `supportsLanguage`，不认识就按纯文本显示，不会出错。
 protocol CodeHighlighting {
     /// 支不支持某种语言（参数就是 ``` 围栏后面写的那个词，大小写随便）
     func supportsLanguage(_ language: String) -> Bool

@@ -113,7 +113,7 @@ struct MarkdownTheme {
 
     /// 代码块要不要做**语法高亮**。
     ///
-    /// - `true`（默认）：受支持的语言（JS / Python / Swift）按 `syntaxColors` 上色；
+    /// - `true`（默认）：受支持的语言（C / C++ / Objective-C / Java / C# / Kotlin / Go / Rust / Swift / JavaScript / TypeScript / Python / Ruby / PHP / Shell / SQL / JSON）按 `syntaxColors` 上色；
     /// - `false`：整块用代码块默认色，和没做高亮时一模一样。
     ///
     /// ⚠️ 这是渲染期读的开关，改完要**重新渲染**（`setMarkdown`）才生效
@@ -158,7 +158,7 @@ struct MarkdownTheme {
         let code = UIFont.monospacedSystemFont(ofSize: body.pointSize - 1, weight: .regular)
 
         // 正文色先算出来，下面引用正文色要直接复用它（默认「引用文字和正文一样黑」）
-        let text = UIColor(red: 0.13, green: 0.21, blue: 0.28, alpha: 1.00)
+        let text = UIColor(red: 0.27, green: 0.27, blue: 0.28, alpha: 1.00)
         // 语法标记的弱化灰，有序列表序号默认也用它（想单独调改 `orderedListMarkerColor`）
         let marker = UIColor(red: 0.9, green: 0.9, blue: 0.9, alpha: 1.00)
 
@@ -196,8 +196,8 @@ struct MarkdownTheme {
 
     /// 生成 1~6 级标题字体：级别越高字越大，统一加粗
     static func makeHeadingFonts(baseSize: CGFloat) -> [Int: UIFont] {
-        // 依次是 H1 ~ H6 的字号增量
-        let deltas: [CGFloat] = [10, 6, 3, 1, 0, -1]
+        // 依次是 H1 ~ H6 的字号增量6/4/3/2/
+        let deltas: [CGFloat] = [15, 8, 5, 2, 0, -1]
         var result: [Int: UIFont] = [:]
         for (index, delta) in deltas.enumerated() {
             let level = index + 1
