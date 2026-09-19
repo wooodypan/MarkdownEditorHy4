@@ -35,6 +35,7 @@
 | [14](#14-任务项里按一次退格-整段被吃掉2026-09-18) ★ | 2026-09-18 | 复选框座位是无条件打了语法标记的装饰附件，把 `- ` 和 `[ ] ` 两段标记**粘成一段** —— 在 `]` 右边按一次退格，`- [ ] ` 整段被吃掉；装饰层又没及时重刷，按钮还残留在屏幕上 | `RenderedFragment.swift`、`MarkupToAttributedRenderer.swift`、`MarkdownDocumentStore.swift`、`MarkdownTextView.swift`、`TaskListBackspaceTests.swift`（新增） |
 | [15](#15-点开目录一条标题都不显示2026-09-18) ★ | 2026-09-18 | 面板收着（46 点宽）时按这个宽度量好了「每行 36 点」，展开成 210 点宽之后没人重问 —— 减去缩进和三角，标题的可用宽度成了负数，一个字都画不出来 | `MarkdownOutlineView.swift`、`MarkdownOutlineHeightTests.swift` |
 | [17](#17-滚动时代码块灰底停在错地方停下才跳到位2026-09-18) ★ | 2026-09-18 | 屏幕外的代码块只能用 TextKit 的**估算坐标**算矩形，缓存下来后滚动一直沿用；重算又放在滚动回调里，那时 viewport 还没更新，算出来还是错值 —— 表现为灰底压在 ` ```swift ` 那行上，停下手才「啪」地归位 | `MarkdownTextView.swift`、`MarkdownEditorHy4Tests.swift` |
+| [18](#18-行内代码的灰底盖住了鼠标选中高亮2026-09-19) ★ | 2026-09-19 | 行内代码的灰底是**不透明**的 `.backgroundColor`，而它是跟着文字一起画的 —— 把画在文字**下面**的系统选中高亮整块盖住，框选行内代码看着像没选中；顺带把两侧反引号弱化成浅灰 | `MarkdownTheme.swift`、`MarkupToAttributedRenderer.swift`、`InlineCodeStyleTests.swift`（新增） |
 
 ---
 
@@ -1721,6 +1722,81 @@ TextKit 的 viewport 是在 `layoutSubviews`（`super.layoutSubviews()` 那一�
   新增 `nearViewportBand` / `refreshDecorationsNearViewport` / `scheduleScrollLayout`、
   滚动回调改三步走）
 - `MarkdownEditorHy4Tests/MarkdownEditorHy4Tests.swift`（新增 2 条测试 + `makeLongDocumentWithCodeBlock`）
+
+---
+
+## 18. 行内代码的灰底盖住了鼠标选中高亮（2026-09-19）★
+
+### 18.1 现象
+
+两个都是行内代码的观感问题：
+
+1. 用鼠标框选一段含着 `` `行内代码` `` 的文字，**别的地方都变蓝了，就代码那一小块还是灰的** —— 看着像没选中（用户原话：「选中文字的背景被行内代码文字的浅灰色遮住了」）。
+2. 两侧的反引号 `` ` `` 和代码正文是同一个深色，看着像代码的一部分，不如别的语法标记那么「退到后面去」。
+
+### 18.2 类比
+
+富文本里的颜色分两拨人画：**文字和它的底色是一拨**（`NSAttributedString` 的 `.font` / `.foregroundColor` / `.backgroundColor`，跟着字一起画），**选中高亮是另一拨**（系统自己画的一块半透明蓝底）。
+
+系统把蓝底画在**文字那一拨的下面**。所以只要代码的底色是**不透明的实色**，就等于给代码盖了块不透明的灰板 —— 蓝底被完整盖住，你看到的就是一块灰。
+
+### 18.3 怎么会这样（根因）
+
+`MarkdownTheme.inlineCodeAttributes` 里的底色原本是：
+
+```swift
+inlineCodeBackground: UIColor(red: 0.95, green: 0.95, blue: 0.95, alpha: 1.00)
+//                                                        ↑ 问题就在这个 1.00
+```
+
+`alpha: 1.00` = 完全不透明。CoreGraphics 画它的时候，下面那层蓝底就彻底看不见了。
+注意这**不是** UTI 版本问题、也不是层级写错了 —— 装饰层（代码块灰底那些）压根没参与，它们画的矩形在文字下面、选中高亮下面，反而是对的；坏事的只有「挂在文字上的底色」这一种写法。
+
+### 18.4 怎么修
+
+| 想解决什么 | 改法 |
+|---|---|
+| 选中时看得见蓝底 | 把底色改成**半透明**：`UIColor(white: 0.5, alpha: 0.12)`。铺在白底上混出来 ≈ 0.94 的浅灰（和原来的 0.95 肉眼看不出差别），而蓝底能透上来 |
+| 反引号弱化 | 反引号单独走 `inlineCodeBacktickColor`（默认 0.68 的浅灰）；渲染时把行内代码**拆成三段**上色：左反引号 → 代码正文 → 右反引号 |
+
+为什么用「半透明」而不是「把灰底挪到更下面一层」：
+
+- **不挑分层顺序。** 半透明是「让下面的颜色透上来」，无论系统把选中高亮画在哪一层都正常；挪层则是**押注**在高亮一定在文字下面 —— 系统哪天真改了，选中又看不见了。
+- **不用新增一个装饰层。** 项目里代码块灰底 / 引用竖条 / 复选框那些装饰层，代价是「滚动时要跟着重算坐标」（见第 17 条）。行内代码数量多、又贴着文字流，再养一层不值得。
+
+⚠️ 拆三段时，**反引号的个数不能写死成 1**：cmark 允许 `` ``a`b`` `` 这种用多个反引号包住含反引号的内容。写死 1 的话第二个反引号会被当成代码正文，三段全错位。所以按「开头连续几个反引号」现数（`inlineCodeFenceLength`）。
+
+### 18.5 怎么验证的
+
+`MarkdownEditorHy4Tests/InlineCodeStyleTests.swift` 新增 6 条：
+
+| 测试 | 盯的是什么 |
+|---|---|
+| `testBackticksAreDimmedAndBodyStaysDark` | 左/右反引号是弱化色、中间是代码色；且两个颜色确实不一样 |
+| `testBackticksKeepMonospacedFontAndBackground` | 反引号仍然等宽、仍然带底色（否则灰底断成三截） |
+| `testInlineCodeBackgroundIsTranslucent` | **底色必须半透明** —— 这条就是选中那个 bug 的护栏 |
+| `testTranslucentBackgroundStillReadsAsLightGrayOnWhite` | 半透明底铺在白底上混出来还得是「浅灰」（0.88~1.0 之间），别淡到看不见 |
+| `testMultiBacktickInlineCodeSplitsAtTheRightPlaces` | `` ``a`b`` `` 的第 2 个反引号也算围栏、正文里那个反引号不许被弱化 |
+| `testSplittingIntoThreePiecesKeepsSourceIntact` | 拆三段上色之后，「展示的就是源码本身」不能破 |
+
+**反向验证**：把反引号个数改回写死 `1`，`testMultiBacktickInlineCodeSplitsAtTheRightPlaces` 立刻报
+「第二个反引号也是「围栏」，不能当成代码正文」—— 证明这条测试真的抓得住。
+
+#### ⚠️ 选中效果本身没法写进单测（别在这上面浪费时间）
+
+单测环境里 **UIKit 根本不画系统选中高亮**（实测：`window.makeKeyAndVisible()` + `becomeFirstResponder()` +
+`selectedRange` 都设好了，视图树里连一个选中高亮 view 都没有，`layer.render(in:)` 出来的像素也和未选中时一模一样；
+连光标 `UIStandardTextCursorView` 都是空的）。所以「选中能不能看见」只能靠**方案本身的正确性**（半透明 ⇒ 顺序无关）
+加**肉眼看一眼**，写不出像素级断言。这条测试守的是「半透明」这个前提，不是结果。
+
+### 18.6 以后注意什么
+
+1. **`.backgroundColor` 这种「跟着文字一起画」的属性，永远别用不透明的实色。** 它会盖住画在文字下面的所有东西
+   （系统选中高亮、拼写检查波浪线、查找高亮……）。要一段「实色垫底」的效果，就得像代码块那样另开一层画矩形。
+2. **改样式之前先分清「谁画的」**：装饰层画的矩形（代码块灰底、引用竖条）和挂在文字上的属性，分层完全不同 ——
+   同样是「一块灰底」，一个在选中高亮下面、一个在上面，表现正好相反。
+3. **数符号个数别写死。** markdown 里凡是「成对出现的符号」，都允许出现好几个（`` `` ``、`***`、`>>>`），
+   写死一个在正常文档里测不出来，遇到特殊写法就错位。
 
 
 

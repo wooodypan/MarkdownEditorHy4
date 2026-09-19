@@ -32,7 +32,19 @@ struct MarkdownTheme {
     /// 不该跟着 `markerColor` 一起变。默认沿用和 `markerColor` 一样的浅灰。
     var orderedListMarkerColor: UIColor
     var linkColor: UIColor
+    /// 行内代码**正文**（两个反引号中间那部分）的颜色
     var inlineCodeColor: UIColor
+    /// 行内代码**两侧反引号**的颜色。
+    ///
+    /// 反引号属于「语法标记」，和 `#`、`- ` 一样只是提示「这里有个语法」，不该抢读者的注意力，所以单独给一个更淡的颜色。
+    ///
+    /// ⚠️ 不能图省事直接用 `markerColor`（0.9 的浅灰）：那个灰是给**白底**设计的，铺在行内代码那块灰底（≈0.94）上只差 5%，反引号会像凭空消失。这里用一个稍深一点的浅灰，压得住灰底、又明显比代码正文（0.28~0.51 的蓝灰）淡。
+    var inlineCodeBacktickColor: UIColor
+    /// 行内代码的底色。
+    ///
+    /// ⚠️ **必须半透明，不能填不透明的实色**（踩过坑，别改回 `alpha: 1.0`）：这个颜色是挂在 `NSAttributedString` 上的 `.backgroundColor`，**跟着文字一起画**，而系统的「选中高亮」（鼠标框选出来那块蓝底）画在它**下面**。底色一旦不透明，选中行内代码时蓝底就被灰块整块盖住 —— 看着像压根没选中。
+    ///
+    /// 半透明之后蓝底能透上来，而且这种做法**不挑分层顺序**：将来系统就算把高亮挪到上层也照样正常。当前这个值铺在白底上大约是 0.94 的浅灰，和不透明的 0.95 肉眼分不出差别，外观没变。
     var inlineCodeBackground: UIColor
     var codeBlockBackground: UIColor
     /// 引用块里**正文文字**的颜色（`>` 符号本身仍然是 `markerColor` 的灰色）。
@@ -171,7 +183,10 @@ struct MarkdownTheme {
             orderedListMarkerColor: UIColor(red: 0.26, green: 0.72, blue: 0.51, alpha: 1.00),
             linkColor: UIColor(red: 0.16, green: 0.59, blue: 0.39, alpha: 1.00), //#42b883
             inlineCodeColor: UIColor(red: 0.28, green: 0.40, blue: 0.51, alpha: 1.00),
-            inlineCodeBackground: UIColor(red: 0.95, green: 0.95, blue: 0.95, alpha: 1.00),
+            inlineCodeBacktickColor: UIColor(white: 0.68, alpha: 1.00),
+            // 12% 的中灰：铺在白底上 ≈ 0.94 的浅灰（和以前的不透明 0.95 看不出差别），
+            // 铺在深色底上则是一点淡淡的提亮，两头都能用
+            inlineCodeBackground: UIColor(white: 0.5, alpha: 0.12),
             codeBlockBackground: UIColor.secondarySystemBackground,
             quoteTextColor: text,
             bulletColor: UIColor(red: 0.26, green: 0.72, blue: 0.51, alpha: 1.00),
@@ -236,10 +251,19 @@ struct MarkdownTheme {
         [.font: bodyFont, .foregroundColor: markerColor]
     }
 
-    /// 行内代码
+    /// 行内代码**正文**（反引号中间那部分）
     var inlineCodeAttributes: [NSAttributedString.Key: Any] {
         [.font: codeFont,
          .foregroundColor: inlineCodeColor,
+         .backgroundColor: inlineCodeBackground]
+    }
+
+    /// 行内代码两侧的**反引号**。
+    ///
+    /// 和正文只差一个前景色：字体仍是等宽体（换成正文字体会让反引号宽度跳一下、灰底一头宽一头窄），底色也照旧留着（这样整段行内代码还是一块完整的灰底，而不是中间断成三截）。
+    var inlineCodeBacktickAttributes: [NSAttributedString.Key: Any] {
+        [.font: codeFont,
+         .foregroundColor: inlineCodeBacktickColor,
          .backgroundColor: inlineCodeBackground]
     }
 

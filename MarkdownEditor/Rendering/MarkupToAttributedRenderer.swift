@@ -168,12 +168,50 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         return .sourceSliced(sourceText(in: range), sourceStart: range.location, attributes: bodyAttributes)
     }
 
+    /// 行内代码。
+    ///
+    /// 显示的仍然是源码原文（连反引号一起显示，保持「所见即源码」），但会拆成**三段**分别上色：
+    /// 左边反引号 → 代码正文 → 右边反引号。两侧反引号用的是更淡的浅灰（`theme.inlineCodeBacktickColor`），
+    /// 让它们像 `#`、`- ` 那样退到背景里去，读者一眼看到的是代码本身。
     func visitInlineCode(_ inlineCode: InlineCode) -> RenderedFragment {
-        if let range = localRange(of: inlineCode) {
-            // 连反引号一起显示，保持所见即源码
-            return .sourceSliced(sourceText(in: range), sourceStart: range.location, attributes: theme.inlineCodeAttributes)
+        guard let range = localRange(of: inlineCode) else {
+            // 拿不到源码范围时的兜底（cmark 偶尔会给退化范围）：这种情况本来就对不上源码了，
+            // 不再分反引号，整段按代码正文上色
+            return .decoration("`\(inlineCode.code)`", attributes: theme.inlineCodeAttributes)
         }
-        return .decoration("`\(inlineCode.code)`", attributes: theme.inlineCodeAttributes)
+
+        let raw = sourceText(in: range)
+        let fence = Self.inlineCodeFenceLength(of: raw)
+        // 拿不到正文的怪情况（比如源码里只打了两个反引号 ``）：没有中间段可拆，整段按反引号上色
+        guard fence > 0, fence * 2 < raw.utf16.count else {
+            return .sourceSliced(raw, sourceStart: range.location, attributes: theme.inlineCodeBacktickAttributes)
+        }
+
+        let bodyLength = raw.utf16.count - fence * 2
+        var out = RenderedFragment.empty
+        out.append(.sourceSliced(source.substring(utf16Offset: range.location, length: fence),
+                                 sourceStart: range.location,
+                                 attributes: theme.inlineCodeBacktickAttributes))
+        out.append(.sourceSliced(source.substring(utf16Offset: range.location + fence, length: bodyLength),
+                                 sourceStart: range.location + fence,
+                                 attributes: theme.inlineCodeAttributes))
+        out.append(.sourceSliced(source.substring(utf16Offset: range.location + fence + bodyLength, length: fence),
+                                 sourceStart: range.location + fence + bodyLength,
+                                 attributes: theme.inlineCodeBacktickAttributes))
+        return out
+    }
+
+    /// 数一段行内代码的源码**开头**有几个连续反引号。
+    ///
+    /// cmark 允许用多个反引号包住本身就含反引号的内容（`` ``a`b`` ``），所以这里不能写死成 1 ——
+    /// 写死的话那种写法会被拆成「` + `a`b` + `」，两侧灰底各露出一个反引号，位置全错。
+    private static func inlineCodeFenceLength(of raw: String) -> Int {
+        var count = 0
+        for character in raw {
+            guard character == "`" else { break }
+            count += 1
+        }
+        return count
     }
 
     func visitInlineHTML(_ inlineHTML: InlineHTML) -> RenderedFragment {
