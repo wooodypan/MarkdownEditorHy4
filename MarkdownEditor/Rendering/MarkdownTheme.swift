@@ -111,6 +111,18 @@ struct MarkdownTheme {
     /// 想切换效果只改这一个值即可，详见 `MarkdownTextView.computeCodeBlockFrames`。
     var showsCodeBlockFenceBackground: Bool = false
 
+    /// 代码块要不要做**语法高亮**。
+    ///
+    /// - `true`（默认）：受支持的语言（JS / Python / Swift）按 `syntaxColors` 上色；
+    /// - `false`：整块用代码块默认色，和没做高亮时一模一样。
+    ///
+    /// ⚠️ 这是渲染期读的开关，改完要**重新渲染**（`setMarkdown`）才生效
+    /// —— 颜色是烙进 `NSAttributedString` 里的，不像背景矩形那样每帧读主题。
+    var enablesCodeHighlighting: Bool = true
+
+    /// 代码高亮里各个语法角色的颜色，见 `CodeSyntaxColors`
+    var syntaxColors = CodeSyntaxColors()
+
     /// 表格的样式（表头底色、边框、单元格内边距…）
     ///
     /// ### 为什么叫 `TableStyle` 而不是 `Table`
@@ -359,6 +371,44 @@ extension MarkdownTheme {
 
         /// 最大高度（点），默认 `420`。只防「一张长图撑爆屏幕」，正常大小的图碰不到它。
         var maxHeight: CGFloat = 420
+    }
+}
+
+// MARK: - 代码高亮配色
+
+extension MarkdownTheme {
+    /// 代码高亮里各个「语法角色」对应的颜色。
+    ///
+    /// ### 这张表是整个高亮功能里唯一决定颜色的地方
+    /// 高亮器（`SimpleCodeHighlighter`）只回答「这段字符是关键字 / 字符串 / 注释…」，
+    /// 上色在渲染器里查这张表完成。所以以后换成 tree-sitter 那种精确解析器也好、
+    /// 换成别的第三方库也好，**配色风格不会跟着变**，变的只是判定准确度。
+    struct CodeSyntaxColors {
+        /// 关键字（`func` / `def` / `const` …）—— 紫
+        var keyword: UIColor = UIColor(red: 0.63, green: 0.13, blue: 0.60, alpha: 1.00)
+        /// 字符串字面量 —— 红
+        var string: UIColor = UIColor(red: 0.76, green: 0.13, blue: 0.24, alpha: 1.00)
+        /// 注释 —— 灰绿
+        var comment: UIColor = UIColor(red: 0.42, green: 0.45, blue: 0.50, alpha: 1.00)
+        /// 数字、以及 `true` / `false` / `nil` / `None` 这类字面量常量 —— 蓝
+        var number: UIColor = UIColor(red: 0.14, green: 0.36, blue: 0.72, alpha: 1.00)
+        /// 类型名（大写开头的标识符，启发式判定）—— 青
+        var type: UIColor = UIColor(red: 0.08, green: 0.47, blue: 0.47, alpha: 1.00)
+    }
+
+    /// 某个语法角色用什么颜色。
+    ///
+    /// 标识符和没归类的字符不给专门的色 —— 直接用代码块正文色（`textColor`），
+    /// 这样换主题时它们会自动跟着正文走，不用再配一份「高亮黑色」。
+    func color(for role: SyntaxRole) -> UIColor {
+        switch role {
+        case .keyword: return syntaxColors.keyword
+        case .string: return syntaxColors.string
+        case .comment: return syntaxColors.comment
+        case .number: return syntaxColors.number
+        case .type: return syntaxColors.type
+        case .identifier, .plain: return textColor
+        }
     }
 }
 

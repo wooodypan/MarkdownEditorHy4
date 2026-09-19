@@ -34,8 +34,25 @@
 | [13](#13-点一下复选框方框就变宽2026-09-18) ★ | 2026-09-18 | 方框宽度写成「按**当前**那个字面量取宽」，而 `[ ]` 和 `[x]` 在图里宽度本来就不同（15.95 / 20.09pt）—— 点一下方框就长 4pt | `MarkdownTextView.swift`、`CheckboxControl.swift`、`MarkdownEditorHy4Tests.swift` |
 | [14](#14-任务项里按一次退格-整段被吃掉2026-09-18) ★ | 2026-09-18 | 复选框座位是无条件打了语法标记的装饰附件，把 `- ` 和 `[ ] ` 两段标记**粘成一段** —— 在 `]` 右边按一次退格，`- [ ] ` 整段被吃掉；装饰层又没及时重刷，按钮还残留在屏幕上 | `RenderedFragment.swift`、`MarkupToAttributedRenderer.swift`、`MarkdownDocumentStore.swift`、`MarkdownTextView.swift`、`TaskListBackspaceTests.swift`（新增） |
 | [15](#15-点开目录一条标题都不显示2026-09-18) ★ | 2026-09-18 | 面板收着（46 点宽）时按这个宽度量好了「每行 36 点」，展开成 210 点宽之后没人重问 —— 减去缩进和三角，标题的可用宽度成了负数，一个字都画不出来 | `MarkdownOutlineView.swift`、`MarkdownOutlineHeightTests.swift` |
+| [17](#17-滚动时代码块灰底停在错地方停下才跳到位2026-09-18) ★ | 2026-09-18 | 屏幕外的代码块只能用 TextKit 的**估算坐标**算矩形，缓存下来后滚动一直沿用；重算又放在滚动回调里，那时 viewport 还没更新，算出来还是错值 —— 表现为灰底压在 ` ```swift ` 那行上，停下手才「啪」地归位 | `MarkdownTextView.swift`、`MarkdownEditorHy4Tests.swift` |
 
 ---
+
+## 名词小词典
+
+| 词                                  | 大白话                                                       |
+| ----------------------------------- | ------------------------------------------------------------ |
+| **源码（source）**                  | 用户实际存进文件的那段 markdown 文本                         |
+| **渲染文本（rendered）**            | 编辑器**显示**出来的样子。和源码不一定等长，因为行首会多插圆点、图片会占位等 |
+| **源码偏移 / `sourceOffset`**       | 某个字符在**源码**里排第几个（UTF-16 单位）。相当于「书里的第几页」 |
+| **渲染偏移**                        | 某个字符在**渲染文本**里排第几个。相当于「屏幕上第几行第几个字」 |
+| **快照**                            | 某个时间点拍下来的一份数据副本。文档一改，它就可能过期       |
+| **标题指纹 / `headingFingerprint`** | 给整篇标题拍的一张「位置 + 层级 + 文字」的清单。两张比一比就知道目录要不要刷新 |
+| **目录 / 大纲（outline）**          | 右侧那个列出所有标题、点了能跳过去的悬浮组件                 |
+| **cell / cell 复用**                | 列表里「一行」的视图对象。系统只会为**屏幕上看得见**的行创建几个，滚出屏幕的会被回收、拿去显示新滚进来的行 —— 所以一个 cell 对象会「先后代表好几行」，每次复用都必须把上一行的状态清干净 |
+| **快照（两种含义）**                | ①（第 1 条）某个时间点拍下来的数据副本，文档一改就可能过期；②（第 5 条）`NSDiffableDataSourceSectionSnapshot`，交给列表控件的「这次该显示哪些行、谁折着」的一份交代 |
+| **全部折叠 / 全部展开**             | 目录标题栏上的按钮，一刀切地收起 / 放出所有带下级的章节。只动目录列表，不动正文 |
+| **块（block）**                     | 编辑器把整篇 markdown 切成的一段一段，比如一个标题、一个段落、一个代码块。**每个块在编辑后都会被重新创建**，它的 `id`（UUID）也跟着换新 |
 
 ## 1. 正文里打字之后，点目录跳到错误位置（2026-09-13）★
 
@@ -1625,82 +1642,85 @@ PROBE 展开后: panelH=224.0 bounds=(0.0, 0.0, 210.0, 224.0)
 
 ---
 
-## 附 0：右侧标签条那两个做不到的事（库接口缺口）
+## 17. 滚动时代码块灰底停在错地方，停下才跳到位（2026-09-18）★
 
-不计入 bug 编号 —— 这不是哪次改坏的，是一个**一直存在、目前只能绕**的边界。
+### 17.1 现象
 
-右侧那条标签由一个外部组件管（`MultiTabController`，仓库 `wooodypan/iOSDemoHub`）。
-它通过 SPM 远端依赖接进来（接法见第 6.4 节），本工程碰不到它的 `private` 成员，
-所以下面两件事做不了：
+打开一份**长文档**（代码块在首屏之外）往下滚：
 
-| 想做的事 | 卡在哪 | 现在怎么绕 |
-|---|---|---|
-| 给文档起名后，**标签上的标题跟着改** | 标签标题存在库内部的 `tabs[].item.title`（`private`）；对外只有 `openPreview` / `openNewTab` 这类「开」的入口，没有「改」的 | 左栏 / 窗口标题 / 左下角状态栏全都会变，只有标签条上那个字不变；在 `doc/功能说明.md` 里如实写明了 |
-| 删掉文档后，**关掉右边对应的标签** | `DetailHostViewController.closeTab(withID:)` 是 `private`，没有对外接口 | 删除确认框里提醒用户自己点标签上的 × |
+- 灰底先停在一个**偏上**的位置（实测偏 84pt，越往下越离谱），
+  正好压在开围栏那一行上 —— ` ```swift ` 这几个字看着像是写在灰底里的
+  （用户原话：「swift 跟背景重合了」）；
+- 手一停，灰底「啪」地挪到代码背后。
 
-**要根治就得给库加两个公开方法**（改完 push 到 `wooodypan/iOSDemoHub` 的 master，
-本工程 `swift package resolve` 一下就能用）：
+也就是说：**滚动过程中一直是错的，只有停下来才对。**
 
-```swift
-// DetailHostViewController 里
-public func updateContent(_ item: PPContentItem, forContentID id: String)  // 改标题用
-public func closeTab(withContentID id: String)                            // 关标签用
-```
+### 17.2 为什么会这样（两层原因叠在一起）
 
-⚠️ **push 之前别在 App 侧调用它们**：本工程锁的是 `master` 上那个具体提交
-（`Package.resolved` 里记着），没 push 的话这边编译不过。
+**第一层：屏幕外的坐标是估算值。**
+TextKit 2 只给 viewport 附近排实；`enumerateTextLayoutFragments` 走到屏幕外的区域时，
+拿到的 frame 是**估算**的（和第 3 条「点目录要连点好几次」是同一个根因）。
+打开长文档那一刻，代码块还在屏幕外，算出来的矩形就是错的（实测差 84pt），
+这个值被存进了 `codeBlockFrames` 缓存。
 
----
+**第二层：滚动时只平移、不重算，而「补算」的时机也不对。**
+滚动回调里当时只做「文档坐标减滚动偏移」的平移 —— 用的是第一层那个错的缓存值。
+唯一的纠正机会是滚动停下 0.15s 后的 `scheduleFoldRedraw`（整篇重算），
+所以用户看到的「跳」就是这一次纠正。
 
-## 附 1：名词小词典
+那为什么不在滚动回调里直接重算？试过了，**没用**：
+TextKit 的 viewport 是在 `layoutSubviews`（`super.layoutSubviews()` 那一轮）里更新的，
+滚动回调发生在布局**之前**，这时候问 TextKit，它还在用上一次的 viewport 回答你 ——
+算出来的还是同一个错值（实测 451.67 vs 正确值 559.67，一模一样的偏差）。
 
-| 词 | 大白话 |
-|---|---|
-| **源码（source）** | 用户实际存进文件的那段 markdown 文本 |
-| **渲染文本（rendered）** | 编辑器**显示**出来的样子。和源码不一定等长，因为行首会多插圆点、图片会占位等 |
-| **源码偏移 / `sourceOffset`** | 某个字符在**源码**里排第几个（UTF-16 单位）。相当于「书里的第几页」 |
-| **渲染偏移** | 某个字符在**渲染文本**里排第几个。相当于「屏幕上第几行第几个字」 |
-| **快照** | 某个时间点拍下来的一份数据副本。文档一改，它就可能过期 |
-| **标题指纹 / `headingFingerprint`** | 给整篇标题拍的一张「位置 + 层级 + 文字」的清单。两张比一比就知道目录要不要刷新 |
-| **目录 / 大纲（outline）** | 右侧那个列出所有标题、点了能跳过去的悬浮组件 |
-| **cell / cell 复用** | 列表里「一行」的视图对象。系统只会为**屏幕上看得见**的行创建几个，滚出屏幕的会被回收、拿去显示新滚进来的行 —— 所以一个 cell 对象会「先后代表好几行」，每次复用都必须把上一行的状态清干净 |
-| **快照（两种含义）** | ①（第 1 条）某个时间点拍下来的数据副本，文档一改就可能过期；②（第 5 条）`NSDiffableDataSourceSectionSnapshot`，交给列表控件的「这次该显示哪些行、谁折着」的一份交代 |
-| **全部折叠 / 全部展开** | 目录标题栏上的按钮，一刀切地收起 / 放出所有带下级的章节。只动目录列表，不动正文 |
-| **块（block）** | 编辑器把整篇 markdown 切成的一段一段，比如一个标题、一个段落、一个代码块。**每个块在编辑后都会被重新创建**，它的 `id`（UUID）也跟着换新 |
+### 17.3 怎么修的
 
-## 附 2：本次改动文件清单
+核心思路：**滚动时只重算「视野附近」的那几个块**，视野外的继续用缓存。
 
-| 文件 | 改了什么 |
-|---|---|
-| `MarkdownEditor/Model/MarkdownDocumentStore.swift` | 新增 `HeadingFingerprint` 类型和 `headingFingerprint()`；`applyEdit` 第 9 步多一条判据 |
-| `MarkdownEditor/Outline/MarkdownOutlineContracts.swift` | 协议注释补充「位置被顶移也算变了」 |
-| `MarkdownEditor/Outline/MarkdownTextView+Outline.swift` | `publishOutlineItems()` 注释补充同一条警告 |
-| `MarkdownEditor/Outline/OutlineItem.swift` | 给 `sourceOffset` 加上 ⚠️「这是快照、会过期」的说明 |
-| `MarkdownEditorHy4Tests/MarkdownOutlineTests.swift` | 新增 3 条回归测试 |
+- `computeCodeBlockFrames(reusingOutside:)` / `computeQuoteBarFrames(reusingOutside:)` /
+  `computeCheckboxFrames(reusingOutside:)` 多了一个「只算这一带」的参数：
+  落在带子外面的沿用上一轮结果，一次 TextKit 都不问。
+  带子取「viewport 上下各扩一屏」—— 估算误差最大也就几百 pt，扩一屏足够兜住
+  「缓存里看着还在外面、其实已经露出来了」的块。
+- 重算放在 `layoutSubviews` 里（`updateCodeBlockDecorationsIfNeeded` 的纯滚动分支），
+  也就是 `super.layoutSubviews()` **之后** —— 这时 viewport 才是新的。
+- 滚动回调里改成三步：先按缓存平移（便宜，每帧）、再 `setNeedsLayout()`、
+  再 `scheduleScrollLayout()`（排一个 async 的 `layoutIfNeeded`，一帧最多一次）。
+  最后这一步是保险：系统滚动只改 bounds 原点，**不一定**会自己调 `layoutSubviews`。
+- 节流按**滚动距离**（每滚 40pt 才重算一次）而不是按时间：
+  块在进视野前一屏就已经进带子被算过了，40pt 的粒度足够早，用户看不到中间状态；
+  慢速滚动几乎不触发，不会掉帧。整篇重算仍然只在内容/宽度变化时做。
 
-## 附 3：本项目的注释用词约定
+### 17.4 怎么验证的
 
-接手的人请注意：**注释尽量用大白话，别用行话。**
+- 新增两条测试（都用内联的长文档，不依赖磁盘文件）：
+  - `testCodeBlockBackgroundIsCorrectRightAfterScrolling`：滚完后只跑 0.1 秒
+    （远小于 0.15s 的兜底），背景位置就要等于「文档坐标减滚动量」，容差 2pt；
+  - `testCodeBlockBackgroundDoesNotCoverFenceLineAfterScrolling`：滚动到位后，
+    背景顶必须低于开围栏行的文字底部、背景底必须高于闭围栏行的文字顶部
+    （这就是「swift 跟背景重合」那条的直接回归）。
+- 修之前的实测数字：滚动当帧 227.29、停下后 311.29（差 84pt）；修完两者都是 311.29。
+- 272 条单元测试全绿；Catalyst + iOS 真机目标均 `BUILD SUCCEEDED`。
 
-反面例子（本项目真实出现过，已改掉）：
+### 17.5 以后注意什么
 
-```swift
-// 旧写法：什么叫「推」？新手看不懂
-/// 所以只要列表被推过一次，就必须在每次「标题位置可能变了」的编辑之后重新推一份
-```
+- **凡是靠 fragment 矩形画的东西（代码块背景、引用竖条、复选框、折叠三角），
+  缓存的坐标只在「它当时在视野附近」时才可信。** 屏幕外算出来的值要当成草稿，
+  滚近了必须重算 —— 不能指望「算一次管到底」。
+- **想拿真坐标，就必须站在 `layoutSubviews` 里（`super` 之后）问 TextKit。**
+  在滚动回调、KVO、或者任何「布局还没发生」的时机问，拿到的都是旧 viewport 的答案。
+- 别为了「省一次计算」把重算挪出布局流程；也不要在滚动回调里直接同步 `layoutIfNeeded()`
+  （可能和布局过程互相递归），用 async 排到下一帧。
+- 关于围栏行要不要进背景：开关早就有了，`MarkdownTheme.showsCodeBlockFenceBackground`
+  （默认 `false` = 围栏行不带背景）。这次的「swift 跟背景重合」**不是**开关失灵，
+  是坐标错 —— 排查时先分清「效果没实现」和「位置画错了」。
 
-```swift
-// 新写法：说清楚「谁把什么给了谁」
-/// 所以目录只要显示过一份列表，往后每次「标题位置可能变了」的编辑，
-/// 都得重新给目录一份新列表
-```
+### 17.6 改动文件
 
-几个已经统一过的说法：
+- `MarkdownEditor/Editing/MarkdownTextView.swift`（三个 compute 加 `reusingOutside` 参数、
+  新增 `nearViewportBand` / `refreshDecorationsNearViewport` / `scheduleScrollLayout`、
+  滚动回调改三步走）
+- `MarkdownEditorHy4Tests/MarkdownEditorHy4Tests.swift`（新增 2 条测试 + `makeLongDocumentWithCodeBlock`）
 
-| 别写 | 改成 |
-|---|---|
-| 把列表**推**出去 / **重推**一份 | **告诉目录** / **重新给目录一份新列表** / **让目录重新读一遍** |
-| 事件**推送** | **上报**（编辑器 → 目录） |
-| 防抖**之后推** | 等 0.12 秒没有新动作之后，**告诉目录** |
 
-原则：**读注释的人不知道你脑子里的那套简称。** 与其写「推」，不如写「谁、把什么、给了谁」。
+

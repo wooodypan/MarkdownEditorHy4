@@ -35,6 +35,15 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     /// 网络图片加载完尺寸变了，通过它通知 TextKit 重新排版
     weak var attachmentHost: MarkdownAttachmentHost?
 
+    /// 代码高亮器。给 nil 就不做高亮（代码块按纯文本显示）。
+    ///
+    /// ### 为什么挂在这里而不是 `MarkdownTextView` 上
+    /// 高亮发生在「AST → 富文本」这一步，而这一步是**这里**做的；
+    /// `MarkdownTextView` 只负责把渲染结果显示出来，它不需要知道高亮这件事的存在。
+    /// 所以这里只认 `CodeHighlighting` 这个协议类型：将来换成 tree-sitter 那种
+    /// 精确解析器，只要实现同一个协议塞进来就行，UI 层一行都不用改。
+    var codeHighlighter: CodeHighlighting? = SimpleCodeHighlighter()
+
     // MARK: 当前块的上下文（只在 render(blockSource:) 执行期间有效）
 
     private var source: String = ""
@@ -452,6 +461,10 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             out.append(.decoration(code, attributes: theme.codeBlockAttributes))
         }
 
+        // 给代码正文上语法色。要**在 reconciled 之前**做：此刻 out 里只有代码正文，
+        // token 的偏移可以直接当 out 内部的偏移用，不用再换算一次
+        applySyntaxHighlighting(to: &out, code: code, language: codeBlock.language)
+
         // 首尾的 ``` 由补漏步骤补进来
         var orphanAttributes = theme.markerAttributes
         orphanAttributes[.paragraphStyle] = codeStyle
@@ -465,6 +478,40 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         // UI 层靠它算出矩形位置、画出背景并放复制按钮，详见 CodeBlockInfo 的注释。
         out.setAttributes([.markdownCodeBlock: CodeBlockInfo(code: code, language: codeBlock.language)])
         return out
+    }
+
+    /// 给一段代码正文上语法色（不动文字、不动映射，**只改颜色属性**）。
+    ///
+    /// ### 为什么可以只改颜色
+    /// 显示的文字是源码本身（`sourceSliced`），映射一个字都没动，
+    /// 所以「全选复制 === 源文件」这条不变式自动成立，不需要为高亮补任何逻辑。
+    ///
+    /// - parameter fragment: 只装着这段代码的片段（调用点在 reconciled 之前，满足这个前提）
+    /// - parameter code:     代码正文（**不含**首尾围栏行）
+    /// - parameter language: 围栏后面写的语言标识，没写就 nil
+    private func applySyntaxHighlighting(to fragment: inout RenderedFragment,
+                                         code: String,
+                                         language: String?) {
+        guard theme.enablesCodeHighlighting,
+              let language,
+              let highlighter = codeHighlighter,
+              highlighter.supportsLanguage(language) else { return }
+
+        let tokens = highlighter.highlight(code, language: language)
+        guard !tokens.isEmpty else { return }
+
+        // token 的坐标原点就是这段代码的首字符，和 fragment 内部坐标一致。
+        // 夹一段范围是防御：万一高亮器越界，也不能让 addAttribute 直接崩掉整篇渲染
+        let limit = NSRange(location: 0, length: min(fragment.text.length, code.utf16Length))
+        for token in tokens {
+            let range = NSIntersectionRange(token.range, limit)
+            guard range.length > 0 else { continue }
+            // 注意用 addAttributes 而不是 addAttributesIfAbsent —— 代码正文早就带上
+            // 了默认前景色，这里是要**盖掉**它（详见 RenderedFragment 那两个函数的注释）
+            fragment.text.addAttribute(.foregroundColor,
+                                       value: theme.color(for: token.role),
+                                       range: range)
+        }
     }
 
     // MARK: 表格
