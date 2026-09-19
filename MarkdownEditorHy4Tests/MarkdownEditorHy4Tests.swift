@@ -1485,6 +1485,93 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertFalse(pending, "空代码块不是「TextKit 还没排出来」，不该触发重试")
     }
 
+    // MARK: - 滚动时的背景落位（长文档专项）
+
+    /// 造一篇「代码块在首屏之外」的长文档：前面垫 40 段正文，最后放一个 swift 代码块。
+    /// 不依赖磁盘文件（testcase 目录以前被清理过一次，测试跟着一起挂过）
+    private func makeLongDocumentWithCodeBlock() -> String {
+        let filler = Array(repeating: "这是一段垫在代码块前面的正文，用来把代码块顶到首屏之外。",
+                           count: 40).joined(separator: "\n\n")
+        return """
+        \(filler)
+
+        ```swift
+        let document = Document(parsing: markdown)
+        for child in document.children {
+            print(type(of: child))
+        }
+        ```
+        """
+    }
+
+    /// **滚动当帧背景就要落到位**，不能等滚动停下（0.15s 后那次全量重算）才跳过去。
+    ///
+    /// 现象：打开长文档往下滚，灰底先停在一个偏上的位置，停下手才「啪」地挪到代码背后。
+    /// 根因是屏幕外的代码块只能用 TextKit 的估算坐标算矩形、缓存下来后滚动时一直沿用。
+    func testCodeBlockBackgroundIsCorrectRightAfterScrolling() {
+        let tv = makeEditor(makeLongDocumentWithCodeBlock())
+        tv.frame = CGRect(x: 0, y: 0, width: 900, height: 800)
+        tv.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+
+        // 先拿一次文档坐标（此时代码块还在屏幕外，这个值可能是估算的，正好用来定滚动量）
+        let (initial, _) = tv.computeCodeBlockFrames()
+        XCTAssertEqual(initial.count, 1, "这篇文档里应该有 1 个代码块")
+
+        // 滚到代码块露出来的位置。只给 0.1 秒（滚动中一帧的量级，远小于 0.15s 的兜底），
+        // 就是要看「滚动过程中」而不是「滚动停下之后」的结果
+        tv.contentOffset = CGPoint(x: 0, y: initial[0].frame.midY - 300)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        // 现在代码块在视野里了，这才是它的真坐标
+        let (fresh, _) = tv.computeCodeBlockFrames()
+        let expectedY = fresh[0].frame.origin.y - tv.contentOffset.y
+        let placed = backgroundFrames(of: tv)
+
+        XCTAssertEqual(placed.count, 1, "滚到代码块处，应该有一个背景 view")
+        XCTAssertEqual(placed.first?.origin.y ?? -1, expectedY, accuracy: 2,
+                       "滚动当帧的背景位置(\(placed.first?.origin.y ?? -1))应该等于文档坐标减滚动量(\(expectedY))，差太多说明还在用屏幕外的估算值")
+    }
+
+    /// 滚动到位后，灰底不能压到 ```swift 那一行上（用户报的「swift 跟背景重合」）。
+    ///
+    /// 这就是上面那条 bug 的视觉表现：估算值偏上 84pt，正好把开围栏那行罩进灰底里，
+    /// 于是 ```swift 这几个字看起来是写在灰底上的。
+    func testCodeBlockBackgroundDoesNotCoverFenceLineAfterScrolling() {
+        let tv = makeEditor(makeLongDocumentWithCodeBlock())
+        tv.frame = CGRect(x: 0, y: 0, width: 900, height: 800)
+        tv.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+
+        let (initial, _) = tv.computeCodeBlockFrames()
+        tv.contentOffset = CGPoint(x: 0, y: initial[0].frame.midY - 300)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+        guard let range = codeBlockRanges(in: tv).first,
+              let background = backgroundFrames(of: tv).first else {
+            return XCTFail("滚到代码块处应该有一个背景 view")
+        }
+        let lines = codeBlockLines(of: range, in: tv)
+        let offsetY = tv.contentOffset.y
+
+        // 开围栏那一行（```swift）的文字区域换算到屏幕坐标
+        guard let openPos = tv.position(from: tv.beginningOfDocument, offset: lines[0].location) else {
+            return XCTFail("拿不到开围栏行的位置")
+        }
+        let openCaret = tv.caretRect(for: openPos)
+        XCTAssertGreaterThan(background.minY, openCaret.maxY - offsetY,
+                             "背景顶(\(background.minY))压到了开围栏行(\(openCaret.maxY - offsetY))上")
+
+        // 闭围栏那一行（收尾的 ```）同理
+        let closing = lines[lines.count - 1]
+        guard let closePos = tv.position(from: tv.beginningOfDocument, offset: closing.location) else {
+            return XCTFail("拿不到闭围栏行的位置")
+        }
+        let closeCaret = tv.caretRect(for: closePos)
+        XCTAssertLessThan(background.maxY, closeCaret.minY - offsetY,
+                          "背景底(\(background.maxY))压到了闭围栏行(\(closeCaret.minY - offsetY))上")
+    }
+
     /// 把一个代码块按行切开，返回每行在**整篇文本**里的 NSRange（含行尾换行）。
     /// 这里故意不复用 `MarkdownTextView` 里的切分逻辑，免得它算错了测试也跟着错。
     private func codeBlockLines(of range: NSRange, in textView: MarkdownTextView) -> [NSRange] {

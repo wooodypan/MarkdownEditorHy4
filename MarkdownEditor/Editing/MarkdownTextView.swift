@@ -116,6 +116,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private var lastCodeBlockSignature = ""
     /// 首帧 TextKit 还没排出 fragment，允许重试几次
     private var codeBlockRetryCount = 0
+    /// 上一次「重算视野附近的装饰」时的滚动位置，用来节流（见 refreshDecorationsNearViewport）
+    private var lastNearViewportRefreshOffset: CGFloat = -.greatestFiniteMagnitude
+    /// 滚动触发的那一轮布局有没有已经排上（一帧最多一次，见 scheduleScrollLayout）
+    private var scrollLayoutScheduled = false
 
     // MARK: 折叠三角（顶层块左侧，浮在正文左边的装订线里）
 
@@ -462,16 +466,82 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         addSubview(codeBlockControlLayer)
         addSubview(checkboxLayer)
 
-        // 滚动时只做平移，不重算 —— 重算要走 TextKit 布局，滚动中做太贵
         contentOffsetObservation = observe(\.contentOffset, options: []) { [weak self] _, _ in
+            // 1) 先按缓存的文档坐标平移一次 —— 这一步很便宜，每帧都要做，
+            //    否则背景会跟着滚动掉队（哪怕只掉一帧也看得出来）
             self?.positionCodeBlockDecorations()
             self?.positionQuoteBars()
             self?.positionCheckboxes()
             self?.positionFoldControls()
+            // 2) 再要一轮布局：重算必须发生在 `layoutSubviews` 里（**在 super.layoutSubviews()
+            //    之后**）—— TextKit 是在那一轮里更新 viewport 的，在滚动回调里直接算拿到的是
+            //    上一次 viewport 的估算值，等于白算。重算逻辑见 refreshDecorationsNearViewport。
+            //    ⚠️ 系统滚动时不一定会调 `layoutSubviews`（滚动只改 bounds 原点，不一定触发布局），
+            //    所以这里自己要一次；用 async 排到下一个 runloop，避免和布局过程互相递归
+            self?.setNeedsLayout()
+            self?.scheduleScrollLayout()
             // TextKit 排版比滚动事件慢半拍：滚动过程中刚进 viewport 的 fragment
             // 可能还是估算值（三角被跳过）。停一下再补一次，三角就不会「滚过去才冒出来」。
             self?.scheduleFoldRedraw()
         }
+    }
+
+    /// 排一轮布局到下一个 runloop（一帧最多一次），滚动时用。
+    private func scheduleScrollLayout() {
+        guard !scrollLayoutScheduled else { return }
+        scrollLayoutScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scrollLayoutScheduled = false
+            self.layoutIfNeeded()
+        }
+    }
+
+    /// 视野附近（上下各扩一屏）在**文档坐标系**里的矩形。
+    ///
+    /// 为什么要扩一屏而不是只取 viewport：屏幕外的块算出来的坐标有几十上百 pt 的误差，
+    /// 只按 viewport 判断会漏掉「缓存里看着还在外面、其实已经露出来了」的块。
+    private var nearViewportBand: CGRect {
+        let height = max(bounds.height, 1)
+        return CGRect(x: 0, y: contentOffset.y - height,
+                      width: max(bounds.width, 1), height: height * 3)
+    }
+
+    /// 滚动过程中把「视野附近」的装饰矩形重算一遍。
+    ///
+    /// ### 不这么做会怎样（这就是「停下滑才跳到位」的根因）
+    /// 打开长文档时，屏幕外的代码块只能用 TextKit 的**估算坐标**算矩形（实测差 84pt 甚至更多），
+    /// 这个值被缓存下来；滚动时只做平移，用的还是错的缓存 —— 于是灰底停在错误的位置，
+    /// 比如压在 ```swift 那一行上（文字和背景重合）。等滚动停下、0.15s 后那次全量重算
+    /// 才把真值算出来，灰底「啪」地跳到代码背后 —— 用户看到的就是这个跳。
+    ///
+    /// ### 为什么不能滚动时整篇重算
+    /// 重算要 `enumerateTextLayoutFragments(options: [.ensuresLayout])`，等于强制 TextKit 排版
+    /// 那些区域；整篇重算会把整个文档排一遍，长文档上滚动会掉帧。所以只重算视野附近的
+    /// （它们本来就要排版，成本几乎为零），视野外的继续用缓存，滚近了自然会补算。
+    ///
+    /// ### 节流：按**滚动距离**而不是按时间
+    /// 每帧重算要扫一遍 textStorage 的属性，没必要。这里每滚过 40pt 才重算一次：
+    /// 块进视野前 1 屏（800pt）就已经落在 band 里被算过了，40pt 的粒度足够早，
+    /// 用户根本看不到「还没纠正」的中间状态。慢速滚动时几乎不触发，掉帧风险最小。
+    /// 剩下的误差由滚动结束后的 `scheduleFoldRedraw`（整篇重算）兜底。
+    ///
+    /// - parameter force: true = 不管滚了多少都要算（滚动停下后的兜底用）
+    private func refreshDecorationsNearViewport(force: Bool = false) {
+        guard force || abs(contentOffset.y - lastNearViewportRefreshOffset) > 40 else { return }
+        lastNearViewportRefreshOffset = contentOffset.y
+
+        let band = nearViewportBand
+        let (frames, _) = computeCodeBlockFrames(reusingOutside: band)
+        let (bars, _) = computeQuoteBarFrames(reusingOutside: band)
+        let (boxes, _) = computeCheckboxFrames(reusingOutside: band)
+
+        codeBlockFrames = frames
+        quoteBarFrames = bars
+        checkboxFrames = boxes
+        positionCodeBlockDecorations()
+        positionQuoteBars()
+        positionCheckboxes()
     }
 
     /// 每次布局时决定：是「重算矩形」还是「只平移」。
@@ -483,6 +553,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             positionCodeBlockDecorations()
             positionQuoteBars()
             positionCheckboxes()
+            // 纯滚动：缓存里那些「块还在屏幕外时算出来的」坐标要趁现在纠正掉。
+            // 必须放在布局里做（滚动回调那会儿 TextKit 的 viewport 还没更新，算出来还是错的）
+            refreshDecorationsNearViewport()
             return
         }
         lastCodeBlockSignature = signature
@@ -527,10 +600,15 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     /// 算出每个代码块在**文档坐标系**下占的矩形。
     ///
+    /// - parameter reusingOutside: 传一个文档坐标的矩形（一般是「视野上下各扩一屏」），
+    ///            落在这个矩形**外面**的块直接沿用上一轮算好的结果，不再问 TextKit。
+    ///            滚动时每帧都整篇重算太贵（会强制排版全文），而视野外的块算出来也是估算值，
+    ///            等它滚进视野附近再算才是准的 —— 详见 `refreshDecorationsNearViewport`。
+    ///            传 nil（内容/宽度变化时）表示全部重算。
     /// - returns: `(frames, pending)`。`pending == true` 表示「文本里有代码块，
     ///            但 TextKit 还没把它排出来」，需要等下一个布局周期重试。
     /// 注意：不开 `private` 是为了让单元测试能直接调它，验证滚动前后算出的矩形是否稳定
-    func computeCodeBlockFrames() -> (frames: [(info: CodeBlockInfo, frame: CGRect)], pending: Bool) {
+    func computeCodeBlockFrames(reusingOutside band: CGRect? = nil) -> (frames: [(info: CodeBlockInfo, frame: CGRect)], pending: Bool) {
         guard let layoutManager = textLayoutManager,
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
               bounds.width > 1 else { return ([], false) }
@@ -556,6 +634,14 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         var missingLayout = false
 
         for (range, info) in marked {
+            // 视野外的块沿用上一轮结果（理由见方法注释里的 reusingOutside）
+            if let band,
+               let cached = codeBlockFrames.first(where: { $0.info === info })?.frame,
+               !cached.intersects(band) {
+                frames.append((info, cached))
+                continue
+            }
+
             // NSTextContentStorage 用的是 UTF-16 偏移，和 NSRange.location 同一套坐标
             guard let startLocation = contentStorage.location(documentStart, offsetBy: range.location),
                   let endLocation = contentStorage.location(documentStart, offsetBy: NSMaxRange(range)) else { continue }
@@ -697,9 +783,11 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// x 坐标按嵌套深度往右错开：第 n 层画在 `inset.left + n * quoteIndent`，
     /// 和第 n 层引用文字的段落缩进（`n * quoteIndent`）正好对齐。
     ///
+    /// - parameter reusingOutside: 同 `computeCodeBlockFrames(reusingOutside:)`：
+    ///            传视野附近的文档坐标矩形时，落在它外面的引用层沿用上一轮结果。
     /// - returns: `(bars, pending)`。`pending` 表示还有区间没排出 fragment，需要重试。
     /// 注意：不开 `private` 是为了让单元测试能直接调它
-    func computeQuoteBarFrames() -> (bars: [(id: Int, level: Int, frame: CGRect)], pending: Bool) {
+    func computeQuoteBarFrames(reusingOutside band: CGRect? = nil) -> (bars: [(id: Int, level: Int, frame: CGRect)], pending: Bool) {
         guard let layoutManager = textLayoutManager,
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
               bounds.width > 1 else { return ([], false) }
@@ -720,6 +808,14 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         var barsByID: [Int: (level: Int, rect: CGRect)] = [:]
 
         for (range, chain) in marked {
+            // 这一段文字参与的所有引用层都在视野外 → 整段沿用上一轮结果
+            if let band, !chain.ids.isEmpty, chain.ids.allSatisfy({ id in
+                guard let cached = quoteBarFrames.first(where: { $0.id == id }) else { return false }
+                return !cached.frame.intersects(band)
+            }) {
+                continue
+            }
+
             // NSTextContentStorage 用的是 UTF-16 偏移，和 NSRange.location 同一套坐标
             guard let startLocation = contentStorage.location(documentStart, offsetBy: range.location),
                   let endLocation = contentStorage.location(documentStart, offsetBy: NSMaxRange(range)) else { continue }
@@ -765,8 +861,20 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         }
 
         // 4) x 按嵌套深度错开，输出按 (level, id) 排序：
-        //    前后两轮的稳定性比对、以及测试断言都依赖顺序稳定
-        let bars = barsByID
+        //    前后两轮的稳定性比对、以及测试断言都依赖顺序稳定。
+        //    ⚠️ 只重算视野附近时（`band != nil`）要先拿上一轮结果打底：
+        //    视野外的层这一轮压根没算，不从缓存补回来的话它们会从界面上直接消失
+        var merged = barsByID
+        if band != nil {
+            for bar in quoteBarFrames where merged[bar.id] == nil {
+                merged[bar.id] = (level: bar.level,
+                                  rect: CGRect(x: bar.frame.minX,
+                                               y: bar.frame.minY,
+                                               width: 0,
+                                               height: bar.frame.height))
+            }
+        }
+        let bars = merged
             .map { (id: $0.key,
                     level: $0.value.level,
                     frame: CGRect(x: textContainerInset.left + CGFloat($0.value.level) * renderer.theme.quoteIndent,
@@ -813,10 +921,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 复选框要的是**某三个字符的横向范围**，行级的 fragment 给不了（一个 fragment 就是一整行），
     /// 所以这里走 TextKit 官方的 `enumerateTextSegments`——它能精确到字符级。
     ///
+    /// - parameter reusingOutside: 同 `computeCodeBlockFrames(reusingOutside:)`：
+    ///            传视野附近的文档坐标矩形时，落在它外面的复选框沿用上一轮结果。
     /// - returns: `(boxes, pending)`。坐标和 `computeCodeBlockFrames` 同一套：
     ///           TextKit 给的矩形原点在 textContainer 左上角，画到 textView 里要补回 inset。
     ///           注意：不开 `private` 是为了让单元测试能直接调它
-    func computeCheckboxFrames() -> (boxes: [(info: CheckboxInfo, frame: CGRect)], pending: Bool) {
+    func computeCheckboxFrames(reusingOutside band: CGRect? = nil) -> (boxes: [(info: CheckboxInfo, frame: CGRect)], pending: Bool) {
         guard let layoutManager = textLayoutManager,
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
               bounds.width > 1 else { return ([], false) }
@@ -841,6 +951,14 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         boxes.reserveCapacity(marked.count)
 
         for (range, info) in marked {
+            // 视野外的复选框沿用上一轮结果（理由见方法注释里的 reusingOutside）
+            if let band,
+               let cached = checkboxFrames.first(where: { $0.info === info })?.frame,
+               !cached.intersects(band) {
+                boxes.append((info, cached))
+                continue
+            }
+
             guard let startLocation = contentStorage.location(documentStart, offsetBy: range.location),
                   let endLocation = contentStorage.location(documentStart, offsetBy: NSMaxRange(range)),
                   let textRange = NSTextRange(location: startLocation, end: endLocation) else { continue }
@@ -1059,6 +1177,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             let button = FoldDisclosureButton()
             button.anchor = anchor.info
             button.apply(isCollapsed: anchor.info.isCollapsed)
+            print("==========",line.midY)
             button.frame = CGRect(x: x,
                                   y: line.midY + side/2 - 5,
                                   width: side,

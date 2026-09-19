@@ -14,7 +14,7 @@ import UIKit
 
 extension VectorIcon {
 
-    /// https://www.iconfont.cn/collections/detail?cid=3991 
+    /// https://www.iconfont.cn/collections/detail?cid=3991
     /// 「全部展开」：一个空心圆角方框，中间一个「＋」
     static let outlineExpandAll = VectorIcon(canvasSize: CGSize(width: 256, height: 256)) {
         let path = UIBezierPath()
