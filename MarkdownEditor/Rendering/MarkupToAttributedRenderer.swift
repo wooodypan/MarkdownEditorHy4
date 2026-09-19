@@ -503,9 +503,10 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             out.append(.decoration(code, attributes: theme.codeBlockAttributes))
         }
 
-        // 首尾的 ``` 由补漏步骤补进来
+        // 首尾的 ``` 由补漏步骤补进来。
+        // ⚠️ 补漏补的**只有**首尾这两条围栏行（代码正文是 sourceSliced 来的，不在补漏范围内），所以这里给的段落样式就是「围栏行专用」那套 —— 它的段前/段后间距有下限，保证围栏行和代码正文之间永远留得出灰底要的 padding，详见 MarkdownTheme.codeFenceParagraphStyle
         var orphanAttributes = theme.markerAttributes
-        orphanAttributes[.paragraphStyle] = codeStyle
+        orphanAttributes[.paragraphStyle] = theme.codeFenceParagraphStyle(indent: indent)
         out = out.reconciled(withSource: source,
                              in: localRange(of: codeBlock),
                              orphanAttributes: orphanAttributes)

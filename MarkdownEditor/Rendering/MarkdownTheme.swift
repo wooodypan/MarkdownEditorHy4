@@ -57,7 +57,7 @@ struct MarkdownTheme {
 
     // MARK: 尺寸
 
-    /// 圆点直径
+    /// 无序列表左侧圆点直径
     var bulletDiameter: CGFloat
     /// 每一级列表的缩进
     var listIndent: CGFloat
@@ -187,11 +187,11 @@ struct MarkdownTheme {
             // 12% 的中灰：铺在白底上 ≈ 0.94 的浅灰（和以前的不透明 0.95 看不出差别），
             // 铺在深色底上则是一点淡淡的提亮，两头都能用
             inlineCodeBackground: UIColor(white: 0.5, alpha: 0.12),
-            codeBlockBackground: UIColor.secondarySystemBackground,
+            codeBlockBackground: UIColor(red: 0.95, green: 0.96, blue: 0.96, alpha: 1.00),
             quoteTextColor: text,
             bulletColor: UIColor(red: 0.26, green: 0.72, blue: 0.51, alpha: 1.00),
             separatorColor: .separator,
-            bulletDiameter: 9,
+            bulletDiameter: 12,
             listIndent: 22,
             quoteIndent: 16,
             paragraphSpacing: 12,
@@ -211,7 +211,7 @@ struct MarkdownTheme {
 
     /// 生成 1~6 级标题字体：级别越高字越大，统一加粗
     static func makeHeadingFonts(baseSize: CGFloat) -> [Int: UIFont] {
-        // 依次是 H1 ~ H6 的字号增量6/4/3/2/
+        // 依次是 H1 ~ H6 的字号增量（15/8/5/2/0/-1）：H1 比正文大 15 点最显眼，往后逐级收敛，到 H6 已经比正文小 1 点
         let deltas: [CGFloat] = [15, 8, 5, 2, 0, -1]
         var result: [Int: UIFont] = [:]
         for (index, delta) in deltas.enumerated() {
@@ -224,9 +224,8 @@ struct MarkdownTheme {
     /// 换一个正文字号，并把跟着它派生出来的字体一起换掉。
     ///
     /// ### 为什么必须整组换
-    /// 主题里只有「正文字号」这一个源头：等宽字体取 `正文 - 1`，各级标题取
-    /// `正文 + 10/6/3/1/0/-1`。设置页上用户拖的是正文字号，要是这里只改
-    /// `bodyFont`，标题就会留在原来的大小上 —— 字号调大以后正文比 H2 还大。
+    /// 主题里只有「正文字号」这一个源头：等宽字体取 `正文 - 1`，各级标题取 `正文 + 15/8/5/2/0/-1`。
+    /// 设置页上用户拖的是正文字号，要是这里只改 `bodyFont`，标题就会留在原来的大小上 —— 字号调大以后正文比 H2 还大。
     ///
     /// ### 说明一下和「动态字体」的关系
     /// 这是**用户手动指定**的字号，用的是 `systemFont(ofSize:)` 而不是
@@ -337,14 +336,29 @@ struct MarkdownTheme {
         return style
     }
 
-    /// 代码块段落：文字相对背景矩形往里缩一点，右边也留出对称的间距
+    /// 代码块**正文**段落：文字相对背景矩形往里缩一点，右边也留出对称的间距
     func codeParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
+        codeStyle(indent: indent, minimumSpacing: 0)
+    }
+
+    /// 代码块**首尾围栏行**（` ```swift ` 和 ` ``` `）段落：和正文那套只差一点 —— 段前/段后间距有个下限，至少留出 `codeBlockVerticalPadding`。
+    ///
+    /// ### 为什么围栏行要单独一套
+    /// 灰底矩形是按「代码正文的排版盒 ± padding」算的，而那个 padding 其实**借**了围栏行自己的段间距：段距默认 12 正好是 padding × 2（纯属巧合），灰底上下各空 18pt，看着很正常；用户一旦把段距调小，这点空隙跟着缩水，灰底就会**切进正文**—— 段距调到 0 时最后一个 `}` 的底部戳出灰底 6pt，正好是灰底高度的 10%。
+    /// 给围栏行兜一个下限之后，这段空隙从「用户调多少就是多少」变成「结构上必然够」，灰底也就**不需要再算**「要不要躲开围栏行」了。
+    func codeFenceParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
+        codeStyle(indent: indent, minimumSpacing: codeBlockVerticalPadding)
+    }
+
+    /// 代码块段落样式的公共部分。
+    /// - parameter minimumSpacing: 段前/段后间距的**下限**，用户调的段距比它大就听用户的
+    private func codeStyle(indent: CGFloat, minimumSpacing: CGFloat) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.headIndent = indent + codeBlockTextInset
         style.firstLineHeadIndent = indent + codeBlockTextInset
         style.tailIndent = -codeBlockTextInset
-        style.paragraphSpacingBefore = paragraphSpacing
-        style.paragraphSpacing = paragraphSpacing
+        style.paragraphSpacingBefore = max(paragraphSpacing, minimumSpacing)
+        style.paragraphSpacing = max(paragraphSpacing, minimumSpacing)
         applyLineHeight(to: style)
         return style
     }

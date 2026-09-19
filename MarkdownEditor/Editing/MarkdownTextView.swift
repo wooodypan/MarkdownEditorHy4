@@ -680,6 +680,15 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             }
             // top == nil 说明这个块只有围栏两行（``` 紧接着 ```），没有正文 → 不铺背景
             guard let top else { continue }
+
+            // ### 为什么这里不用再算「躲围栏行」
+            // 灰底上沿 = 正文首行 fragment 顶往上一个 padding，下沿 = 末行 fragment 底往下一个 padding。
+            // 光看这个式子像是在占正文的便宜，其实不是：fragment 里除了字还有正文自己的段间距，而围栏行那边由 `codeFenceParagraphStyle` 兜了至少一个 padding 的空档 —— 两边加起来必然够，所以不用再跟围栏行的文字盒取大/小值（早先那种夹取还有个反向的坑：段距调小以后夹出来的上/下沿会切进正文，实测最后一个 `}` 的底部戳出灰底 6pt，正好是灰底高度的 10%）。
+            let backgroundTop = top - padding
+            let backgroundBottom = bottom + padding
+            // 理论上必然成立（top / bottom 都来自真实存在的 fragment）→ 真有异常就宁可不画，也不画一个翻过来的框
+            guard backgroundBottom > backgroundTop else { continue }
+
             // ### 坐标系换算（不看注释直接用必错）
             // layoutFragmentFrame 的原点是 **textContainer 的左上角**，也就是已经扣掉了
             // textContainerInset —— fragment y=0 对应的是 inset.top 下面的第一行，不是
@@ -687,9 +696,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             // （验证方法：caretRect(for:) 的 x/y 减 fragment 的 x/y 应该正好等于 inset）。
             // 横向不用换算：x 和宽度本来就是按 inset 现算的整行宽度。
             frames.append((info, CGRect(x: x,
-                                        y: top + textContainerInset.top - padding,
+                                        y: backgroundTop + textContainerInset.top,
                                         width: width,
-                                        height: (bottom - top) + padding * 2)))
+                                        height: backgroundBottom - backgroundTop)))
         }
         return (frames, missingLayout)
     }
