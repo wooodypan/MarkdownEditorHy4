@@ -87,9 +87,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
 
-        // 顺序有讲究：菜单按钮要先建好，查找条挂在它下面、编辑器的顶部又挂在查找条下面
+        // 顺序有讲究：菜单按钮先建好（正文、大纲、查找条都挂在它下面）
         setupMenuButton()
-        setupFindBar()
         setupEditor()
         setupStatusLabel()
         // 套用宿主送来的内容项。到这一步才做，是因为下面的界面这时才建好 ——
@@ -103,6 +102,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 渲进去的，不补这一下，改过设置的人下次启动会看到「开头那几秒是默认字号」
         applyEditorStyle()
         setupOutline()
+        // 查找条放在最后：它是浮层，后加的视图画在上面，这样它才盖得住正文和大纲面板
+        setupFindBar()
         observeKeyboard()
         observeEditorChanges()
         observeSettingsChanges()
@@ -127,8 +128,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
         bottomConstraint = editor.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         NSLayoutConstraint.activate([
-            // 顶部对齐查找条的下边 —— 查找条被钉成 0 高时，这行等价于原来「对齐菜单按钮下边」
-            editor.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            // 上边直接钉在菜单栏下面 —— 跟查找条无关，查找条出现 / 消失正文都不会动
+            editor.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 2),
             editor.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             editor.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bottomConstraint!
@@ -147,17 +148,15 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     ///
     /// 装配代码放在这里的原因和 `setupOutline` 完全一样：协调者刻意不在编辑器或者查找条内部创建，那样组件之间就互相认识了。把这层连接集中在这一处，两个组件各自的初始化都不需要对方的实例。
     ///
-    /// ### 收起时它是怎么做到「一点高度都不占」的
-    /// 横条的高度由它自己内部那一条 `heightAnchor` 约束独裁（详见 `MarkdownFindBarView`
-    /// 头上的说明），收起时 constant 调成 0。外面**只钉上 / 左 / 右，绝不在这儿再钉一条 height**：两条 required 的 height 撞在一起，Auto Layout 会悄悄丢掉一条，收起就失效了（实测丢过一次，查找条一直占着 50pt 把正文顶下去）。
-    /// 正文那边的 `editor.top = findBar.bottom` 不用管，横条一收它就自动顶上来。
+    /// ### 它是怎么做到「出现 / 消失都不挪动正文」的
+    /// 横条**浮**在正文上面：位置固定在菜单栏下面，显示与否只切 `isHidden`，高度完全不参与排版。
+    /// 正文的上边直接钉在菜单栏下面（不挂在查找条下边），所以横条出现时正文纹丝不动 ——代价是它会盖住正文最上面一小条，点查找时眼睛在查找框上，不影响使用。
+    /// 两个前提别弄反：① 它必须在正文**之后**加进视图（后加的画在上面）；② 别再给它钉任何高度约束，高度由它自己里面的内容撑。
     private func setupFindBar() {
         findBar.translatesAutoresizingMaskIntoConstraints = false
-        findBar.setCollapsed(true)
         view.addSubview(findBar)
 
         NSLayoutConstraint.activate([
-            // 上沿贴在菜单按钮下面；收起态高度为 0，这条等价于「菜单栏下面」
             findBar.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 2),
             findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             findBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -60)
@@ -169,7 +168,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         findBar.delegate = searchCoordinator
         editor.searchEventSink = searchCoordinator
 
-        // 「把它藏起来」是布局层的事，所以最后一步还是回到这里执行
+        // 「把自己藏起来」是容器的事（查找条自己不认识容器），所以出口交回这里
         findBar.onDismiss = { [weak self] in self?.hideFindBar() }
     }
 
@@ -180,19 +179,22 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             findBar.beginSearch()
             return
         }
+        // 先取消隐藏、再淡入。它的位置是固定的，动的只有透明度，所以正文一点都不会被挤
         findBar.setCollapsed(false)
-        UIView.animate(withDuration: 0.18) { self.view.layoutIfNeeded() }
+        findBar.alpha = 0
+        UIView.animate(withDuration: 0.15) { self.findBar.alpha = 1 }
         findBar.beginSearch()
     }
 
-    /// 收起查找条：先撤焦点（免得键盘一直挂在它上面），再收回高度。
+    /// 收起查找条：先撤焦点（免得键盘一直挂在它上面），再直接藏起来。
     ///
     /// 标 `@objc` 是为了让测试能直接驱动它（查找框那条关闭链路是异步的，测起来不方便）
     @objc private func hideFindBar() {
         guard !findBar.isCollapsed else { return }
         findBar.endSearch()
         findBar.setCollapsed(true)
-        UIView.animate(withDuration: 0.18) { self.view.layoutIfNeeded() }
+        // 透明度还原成不透明，下次显示时才能从透明淡入
+        findBar.alpha = 1
     }
 
     // MARK: 图片预览（QuickLook）
@@ -472,12 +474,13 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         outlineView.remembersScrollPosition = settings.remembersScrollPosition
     }
 
-    /// 把「大纲面板高度」的配置同步给大纲面板。
+    /// 把「大纲面板尺寸」的配置同步给大纲面板。
     ///
     /// 「配置 → 面板参数」的换算本身放在配置那边
-    /// （`MarkdownEditorSettings.applyOutlineHeight`），这样它能被单独测；
+    /// （`MarkdownEditorSettings.applyOutlineWidth` / `applyOutlineHeight`），这样它们能各自被单独测；
     /// 这里只负责把结果送过去、再让面板重算一次宽高
     private func applyOutlineAppearance() {
+        settings.applyOutlineWidth(to: &outlineView.appearance)
         settings.applyOutlineHeight(to: &outlineView.appearance)
         // 宽高是算出来的（不算动画：拖滑块时不该一直有动画）
         outlineView.refreshAppearance()

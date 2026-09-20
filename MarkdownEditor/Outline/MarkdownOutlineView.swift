@@ -11,8 +11,17 @@ import UIKit
 ///
 /// 集中放一处，改样式不用翻实现代码。
 struct MarkdownOutlineAppearance {
-    /// 展开时的理想宽度（宽度不够时会自动收窄，见 `MarkdownOutlineView.effectiveWidth`）
-    var width: CGFloat = 210
+    /// 「固定宽度」模式下展开时的理想宽度（宽度不够时会自动收窄，见 `MarkdownOutlineView.effectiveWidth`）。
+    ///
+    /// ⚠️ `widthRatio` 有值时这一项**完全不参与计算** —— 宽度模式是互斥的二选一，和下面高度那对 `maximumHeight` / `heightRatio` 是同一个套路
+    var width: CGFloat = 300
+    /// 面板宽度最多占父视图宽度的比例。
+    ///
+    /// - 有值（比如 `0.3` = 30%）→ 宽度 = 父视图宽度 × 这个比例，此时 `width` **失效**；
+    /// - `nil`（默认）→ 宽度改由 `width` 决定。
+    ///
+    /// 由上层容器按用户在设置页选的模式注入 —— 这个文件不认识 App 层的配置，只认别人塞给它的值
+    var widthRatio: CGFloat?
     /// 自动收窄时的下限，再窄标题就没法看了
     var minimumWidth: CGFloat = 148
     /// 收起后那个小方块的宽度
@@ -372,6 +381,10 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 单元测试用它断言「折叠之后卡片有没有变矮」
     var panelHeight: CGFloat { panelHeightConstraint.constant }
 
+    /// 面板当前的宽度。读的同样是**约束**的值，理由见上面 `panelHeight`。
+    /// 单元测试用它断言两种宽度模式（固定点数 / 按父视图比例）各算出多宽
+    var panelWidth: CGFloat { panelWidthConstraint.constant }
+
     // MARK: - 测试用的小口子
 
     /// 当前显示出来的行的标题，按显示顺序。
@@ -431,16 +444,16 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         headerBar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(headerBar)
 
-        headerIcon.image = UIImage(systemName: "list.bullet.indent")
-        headerIcon.contentMode = .scaleAspectFit
-        headerIcon.tintColor = .secondaryLabel
-        headerIcon.translatesAutoresizingMaskIntoConstraints = false
-        headerIcon.setContentHuggingPriority(.required, for: .horizontal)
-        headerBar.addSubview(headerIcon)
+//        headerIcon.image = UIImage(systemName: "list.bullet.indent")
+//        headerIcon.contentMode = .scaleAspectFit
+//        headerIcon.tintColor = .secondaryLabel
+//        headerIcon.translatesAutoresizingMaskIntoConstraints = false
+//        headerIcon.setContentHuggingPriority(.required, for: .horizontal)
+//        headerBar.addSubview(headerIcon)
 
-        headerLabel.font = .preferredFont(forTextStyle: .caption1)
+        headerLabel.font = .preferredFont(forTextStyle: .title3)
         headerLabel.adjustsFontForContentSizeCategory = true
-        headerLabel.textColor = .secondaryLabel
+        headerLabel.textColor = .label
         headerLabel.translatesAutoresizingMaskIntoConstraints = false
         headerBar.addSubview(headerLabel)
 
@@ -451,6 +464,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
 //        collapseButton.setImage(UIImage(systemName: "chevron.right"), for: .normal)
         collapseButton.setTitle("x", for: .normal)
+        collapseButton.setTitleColor(.gray, for: .normal)
+        collapseButton.titleLabel?.font = UIFont.systemFont(ofSize: 20)
         collapseButton.translatesAutoresizingMaskIntoConstraints = false
         collapseButton.addTarget(self, action: #selector(toggleCollapsed), for: .touchUpInside)
         collapseButton.accessibilityLabel = "收起大纲"
@@ -460,10 +475,10 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         // `CGColor` 是「拍扁」过的颜色，切到深色模式不会自动变，得手动去刷 trait 变化
         // （而 `traitCollectionDidChange` 在 iOS 17 之后已经弃用了）。
         // 用 `backgroundColor` 配一个动态色（`.separator`）的普通 view，系统自己会跟着换色。
-        let separator = UIView()
-        separator.backgroundColor = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        headerBar.addSubview(separator)
+//        let separator = UIView()
+//        separator.backgroundColor = .separator
+//        separator.translatesAutoresizingMaskIntoConstraints = false
+//        headerBar.addSubview(separator)
 
         NSLayoutConstraint.activate([
             headerBar.topAnchor.constraint(equalTo: content.topAnchor),
@@ -471,19 +486,19 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
             headerBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             headerBar.heightAnchor.constraint(equalToConstant: appearance.headerHeight),
 
-            headerIcon.leadingAnchor.constraint(equalTo: headerBar.leadingAnchor, constant: 11),
-            headerIcon.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
-            headerIcon.widthAnchor.constraint(equalToConstant: 15),
-            headerIcon.heightAnchor.constraint(equalToConstant: 15),
+//            headerIcon.leadingAnchor.constraint(equalTo: headerBar.leadingAnchor, constant: 11),
+//            headerIcon.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
+//            headerIcon.widthAnchor.constraint(equalToConstant: 15),
+//            headerIcon.heightAnchor.constraint(equalToConstant: 15),
 
-            headerLabel.leadingAnchor.constraint(equalTo: headerIcon.trailingAnchor, constant: 6),
+            headerLabel.centerXAnchor.constraint(equalTo: headerBar.centerXAnchor, constant: -16),
             headerLabel.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
             // 防止长文案顶到按钮下面去
             headerLabel.trailingAnchor.constraint(lessThanOrEqualTo: collapseAllButton.leadingAnchor,
                                                   constant: -4),
 
-            collapseAllButton.trailingAnchor.constraint(equalTo: collapseButton.leadingAnchor,
-                                                        constant: -12),
+            collapseAllButton.leadingAnchor.constraint(equalTo: headerLabel.trailingAnchor,
+                                                        constant: 10),
             collapseAllButton.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
             collapseAllButton.widthAnchor.constraint(equalToConstant: 26),
             collapseAllButton.heightAnchor.constraint(equalToConstant: 26),
@@ -493,10 +508,10 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
             collapseButton.widthAnchor.constraint(equalToConstant: 26),
             collapseButton.heightAnchor.constraint(equalToConstant: 26),
 
-            separator.leadingAnchor.constraint(equalTo: headerBar.leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: headerBar.trailingAnchor),
-            separator.bottomAnchor.constraint(equalTo: headerBar.bottomAnchor),
-            separator.heightAnchor.constraint(equalToConstant: 0.5)
+//            separator.leadingAnchor.constraint(equalTo: headerBar.leadingAnchor),
+//            separator.trailingAnchor.constraint(equalTo: headerBar.trailingAnchor),
+//            separator.bottomAnchor.constraint(equalTo: headerBar.bottomAnchor),
+//            separator.heightAnchor.constraint(equalToConstant: 0.5)
         ])
     }
 
@@ -641,7 +656,7 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 右边那个按钮要跟着「现在是不是已经全折了」换图标和含义（同一个位置一按到底，
     /// 不用记「我上一步做了什么」）
     private func updateHeaderControls() {
-        headerLabel.text = items.isEmpty ? "大纲" : "大纲 · \(items.count)"
+        headerLabel.text = items.isEmpty ? "大纲 · \(items.count)" : "大纲"
 
         let allCollapsed = isAllCollapsed
         // 自绘图标（见 VectorIcon.outlineExpandAll / .outlineCollapseAll）：
@@ -678,17 +693,25 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     // MARK: - 尺寸计算
 
-    /// 面板宽度：父视图够宽就用理想宽度，不够就按比例收窄。
+    /// 面板宽度：两种模式二选一，看 `appearance.widthRatio` 有没有值。
     ///
-    /// `max(min(minimumWidth, available), ratio)` 这个写法保证两件事：
-    /// 1. 优先按 46% 的比例收窄（小屏上不会盖掉大半个编辑区）；
-    /// 2. 但窄到连 `minimumWidth` 都放不下时，就老老实实让给可用宽度，
+    /// - **按百分比**（有值）：宽度 = 可用宽度 × 比例。⚠️ 这种情况**不套用下面那道 46% 的自动收窄** ——
+    ///   那一档是给「固定宽度在小屏上放不下」兜底的，用户明确要 50% 时不该被它压回 46%；
+    /// - **固定宽度**（`nil`）：父视图够宽就用 `appearance.width`，不够就按 46% 收窄。
+    ///
+    /// 两种模式共用同一道保底 `max(min(minimumWidth, available), …)`，它保证两件事：
+    /// 1. 面板至少和「可用空间里放得下的 `minimumWidth`」一样宽（再窄标题就没法看了）；
+    /// 2. 窄到连 `minimumWidth` 都放不下时，就老老实实让给可用宽度，
     ///    这样外面那条「左边至少留 12pt」的约束永远不会被顶爆。
     private var effectiveWidth: CGFloat {
         guard let superview, superview.bounds.width > 0 else { return appearance.width }
         let available = max(0, superview.bounds.width - appearance.edgeMargin * 2)
-        let ratio = available * 0.46
-        return min(appearance.width, max(min(appearance.minimumWidth, available), ratio))
+        // 窄到放不下 minimumWidth 时就让给可用宽度，两种模式共用这一道保底
+        let floor = min(appearance.minimumWidth, available)
+        if let ratio = appearance.widthRatio {
+            return max(floor, min(available, available * ratio))
+        }
+        return min(appearance.width, max(floor, available * 0.46))
     }
 
     /// 面板顶部要占掉的那点空间（菜单按钮 + 上下间距）。
@@ -767,8 +790,7 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         // 否则会沿用上一次的宽度（Catalyst 拉窗口时行会「短一截」）。
         //
         // ⚠️ 这里量的是**面板宽度约束上的值**，不能用 `effectiveWidth`：
-        // 后者在收起态返回的也是展开后的理想宽度（210），于是收起时就被记成 210，
-        // 展开时差值 0、一次都不作废布局 —— 症状就是「点开目录后一条标题都不显示」
+        // 后者在收起态返回的也是展开后的理想宽度（它压根不认识收起态），于是收起时就被记成那个值，展开时差值 0、一次都不作废布局 —— 症状就是「点开目录后一条标题都不显示」
         let width = panelWidthConstraint.constant
         if abs(width - lastLaidOutWidth) > 0.5 {
             lastLaidOutWidth = width

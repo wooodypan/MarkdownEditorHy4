@@ -13,15 +13,11 @@ import UIKit
 
 /// 顶部那条查找 / 替换横条。
 ///
-/// ### 收起时怎么做到「一点高度都不占」（绕了四版才找对，别再改回去）
-/// - **第一版**：外面钉一条 `height = 0`，和里面那套「内容四周」的约束**同时**生效。
-///   两组都是 required，Auto Layout 只能丢掉一条 —— 实测丢的是 height，收起后仍留着 50pt。
-/// - **第二版**：把横条自己做成 `UIStackView`，收起时把两行都 hidden 掉。问题是 `UIStackView` **没有 intrinsicContentSize**，于是没有任何约束在决定它的高度 —— 一旦被排到 50pt，收起时也还是 50pt。
-/// - **第三版**：两组约束互斥切换（展开用内容那一组，收起换 height=0）。约束这回是对的，可 frame 还是 50 —— 于是误判成「约束没生效」，其实真凶是下面那条标脏问题，跟怎么切约束没关系。
-/// - **现在的做法**：高度**自始至终只有一条约束说了算**，内容是抢不过它的 —— `column` 只钉上 / 左 / 右（**故意不钉下边**，钉了就等于让内容参与决定高度），横条自己挂一条 `heightAnchor` 约束，收起时把 constant 调成 0。
-///   高度用 `expandedHeight` 算，和 constant 同源，不存在两边算得不一样的情况。
-/// - ⚠️ **最关键的一条**：改完 constant 得自己把脏标上（见 `refreshHeightConstant()`）。
-///   少了这一步，高度约束明明已经是 0 了，frame 还是老样子 —— 而且第一次排版之后才按 ⌘F 就一定会踩到，查找条直接弹不出来。
+/// ### 它是怎么「出现 / 消失」的（这里踩过坑，别再改回压高度那套）
+/// 早先的做法是「收起时把高度压成 0，正文顺势顶上来」，踩了两个坑：
+/// - 高度一旦有两条约束同时在管（外面一条、内容撑出来一条），系统只会满足其中一条，收起就静默失效；
+/// - 改完约束的数值，还得自己提醒系统「这个视图得重新排一次版」，否则数字已经改了、屏幕上还是老样子。
+/// **现在的做法简单得多**：横条浮在正文上面，出现 / 消失只切 `isHidden`，高度完全不用管 —— 上面两个坑也就不存在了。
 final class MarkdownFindBarView: UIView {
 
     // MARK: 外部连接
@@ -33,8 +29,8 @@ final class MarkdownFindBarView: UIView {
 
     // MARK: 子视图
 
-    private let queryField = UITextField()
-    private let replaceField = UITextField()
+    private let queryField = SearchTextField()
+    private let replaceField = SearchTextField()
     private let countLabel = UILabel()
     private let previousButton = UIButton(type: .system)
     private let nextButton = UIButton(type: .system)
@@ -48,19 +44,17 @@ final class MarkdownFindBarView: UIView {
     private let queryRow = UIStackView()
     /// 「替换为」那一行（输入框 + 替换 + 全部替换），点 ⇄ 才展开
     private let replaceRow = UIStackView()
-    /// 两行外面那层竖着排的栈（它只负责排内容，横条的高度跟它无关）
+    /// 两行外面那层竖着排的栈（横条的高度就由它撑出来：上下贴住它，它多高横条就多高）
     private let column = UIStackView()
-    /// 横条自己的高度约束 —— 展开还是收起，从头到尾都是这一条在说了算
-    private var heightConstraint: NSLayoutConstraint?
 
     // MARK: 状态
 
     /// 当前的查找选项（由选项菜单改动，任何一次查找都会带上它）
     private var options = SearchOptions()
 
-    /// 整个横条是不是收起来了（收起来 = 0 高）
-    private(set) var isCollapsed = true
-    /// 「替换为」那一行要不要展开（收起时它自然也不显示）
+    /// 整个横条是不是收起来了 —— 就是「是不是藏着」，状态只有 `isHidden` 这一份真相，不另存一份标记
+    var isCollapsed: Bool { isHidden }
+    /// 「替换为」那一行要不要展开
     private var wantsReplaceRow = false
 
     /// 「替换为」那一行现在是不是显示着
@@ -83,15 +77,14 @@ final class MarkdownFindBarView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .systemBackground
-        // 收起后高度是 0，里面的内容必须裁掉，否则会从 0 高的横条里漏出来
-        clipsToBounds = true
         setupSeparator()
         setupFields()
         setupButtons()
         setupRows()
         refreshOptionsMenu()
         countLabel.text = ""
-        setCollapsed(true)
+        // 默认藏着：要等用户按 ⌘F 才出现
+        isHidden = true
     }
 
     required init?(coder: NSCoder) {
@@ -124,9 +117,8 @@ final class MarkdownFindBarView: UIView {
         queryField.addTarget(self, action: #selector(queryDidChange), for: .editingChanged)
     }
 
-    private func configure(_ field: UITextField, placeholder: String) {
+    private func configure(_ field: SearchTextField, placeholder: String) {
         field.translatesAutoresizingMaskIntoConstraints = false
-        field.borderStyle = .roundedRect
         field.font = .systemFont(ofSize: 13)
         field.placeholder = placeholder
         field.autocorrectionType = .no
@@ -178,7 +170,7 @@ final class MarkdownFindBarView: UIView {
         button.accessibilityLabel = accessibility
         button.translatesAutoresizingMaskIntoConstraints = false
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
-        // 钉成和输入框一样高，替换行的高度才是确定的（`expandedHeight` 就是按这个算的）
+        // 钉成和输入框一样高，替换行的高度才是确定的
         button.heightAnchor.constraint(equalToConstant: Self.fieldHeight).isActive = true
     }
 
@@ -201,6 +193,7 @@ final class MarkdownFindBarView: UIView {
         replaceRow.addArrangedSubview(replaceField)
         replaceRow.addArrangedSubview(replaceButton)
         replaceRow.addArrangedSubview(replaceAllButton)
+        replaceRow.isHidden = true
 
         column.axis = .vertical
         column.spacing = Self.rowSpacing
@@ -210,65 +203,28 @@ final class MarkdownFindBarView: UIView {
         addSubview(column)
 
         let margin = Self.edgeMargin
-        // ⚠️ 只钉上 / 左 / 右三条，**故意不钉下边**：钉了下边，内容的高度就会反过来参与决定横条的高度，跟下面那条 height 约束抢话事权（抢的那版就是收起失效那版）
+        // 四边都贴住：横条的高度就由「内容的高度 + 上下留白」决定，加不加替换行它自己会变
         NSLayoutConstraint.activate([
             column.topAnchor.constraint(equalTo: topAnchor, constant: margin),
+            column.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -margin),
             column.leadingAnchor.constraint(equalTo: leadingAnchor, constant: margin),
             column.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -margin)
         ])
-
-        // 全程唯一一条决定高度的约束，收起时把 constant 调成 0 即可
-        let height = heightAnchor.constraint(equalToConstant: 0)
-        height.isActive = true
-        heightConstraint = height
-    }
-
-    /// 展开时需要多高：上下留白 + 查找行（+ 替换行和行间距）。
-    ///
-    /// 用算的而不是让约束自己撑 —— 因为高度现在由上面那条约束独裁，算出来的值就是它的 constant，两边永远一致。
-    private var expandedHeight: CGFloat {
-        var height = Self.edgeMargin * 2 + Self.fieldHeight
-        if wantsReplaceRow { height += Self.rowSpacing + Self.fieldHeight }
-        return height
-    }
-
-    /// 把高度约束的 constant 刷成当前状态该有的值
-    ///
-    /// ### 为什么改完 constant 还要手动标脏（少了这一步，展开会静默失效）
-    /// 改 `constant` **不会**自动把祖先标成「需要重新排版」。上层容器收起 / 展开时做的是 `view.layoutIfNeeded()` —— 它只在「确实有待处理的排版」时才真的算一次，没标脏就直接空转。结果就是：约束的 constant 已经改成 50 了，横条的 frame 还是 0，查找条永远弹不出来（第一次排版之后才按 ⌘F 就一定会踩到）。
-    /// 所以这里自己把脏标上：自己 + 外面一层，谁先跑 layoutIfNeeded 都能算到。
-    private func refreshHeightConstant() {
-        heightConstraint?.constant = isCollapsed ? 0 : expandedHeight
-        setNeedsLayout()
-        superview?.setNeedsLayout()
-    }
-
-    /// 按两个开关（收没收起 / 要不要替换行）决定显示什么。
-    ///
-    /// 只管显示，**不管高度** —— 高度是 `refreshHeightConstant()` 按同一批开关算出来的，两边用的是同一组状态，不会一个说显示、另一个按不显示的高度算。
-    private func applyRowVisibility() {
-        replaceRow.isHidden = !wantsReplaceRow
-        separator.isHidden = isCollapsed
-        // 收起时顺手把内容藏掉：高度已经是 0 了，藏着还能省掉一次白跑的排版
-        column.isHidden = isCollapsed
     }
 
     // MARK: 对外动作
 
-    /// 收起 / 展开整个横条（上层容器在做动画之前调它）。
+    /// 显示 / 隐藏整个横条（上层容器调它）。
     ///
-    /// ### 为什么是「改 constant」而不是「切一组约束」
-    /// 切换意味着同一时刻有两组约束存在，得靠 `isActive` 保证只生效一组 —— 一旦哪条漏关，就会有一条 required 的高度约束和内容抢话事权（前面三版都是这么挂的）。
-    /// 只留一条、只改 constant，就不存在「谁被丢掉」这个问题。
+    /// 只切 `isHidden`，**不碰高度**：横条是浮在正文上面的，藏起来就等于不存在，
+    /// 正文的位置从头到尾不受它影响（正文的上边钉在菜单栏下面，跟本横条无关）。
     func setCollapsed(_ collapsed: Bool) {
-        isCollapsed = collapsed
-        refreshHeightConstant()
-        applyRowVisibility()
+        isHidden = collapsed
     }
 
     /// 开始查找：输入框获得焦点，并把已有的内容全选（再打字就是重新起一次查找）。
     ///
-    /// 收起 / 展开和动画由上层容器负责，这里只管焦点和选中。
+    /// 显示 / 隐藏和动画由上层容器负责，这里只管焦点和选中。
     func beginSearch() {
         queryField.becomeFirstResponder()
         queryField.selectAll(nil)
@@ -281,11 +237,12 @@ final class MarkdownFindBarView: UIView {
     }
 
     /// 切换「替换为」那一行的显示与否，返回切换之后的状态
+    ///
+    /// 直接把那一行从竖着的栈里藏掉就行 —— 被藏起来的一行不占位置，横条的高度会自己缩回去，一行约束都不用改。
     @discardableResult
     func toggleReplaceRow() -> Bool {
         wantsReplaceRow = !wantsReplaceRow
-        refreshHeightConstant()
-        applyRowVisibility()
+        replaceRow.isHidden = !wantsReplaceRow
         replaceToggleButton.accessibilityLabel = wantsReplaceRow ? "隐藏替换" : "显示替换"
         return showsReplaceRow
     }
@@ -401,5 +358,57 @@ extension MarkdownFindBarView: MarkdownSearchBarDisplaying {
         nextButton.isEnabled = enabled
         replaceButton.isEnabled = enabled
         replaceAllButton.isEnabled = enabled
+    }
+}
+
+/// 查找框 / 替换框用的输入框：边框和圆角都自己画，不用系统自带的那套。
+///
+/// ### 为什么要自己画
+/// 系统自带的 `.roundedRect` 会在**获得焦点时自己换一副样子**（圆角突然变成高度的一半，整个框鼓成胶囊形），
+/// 一失焦又缩回去。查找框和替换框上下挨着，正在编辑的那个跟另一个长得完全不一样，看着像两个不同的控件。
+/// 所以这里把系统那套边框关掉，自己画一套**固定圆角**：有没有焦点都长一个样。
+private final class SearchTextField: UITextField {
+
+    /// 圆角大小：统一用这一个，不随焦点变化
+    private static let cornerRadius: CGFloat = 8
+    /// 文字离左右边框的留白（自己画边框之后系统不会帮忙留，得自己加）
+    private static let horizontalInset: CGFloat = 8
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        // 关掉系统那套边框 —— 就是它会跟着焦点变圆角
+        borderStyle = .none
+        // 浅灰底：用系统给的灰，深浅色模式切换时它自己会变
+        backgroundColor = .tertiarySystemFill
+        clipsToBounds = true
+        layer.cornerRadius = Self.cornerRadius
+        layer.borderWidth = 1.0 / UIScreen.main.scale
+        refreshBorderColor()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("SearchTextField 不支持从 coder 解档")
+    }
+
+    /// 深浅色模式切换之后，图层上的边框颜色不会自己跟着变，得在这儿补一次
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        refreshBorderColor()
+    }
+
+    private func refreshBorderColor() {
+        layer.borderColor = UIColor.separator.cgColor
+    }
+
+    override func textRect(forBounds bounds: CGRect) -> CGRect {
+        bounds.insetBy(dx: Self.horizontalInset, dy: 0)
+    }
+
+    override func editingRect(forBounds bounds: CGRect) -> CGRect {
+        bounds.insetBy(dx: Self.horizontalInset, dy: 0)
+    }
+
+    override func placeholderRect(forBounds bounds: CGRect) -> CGRect {
+        bounds.insetBy(dx: Self.horizontalInset, dy: 0)
     }
 }

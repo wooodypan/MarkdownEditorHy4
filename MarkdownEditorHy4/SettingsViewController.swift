@@ -2,7 +2,7 @@
 //  SettingsViewController.swift
 //  MarkdownEditorHy4
 //
-//  简易设置页：正文排版 + 阅读相关 + 大纲面板高度 + 表格列宽，后面还会往里加
+//  简易设置页：正文排版 + 阅读相关 + 大纲面板尺寸 + 表格列宽 + 图片尺寸，后面还会往里加
 //
 //  这一页改了之后要「当场生效」的那几项（字号、行高、段间距、首行缩进、表格列宽），
 //  是由内容页监听 `MarkdownEditorSettings.didChangeNotification` 后重新渲染实现的，
@@ -34,7 +34,7 @@ final class SettingsViewController: UIViewController {
         case typography
         /// 阅读与大纲（开关类）
         case reading
-        /// 大纲面板长多高
+        /// 大纲面板多宽 / 多高
         case outlineSize
         /// 表格画出来时的列宽限制
         case tableLayout
@@ -45,7 +45,7 @@ final class SettingsViewController: UIViewController {
             switch self {
             case .typography: return "正文排版"
             case .reading: return "阅读与大纲"
-            case .outlineSize: return "大纲面板高度"
+            case .outlineSize: return "大纲面板尺寸"
             case .tableLayout: return "表格列宽"
             case .imageSize: return "图片尺寸"
             }
@@ -61,8 +61,10 @@ final class SettingsViewController: UIViewController {
             case .reading:
                 return [.remembersScrollPosition]
             case .outlineSize:
-                // 顺序就是界面上从上到下的顺序：先选「怎么算」，再调两个数值
-                return [.outlineHeightMode, .outlineHeightRatio, .outlineMaximumHeight]
+                // 顺序就是界面上从上到下的顺序：宽度（怎么算 + 两个数值）、再高度（同样三行）。
+                // 两种模式的说明都要跟模式联动，所以每一组里「怎么算」放最上面
+                return [.outlineWidthMode, .outlineWidthRatio, .outlineWidthPoints,
+                        .outlineHeightMode, .outlineHeightRatio, .outlineMaximumHeight]
             case .tableLayout:
                 return [.tableMinColumnWidth, .tableMaxColumnWidth]
             case .imageSize:
@@ -90,6 +92,13 @@ final class SettingsViewController: UIViewController {
         case bodyContentWidth
         // 阅读与大纲
         case remembersScrollPosition
+        // 大纲面板：宽度
+        /// 面板宽度按什么算（百分比 / 固定点数）
+        case outlineWidthMode
+        /// 宽度占编辑器（窗口）宽度的比例
+        case outlineWidthRatio
+        /// 固定宽度（点）
+        case outlineWidthPoints
         /// 高度按什么算（百分比 / 固定最大高度）
         case outlineHeightMode
         /// 高度占父视图高度的比例
@@ -124,6 +133,12 @@ final class SettingsViewController: UIViewController {
                 return "行宽上限"
             case .remembersScrollPosition:
                 return "记住目录大纲滚动位置"
+            case .outlineWidthMode:
+                return "宽度怎么算"
+            case .outlineWidthRatio:
+                return "宽度百分比"
+            case .outlineWidthPoints:
+                return "固定宽度"
             case .outlineHeightMode:
                 return "高度怎么算"
             case .outlineHeightRatio:
@@ -145,11 +160,24 @@ final class SettingsViewController: UIViewController {
             }
         }
 
+        /// 找控件用的无障碍标识（也是单测在视图树里找这一行的身份证）。
+        ///
+        /// ⚠️ 默认就是 `title`，但**必须唯一**：设置页里有重名的可见标题 —— 「宽度怎么算 / 宽度百分比 / 固定宽度」在大纲面板和图片尺寸两组里各有一套，界面上靠分组标题区分完全够用，但按标识找控件时重名就会摸到别人那一条。又因为视图树顺序和分组顺序**并不一致**（见本文件末尾那条提醒），也不能靠「谁在前」碰运气，所以这几行另起一套名字
+        var accessibilityLabel: String {
+            switch self {
+            case .outlineWidthMode: return "大纲宽度怎么算"
+            case .outlineWidthRatio: return "大纲宽度百分比"
+            case .outlineWidthPoints: return "大纲固定宽度"
+            default: return title
+            }
+        }
+
         /// 副标题：把「这一项是干嘛的、什么时候不起作用」说清楚，
         /// 免得用户点完/拖完不知道发生了什么。
         /// 两句高度相关的说明要跟着模式变 —— 不生效的那一项得明说
         func detail(in settings: MarkdownEditorSettings) -> String {
             let usesRatio = settings.outlineHeightMode == .percentage
+            let usesWidthRatio = settings.outlineWidthMode == .percentage
             let imageUsesRatio = settings.imageWidthMode == .percentage
             switch self {
             case .bodyFontSize:
@@ -173,6 +201,17 @@ final class SettingsViewController: UIViewController {
                 return "打开：大纲跟着光标所在章节自动滚动，关闭文件时记住读到哪里，"
                     + "下次打开同一个文件回到原处。关闭：大纲只在你手动滚动时才动，"
                     + "列表刷新后回到顶部。"
+            case .outlineWidthMode:
+                return "「按百分比」：宽度跟着窗口走，窗口拉宽面板也变宽；"
+                    + "「固定宽度」：永远是你指定的点数，跟窗口无关。"
+            case .outlineWidthRatio:
+                return usesWidthRatio
+                    ? "面板最多占编辑器宽度的百分之几。窗口太窄时还会被自动收窄，不会把编辑区盖住。"
+                    : "当前用的是「固定宽度」，这一项暂不生效。"
+            case .outlineWidthPoints:
+                return usesWidthRatio
+                    ? "当前用的是「按百分比」，这一项暂不生效。"
+                    : "面板有多宽（点）。窗口窄到放不下时会被自动收窄，左边始终给正文留得下位置。"
             case .outlineHeightMode:
                 return "「按百分比」按窗口高度算上限（下面的「最大高度」不生效）；"
                     + "「按最大高度」改用固定值。两种都只是上限：标题少的时候，"
@@ -218,6 +257,8 @@ final class SettingsViewController: UIViewController {
             case .paragraphIndentCharacters:
                 return MarkdownEditorSettings.Limits.paragraphIndentCharacters
             case .bodyContentWidth: return MarkdownEditorSettings.Limits.bodyContentWidth
+            case .outlineWidthRatio: return MarkdownEditorSettings.Limits.outlineWidthRatio
+            case .outlineWidthPoints: return MarkdownEditorSettings.Limits.outlineWidthPoints
             case .outlineHeightRatio: return MarkdownEditorSettings.Limits.outlineHeightRatio
             case .outlineMaximumHeight: return MarkdownEditorSettings.Limits.outlineMaximumHeight
             case .tableMinColumnWidth: return MarkdownEditorSettings.Limits.tableMinColumnWidth
@@ -237,6 +278,9 @@ final class SettingsViewController: UIViewController {
             case .paragraphSpacing: return 2
             case .paragraphIndentCharacters: return 0.5
             case .bodyContentWidth: return 20
+            // 一档 1%：宽度的量程只有 15%~50%，跟 5% 一档比，1% 一档才够用
+            case .outlineWidthRatio: return 0.01
+            case .outlineWidthPoints: return 10
             case .outlineHeightRatio: return 0.05
             case .outlineMaximumHeight: return 20
             case .tableMinColumnWidth, .tableMaxColumnWidth: return 8
@@ -255,6 +299,8 @@ final class SettingsViewController: UIViewController {
             case .paragraphSpacing: return settings.paragraphSpacing
             case .paragraphIndentCharacters: return settings.paragraphIndentCharacters
             case .bodyContentWidth: return settings.bodyContentWidth
+            case .outlineWidthRatio: return settings.outlineWidthRatio
+            case .outlineWidthPoints: return settings.outlineWidthPoints
             case .outlineHeightRatio: return settings.outlineHeightRatio
             case .outlineMaximumHeight: return settings.outlineMaximumHeight
             case .tableMinColumnWidth: return settings.tableMinColumnWidth
@@ -288,9 +334,9 @@ final class SettingsViewController: UIViewController {
                 return value >= sliderRange.upperBound
                     ? "不限"
                     : "\(Int(value.rounded())) pt"
-            case .outlineHeightRatio:
+            case .outlineWidthRatio, .outlineHeightRatio:
                 return "\(Int((value * 100).rounded()))%"
-            case .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
+            case .outlineWidthPoints, .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
                 return "\(Int(value.rounded())) pt"
             case .imageWidthRatio:
                 return "\(Int((value * 100).rounded()))%"
@@ -377,6 +423,15 @@ final class SettingsViewController: UIViewController {
         }
     }
 
+    /// 「大纲宽度怎么算」换了模式
+    @objc private func outlineWidthModeChanged(_ sender: UISegmentedControl) {
+        let modes = OutlineWidthMode.allCases
+        guard modes.indices.contains(sender.selectedSegmentIndex) else { return }
+        settings.setOutlineWidthMode(modes[sender.selectedSegmentIndex])
+        // 两个滑块的「能不能用」跟着模式变，整表重刷最省事（总共没几行）
+        tableView.reloadData()
+    }
+
     /// 「高度怎么算」换了模式
     @objc private func heightModeChanged(_ sender: UISegmentedControl) {
         let modes = OutlineHeightMode.allCases
@@ -411,6 +466,10 @@ final class SettingsViewController: UIViewController {
             settings.setParagraphIndentCharacters(stepped)
         case .bodyContentWidth:
             settings.setBodyContentWidth(stepped)
+        case .outlineWidthRatio:
+            settings.setOutlineWidthRatio(stepped)
+        case .outlineWidthPoints:
+            settings.setOutlineWidthPoints(stepped)
         case .outlineHeightRatio:
             settings.setOutlineHeightRatio(stepped)
         case .outlineMaximumHeight:
@@ -425,7 +484,7 @@ final class SettingsViewController: UIViewController {
             settings.setImageWidthPoints(stepped)
         case .imageMaxHeight:
             settings.setImageMaxHeight(stepped)
-        case .remembersScrollPosition, .outlineHeightMode, .imageWidthMode:
+        case .remembersScrollPosition, .outlineWidthMode, .outlineHeightMode, .imageWidthMode:
             // 这两行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
             // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
             // 编译器会直接报「switch must be exhaustive」逼你回来接上 ——
@@ -492,8 +551,18 @@ final class SettingsViewController: UIViewController {
         let control = UISegmentedControl(items: modes.map(\.displayName))
         control.selectedSegmentIndex = modes.firstIndex(of: settings.outlineHeightMode) ?? 0
         control.addTarget(self, action: #selector(heightModeChanged(_:)), for: .valueChanged)
-        control.accessibilityLabel = Row.outlineHeightMode.title
+        control.accessibilityLabel = Row.outlineHeightMode.accessibilityLabel
         return makeCell(row: .outlineHeightMode, control: control)
+    }
+
+    /// 「大纲宽度怎么算」：两个选项平铺，一眼能看出是「二选一」
+    private func makeOutlineWidthModeCell() -> UITableViewCell {
+        let modes = OutlineWidthMode.allCases
+        let control = UISegmentedControl(items: modes.map(\.displayName))
+        control.selectedSegmentIndex = modes.firstIndex(of: settings.outlineWidthMode) ?? 0
+        control.addTarget(self, action: #selector(outlineWidthModeChanged(_:)), for: .valueChanged)
+        control.accessibilityLabel = Row.outlineWidthMode.accessibilityLabel
+        return makeCell(row: .outlineWidthMode, control: control)
     }
 
     /// 「图片宽度怎么算」：两个选项平铺，一眼能看出是「二选一」
@@ -502,7 +571,7 @@ final class SettingsViewController: UIViewController {
         let control = UISegmentedControl(items: modes.map(\.displayName))
         control.selectedSegmentIndex = modes.firstIndex(of: settings.imageWidthMode) ?? 0
         control.addTarget(self, action: #selector(imageWidthModeChanged(_:)), for: .valueChanged)
-        control.accessibilityLabel = Row.imageWidthMode.title
+        control.accessibilityLabel = Row.imageWidthMode.accessibilityLabel
         return makeCell(row: .imageWidthMode, control: control)
     }
 
@@ -520,7 +589,7 @@ final class SettingsViewController: UIViewController {
         slider.tag = row.rawValue
         slider.isContinuous = true
         slider.addTarget(self, action: #selector(sliderChanged(_:)), for: .valueChanged)
-        slider.accessibilityLabel = row.title
+        slider.accessibilityLabel = row.accessibilityLabel
 
         let valueLabel = UILabel()
         valueLabel.text = row.formatted(value)
@@ -552,6 +621,8 @@ final class SettingsViewController: UIViewController {
     /// 这一项在当前模式下生效吗（不生效的滑块要灰掉）
     private func isEffective(_ row: Row) -> Bool {
         switch row {
+        case .outlineWidthRatio: return settings.outlineWidthMode == .percentage
+        case .outlineWidthPoints: return settings.outlineWidthMode == .fixedPoints
         case .outlineHeightRatio: return settings.outlineHeightMode == .percentage
         case .outlineMaximumHeight: return settings.outlineHeightMode == .maximumHeight
         case .imageWidthRatio: return settings.imageWidthMode == .percentage
@@ -584,12 +655,15 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
         switch row {
         case .remembersScrollPosition:
             return makeToggleCell(for: row)
+        case .outlineWidthMode:
+            return makeOutlineWidthModeCell()
         case .outlineHeightMode:
             return makeHeightModeCell()
         case .imageWidthMode:
             return makeImageWidthModeCell()
         case .bodyFontSize, .lineHeightMultiple, .paragraphSpacing, .paragraphIndentCharacters,
              .bodyContentWidth,
+             .outlineWidthRatio, .outlineWidthPoints,
              .outlineHeightRatio, .outlineMaximumHeight,
              .tableMinColumnWidth, .tableMaxColumnWidth,
              .imageWidthRatio, .imageWidthPoints, .imageMaxHeight:
@@ -618,7 +692,7 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
         toggle.tag = row.rawValue
         toggle.isOn = settings.remembersScrollPosition
         toggle.addTarget(self, action: #selector(switchChanged(_:)), for: .valueChanged)
-        toggle.accessibilityLabel = row.title
+        toggle.accessibilityLabel = row.accessibilityLabel
         cell.accessoryView = toggle
 
         return cell

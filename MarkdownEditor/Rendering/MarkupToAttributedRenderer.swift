@@ -634,6 +634,10 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         return out
     }
 
+    /// 分隔线（`---`）：整行换成一个 attachment，渲染出来是一条横线。
+    ///
+    /// ⚠️ 认领的源码长度必须用 `singleLineLength(of:)` 夹到「本行」，不能直接用 `range.length`。
+    /// 原因是 cmark 给分隔线节点的 range 会把**它后面的空行一起圈进来**（`---\n\n\n` 拿到的 range 是 `---\n\n`），而 attachment 在渲染串里只占 1 个字符位 —— 照着 range 全认领，多出来的那些换行就等于凭空消失了：用户在横线末尾按回车，源码里确实多了一个换行，屏幕上却一个字符都没变，看起来就是「按了没反应」。
     func visitThematicBreak(_ thematicBreak: ThematicBreak) -> RenderedFragment {
         guard let range = localRange(of: thematicBreak) else { return .empty }
 
@@ -645,7 +649,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         let style = theme.blockAttachmentParagraphStyle(indent: indent)
         return .attachment(separator,
                            sourceStart: range.location,
-                           sourceLength: range.length,
+                           sourceLength: singleLineLength(of: range),
                            attributes: [.paragraphStyle: style, .font: theme.bodyFont])
     }
 
@@ -999,6 +1003,33 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     /// 取块内某段源码
     private func sourceText(in range: NSRange) -> String {
         source.substring(utf16Offset: range.location, length: range.length)
+    }
+
+    /// `range` 里**第一行**占多少字符（含行尾那个换行）；一行都没换行就返回整个 range 的长度。
+    ///
+    /// ### 这是给谁用的
+    /// 给「整行只渲染成一个字符」的块级 attachment 用 —— 目前就是分隔线（`---` 变成一条横线附件）。
+    ///
+    /// ### 为什么不能照抄 cmark 给的 range 长度
+    /// 这种附件在渲染串里只占 1 个字符位，但它认领的源码长度决定了「后面哪些字符还能被看见」：
+    /// 认领进来的源码，补漏步骤（`reconciled`）就不会再给它们生成渲染字符。
+    /// 而 cmark 给分隔线的 range 会把后面的空行一起圈进来（块源码 `---\n\n\n` 拿到的 range 是 `---\n\n`），于是那两行空行被附件吞掉 —— 用户在这条横线末尾按回车，源码里多出来的换行没有对应的渲染字符，屏幕上一丝变化都没有（附件还是那 1 格，光标也不动），表现就是「按回车不换行」。
+    /// 夹到第一行之后，它后面的空行会重新变成真正的换行字符，多按一次回车就真的多出一行。
+    ///
+    /// ### 为什么连行尾那个换行一起算给附件
+    /// 那个换行是这一行自己的行尾，本来就不额外占视觉高度。把它留给附件，好处是 `---\n\n` 这种最常见的写法渲染结果**和以前一模一样**（横线 + 一个换行），不会因为这次修复把老文档里分隔线上下的间距改掉。
+    private func singleLineLength(of range: NSRange) -> Int {
+        let text = source as NSString
+        let end = min(NSMaxRange(range), text.length)
+        var index = range.location
+
+        while index < end {
+            if text.character(at: index) == 0x0A {
+                return index - range.location + 1
+            }
+            index += 1
+        }
+        return range.length
     }
 
     /// 列表项的标记范围：从列表项开头，到第一个子节点开头为止（`item.children` 不包含 `- ` 这几个字符）

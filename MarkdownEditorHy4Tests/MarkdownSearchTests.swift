@@ -354,59 +354,61 @@ final class MarkdownSearchBarFlowTests: XCTestCase {
 @MainActor
 final class MarkdownFindBarLayoutTests: XCTestCase {
 
-    /// 收起态高度必须是 0：它头顶上就是菜单栏，占一点高度就会把正文顶下去
-    func testCollapsedBarTakesNoHeight() {
+    /// 默认必须是藏着的：它浮在正文上面，不藏就等于一直盖着正文最上面一条
+    func testBarStartsHidden() {
         let bar = MarkdownFindBarView()
-        XCTAssertTrue(bar.isCollapsed, "默认应该是收起来的")
-        XCTAssertEqual(bar.systemLayoutSizeFitting(.zero).height, 0, accuracy: 0.5)
+        XCTAssertTrue(bar.isCollapsed, "默认应该是藏着的")
+        XCTAssertTrue(bar.isHidden, "「收起」就是「藏着」，两者不能各说一套")
     }
 
-    /// 展开之后高度由内容撑起来；加上替换行之后要更高
-    func testExpandedHeightGrowsWithReplaceRow() {
+    /// 高度由内容自己撑出来：只有查找那一行要装得下它；加上替换行之后要更高
+    func testBarHeightFitsItsContent() {
         let bar = MarkdownFindBarView()
-        bar.setCollapsed(false)
-        let collapsed = bar.systemLayoutSizeFitting(.zero).height
-        XCTAssertGreaterThan(collapsed, 40, "展开之后要能装下查找那一行")
+        let single = bar.systemLayoutSizeFitting(.zero).height
+        XCTAssertGreaterThan(single, 40, "查找那一行要装得下")
 
         bar.toggleReplaceRow()
-        let expanded = bar.systemLayoutSizeFitting(.zero).height
-        XCTAssertGreaterThan(expanded, collapsed + 20, "展开替换行之后要更高")
-
-        bar.setCollapsed(true)
-        XCTAssertEqual(bar.systemLayoutSizeFitting(.zero).height, 0, accuracy: 0.5, "收回去要连替换行一起收掉")
+        let withReplace = bar.systemLayoutSizeFitting(.zero).height
+        XCTAssertGreaterThan(withReplace, single + 20, "加上替换行之后要更高")
     }
 
-    /// 走真实那条收 / 放的链路（⌘F → 点关闭），横条的高度要真的跟着变。
+    /// 走真实那条显示 / 隐藏的链路（⌘F → 点关闭），并且**正文的上边从头到尾不能挪**。
     ///
     /// ### 这条用例存在的理由
-    /// 高度是由横条自己那条 `heightAnchor` 约束独裁的，改完 constant **不会**自动把祖先标脏，上层那句 `layoutIfNeeded()` 于事无补地空转 —— 那版的表现是：约束已经是 50 了， frame 还是 0，查找条永远弹不出来。所以这条守的是「改完高度，布局真的跟着动」。
-    func testBarHeightFollowsShowAndHideInContainer() {
+    /// 查找条是浮在正文上面的，出现 / 消失只切 `isHidden`，正文的上边直接钉在菜单栏下面。
+    /// 早先那版是「收起时把高度压成 0」，正文的顶部挂在查找条下边 —— 于是它一出现，
+    /// 整块正文就被推下去。这条守的就是「正文不再跟着查找条动」。
+    func testEditorTopStaysPutWhenBarAppears() {
         let controller = MarkdownDocumentViewController()
         controller.loadViewIfNeeded()
         guard let bar = firstView(in: controller.view, where: { $0 is MarkdownFindBarView }) as? MarkdownFindBarView else {
             return XCTFail("内容页里没找到查找条")
         }
+        guard let editor = firstView(in: controller.view, where: { $0 is MarkdownTextView }) as? MarkdownTextView else {
+            return XCTFail("内容页里没找到正文编辑器")
+        }
         controller.view.layoutIfNeeded()
-        XCTAssertEqual(bar.frame.height, 0, accuracy: 0.5, "默认收起，不能占高度")
+        XCTAssertTrue(bar.isHidden, "默认应该藏着")
+        let topBefore = editor.frame.minY
 
         controller.perform(NSSelectorFromString("showFindBar"))
         controller.view.layoutIfNeeded()
-        XCTAssertFalse(bar.isCollapsed)
-        XCTAssertGreaterThan(bar.frame.height, 30, "⌘F 之后要真的展开")
+        XCTAssertFalse(bar.isHidden, "⌘F 之后要显示出来")
+        XCTAssertEqual(editor.frame.minY, topBefore, accuracy: 0.5, "查找条出现时正文的上边不能挪")
 
         // 关闭走的是「按钮 → 协调者 → 请求容器收起」那条异步链路
         guard let closeButton = firstView(in: bar, where: { $0.accessibilityLabel == "关闭查找" }) as? UIButton else {
             return XCTFail("查找条里没找到关闭按钮")
         }
-        let collapsed = expectation(description: "收回去")
+        let hiddenAgain = expectation(description: "重新藏起来")
         closeButton.sendActions(for: .touchUpInside)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            XCTAssertTrue(bar.isCollapsed, "点关闭之后要回到收起态")
+            XCTAssertTrue(bar.isHidden, "点关闭之后要重新藏起来")
             controller.view.layoutIfNeeded()
-            XCTAssertEqual(bar.frame.height, 0, accuracy: 0.5, "收完之后高度要回到 0")
-            collapsed.fulfill()
+            XCTAssertEqual(editor.frame.minY, topBefore, accuracy: 0.5, "收起来之后正文的上边还是要待在原处")
+            hiddenAgain.fulfill()
         }
-        wait(for: [collapsed], timeout: 3)
+        wait(for: [hiddenAgain], timeout: 3)
     }
 }
 

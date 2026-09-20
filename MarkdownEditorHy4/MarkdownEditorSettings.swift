@@ -10,6 +10,26 @@
 
 import UIKit
 
+/// 大纲面板的**宽度**按什么算。
+///
+/// 和高度那对一样做成互斥的二选一：
+/// - 「按百分比」→ 宽度 = 编辑器（父视图）宽度 × 百分比，窗口拉宽面板也跟着宽；
+/// - 「固定宽度」→ 永远是那个点数，窗口怎么变都不影响（窗口太窄时会被自动收窄，不会顶爆布局）。
+enum OutlineWidthMode: String, Codable, CaseIterable {
+    /// 宽度最多占编辑器（父视图）宽度的百分之几
+    case percentage
+    /// 宽度是多少点（pt）
+    case fixedPoints
+
+    /// 设置页上显示的名字
+    var displayName: String {
+        switch self {
+        case .percentage: return "按百分比"
+        case .fixedPoints: return "固定宽度"
+        }
+    }
+}
+
 /// 大纲面板的高度按什么算。
 ///
 /// 两种模式是**互斥**的，用户在设置页上二选一：
@@ -84,6 +104,16 @@ final class MarkdownEditorSettings {
     private enum Default {
         /// 「记住目录大纲滚动位置」默认打开
         static let remembersScrollPosition = true
+
+        /// 大纲面板的默认外观 —— 「宽度默认多少点」这一项**从它读**，免得同一个数字在配置层和组件层各写一份（改了一边忘了另一边）。
+        /// 只构造一次，别在下面反复访问
+        static let outlineAppearance = MarkdownOutlineAppearance()
+        /// 宽度默认「固定宽度」= 300 点（就是 `MarkdownOutlineAppearance.width` 那个数）
+        static let outlineWidthMode: OutlineWidthMode = .fixedPoints
+        /// 切到「按百分比」时默认占编辑器宽度的 30%
+        static let outlineWidthRatio: Double = 0.3
+        static let outlineWidthPoints = Double(outlineAppearance.width)
+
         /// 大纲高度默认按「父视图高度的 70%」算上限
         static let outlineHeightMode: OutlineHeightMode = .percentage
         static let outlineHeightRatio: Double = 0.7
@@ -125,6 +155,14 @@ final class MarkdownEditorSettings {
     /// 只在界面上限制范围的话，一个 `ratio: 999` 进来就会把面板高度算成天文数字。
     /// 夹在「配置的入口」这一层，别的使用方就永远能相信拿到的值是可用的。
     enum Limits {
+        /// 大纲宽度百分比的合法范围。15% 再窄标题就整段被截，50% 已经是「编辑区让出一半」
+        static let outlineWidthRatio: ClosedRange<Double> = 0.15...0.5
+        /// 大纲固定宽度的合法范围（点）。
+        ///
+        /// ⚠️ 上限 **520** 不能和别人撞车（表格最大列宽 600、图片最大高度 1600 都已占用）—— 设置页的测试是按「量程上界」在视图树里找滑块的，上界重复就找错行。
+        ///
+        /// 下限 160 比 `MarkdownOutlineAppearance.minimumWidth`（148）留了一点余量，免得用户在设置页上挑了个比「自动保底」还小的值、看到数字对不上
+        static let outlineWidthPoints: ClosedRange<Double> = 160...520
         static let outlineHeightRatio: ClosedRange<Double> = 0.3...1.0
         static let outlineMaximumHeight: ClosedRange<Double> = 120...900
         /// 表格「最小列宽」的合法范围
@@ -177,6 +215,10 @@ final class MarkdownEditorSettings {
     /// 不会因为「缺字段」整份解析失败、把所有设置一起丢回默认。
     private struct Payload: Codable {
         var remembersScrollPosition: Bool?
+        /// 大纲宽度那一组。模式同样存字符串，理由见下面 `outlineHeightMode` 的注释
+        var outlineWidthMode: String?
+        var outlineWidthRatio: Double?
+        var outlineWidthPoints: Double?
         /// ⚠️ 这里存**字符串**而不是枚举本身：将来枚举改了名、或者文件被手改成一个
         /// 现在的版本不认识的值时，用枚举解码会让**整份** Payload 解不出来、
         /// 所有设置一起复位。存字符串的话只有这一项退回默认，别的照旧
@@ -209,6 +251,21 @@ final class MarkdownEditorSettings {
     ///
     /// 关掉时以上三件事都不做 —— 大纲面板只在你手动滚它的时候才动，列表刷新后回到顶部。
     private(set) var remembersScrollPosition: Bool
+
+    /// 大纲面板的宽度按什么算，默认「固定宽度」。
+    /// 两种模式的详细解释见 `OutlineWidthMode`
+    private(set) var outlineWidthMode: OutlineWidthMode
+
+    /// 「按百分比」模式下，面板宽度占编辑器（父视图）宽度的百分之几。默认 `0.3`（30%）。
+    ///
+    /// 这个模式下 `outlineWidthPoints` 完全不参与计算。
+    /// 实际宽度还会被父视图宽度压一道（不能盖住整个编辑区），见 `MarkdownOutlineView.effectiveWidth`
+    private(set) var outlineWidthRatio: Double
+
+    /// 「固定宽度」模式下，面板的宽度（点）。默认 `300`。
+    ///
+    /// ⚠️ 它是**理想宽度**不是死值：窗口窄到放不下时会按比例收窄，免得一个大数字把左边的编辑区全盖住
+    private(set) var outlineWidthPoints: Double
 
     /// 大纲面板的高度按什么算，默认「按百分比」。
     /// 两种模式的详细解释见 `OutlineHeightMode`
@@ -305,6 +362,32 @@ final class MarkdownEditorSettings {
     func setRemembersScrollPosition(_ value: Bool) {
         guard value != remembersScrollPosition else { return }
         remembersScrollPosition = value
+        save()
+        postChange()
+    }
+
+    /// 改「宽度按什么算」
+    func setOutlineWidthMode(_ value: OutlineWidthMode) {
+        guard value != outlineWidthMode else { return }
+        outlineWidthMode = value
+        save()
+        postChange()
+    }
+
+    /// 改「宽度百分比」。超出 `Limits.outlineWidthRatio` 的值会被夹到边界上
+    func setOutlineWidthRatio(_ value: Double) {
+        let clamped = clamp(value, to: Limits.outlineWidthRatio)
+        guard clamped != outlineWidthRatio else { return }
+        outlineWidthRatio = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「固定宽度」。超出 `Limits.outlineWidthPoints` 的值会被夹到边界上
+    func setOutlineWidthPoints(_ value: Double) {
+        let clamped = clamp(value, to: Limits.outlineWidthPoints)
+        guard clamped != outlineWidthPoints else { return }
+        outlineWidthPoints = clamped
         save()
         postChange()
     }
@@ -443,6 +526,9 @@ final class MarkdownEditorSettings {
         self.fileURL = fileURL
         // 先给一套默认值，再用盘上的内容覆盖 —— 这样「读文件失败」也能得到一份可用的配置
         self.remembersScrollPosition = Default.remembersScrollPosition
+        self.outlineWidthMode = Default.outlineWidthMode
+        self.outlineWidthRatio = Default.outlineWidthRatio
+        self.outlineWidthPoints = Default.outlineWidthPoints
         self.outlineHeightMode = Default.outlineHeightMode
         self.outlineHeightRatio = Default.outlineHeightRatio
         self.outlineMaximumHeight = Default.outlineMaximumHeight
@@ -472,6 +558,16 @@ final class MarkdownEditorSettings {
         guard let data = try? Data(contentsOf: fileURL) else { return }
         guard let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return }
         if let value = payload.remembersScrollPosition { remembersScrollPosition = value }
+        // 宽度那一组：模式和高度一样存字符串，认不出来就只让这一项退回默认
+        if let raw = payload.outlineWidthMode, let value = OutlineWidthMode(rawValue: raw) {
+            outlineWidthMode = value
+        }
+        if let value = payload.outlineWidthRatio {
+            outlineWidthRatio = clamp(value, to: Limits.outlineWidthRatio)
+        }
+        if let value = payload.outlineWidthPoints {
+            outlineWidthPoints = clamp(value, to: Limits.outlineWidthPoints)
+        }
         // 认不出来的模式名就保持默认，不能让它把别的设置一起带走
         if let raw = payload.outlineHeightMode, let value = OutlineHeightMode(rawValue: raw) {
             outlineHeightMode = value
@@ -521,6 +617,9 @@ final class MarkdownEditorSettings {
 
     private func save() {
         let payload = Payload(remembersScrollPosition: remembersScrollPosition,
+                              outlineWidthMode: outlineWidthMode.rawValue,
+                              outlineWidthRatio: outlineWidthRatio,
+                              outlineWidthPoints: outlineWidthPoints,
                               outlineHeightMode: outlineHeightMode.rawValue,
                               outlineHeightRatio: outlineHeightRatio,
                               outlineMaximumHeight: outlineMaximumHeight,
@@ -561,6 +660,22 @@ final class MarkdownEditorSettings {
 // MARK: - 套到大纲面板的外观参数上
 
 extension MarkdownEditorSettings {
+
+    /// 把当前的宽度配置写进大纲面板的外观参数。
+    ///
+    /// ### 两个值的写法（和下面高度那对一模一样）
+    /// `width` 每次都照配置写，不管当前模式用不用它 —— 这样切回「固定宽度」时它还是用户上次调好的值。真正决定用哪个的是 `widthRatio`：百分比模式给它比例，「固定宽度」模式给它 `nil`（`nil` = 这一项不参与计算）。
+    ///
+    /// 换算放在配置侧而不是面板里，理由见下面 `applyOutlineHeight` 的注释
+    func applyOutlineWidth(to appearance: inout MarkdownOutlineAppearance) {
+        appearance.width = CGFloat(outlineWidthPoints)
+        switch outlineWidthMode {
+        case .percentage:
+            appearance.widthRatio = CGFloat(outlineWidthRatio)
+        case .fixedPoints:
+            appearance.widthRatio = nil
+        }
+    }
 
     /// 把当前的高度配置写进大纲面板的外观参数。
     ///
