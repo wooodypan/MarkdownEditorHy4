@@ -247,13 +247,18 @@ final class MarkdownFindBarView: UIView {
         return showsReplaceRow
     }
 
-    /// 模拟「往查找框里敲了一段字」：内容写进输入框，并按一次「内容变了」。
+    /// 往查找框里填一段字，并按一次「内容变了」，让协调者照常跑一次查找。
     ///
-    /// 存在的意义是让外面（尤其是测试）能走和真实用户完全一致的那条链：
-    /// 输入框 → delegate → 协调者 → 防抖 → 编辑器。
-    func typeQuery(_ text: String) {
+    /// 打开查找面板时会用它**预填**正文里选中的文字 —— 用户选了字再按 ⌘F，多半就是想找它。
+    /// 走的是「改输入框内容 + 发一次编辑事件」这条路，和真人敲字完全一样，所以命中计数、高亮、防抖那套都不用另外再触发一遍。
+    func fillQuery(_ text: String) {
         queryField.text = text
         queryField.sendActions(for: .editingChanged)
+    }
+
+    /// 模拟「往查找框里敲了一段字」（测试用入口，和 `fillQuery` 是同一条链）
+    func typeQuery(_ text: String) {
+        fillQuery(text)
     }
 
     // MARK: 按钮动作

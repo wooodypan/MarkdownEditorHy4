@@ -175,7 +175,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// 显示查找条（⌘F / 菜单里的「查找」都走到这里）
     @objc private func showFindBar() {
         guard findBar.isCollapsed else {
-            // 已经开着：再按一次 ⌘F 就只是把焦点交还给查找框（常见的查找框行为）
+            // 已经开着：再按一次 ⌘F 就只是把焦点交还给查找框（常见的查找框行为）。
+            // 但选中文字照样要填进去 —— 选了新词再按一次 ⌘F，多半就是想换个词找
+            fillQueryFromSelection()
             findBar.beginSearch()
             return
         }
@@ -183,7 +185,14 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         findBar.setCollapsed(false)
         findBar.alpha = 0
         UIView.animate(withDuration: 0.15) { self.findBar.alpha = 1 }
+        fillQueryFromSelection()
         findBar.beginSearch()
+    }
+
+    /// 把正文里选中的文字预填进查找框（没选中就什么都不做，保留上一次的查找词）
+    private func fillQueryFromSelection() {
+        guard let selected = editor.selectedSourceText else { return }
+        findBar.fillQuery(selected)
     }
 
     /// 收起查找条：先撤焦点（免得键盘一直挂在它上面），再直接藏起来。

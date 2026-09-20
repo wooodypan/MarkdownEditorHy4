@@ -575,10 +575,13 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 3600)
         controller.view.layoutIfNeeded()
 
-        // 页面上有两个分段控件：大纲「高度怎么算」在前、图片「宽度怎么算」在后
+        // 页面上有三个分段控件：大纲「宽度怎么算」「高度怎么算」，加上图片「宽度怎么算」。⚠️ 要拿具体哪一个必须按 `accessibilityLabel` 找 —— 视图树顺序和分组顺序**不一致**，用 `last` / `first` 是在碰运气。大纲那两个的标识特意加了「大纲」前缀，就是为了和图片这一条重名的可见标题区分开
         let controls = allSegmentedControls(in: controller.view)
-        XCTAssertEqual(controls.count, 2, "该有两个分段控件，实际 \(controls.count) 个")
-        XCTAssertEqual(controls.last?.numberOfSegments, 2, "两个选项：按百分比 / 固定宽度")
+        XCTAssertEqual(controls.count, 3, "该有三个分段控件，实际 \(controls.count) 个")
+
+        let control = try XCTUnwrap(segmentedControl(in: controller.view, labeled: "宽度怎么算"),
+                                    "图片这一组的「宽度怎么算」该存在")
+        XCTAssertEqual(control.numberOfSegments, 2, "两个选项：按百分比 / 固定宽度")
 
         let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 0.9),
                                         "找不到「宽度百分比」的滑块")

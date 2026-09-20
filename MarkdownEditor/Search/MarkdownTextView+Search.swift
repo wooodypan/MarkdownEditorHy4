@@ -384,3 +384,26 @@ extension MarkdownTextView: MarkdownSearchDataSource {
                                         current: theme.searchCurrentMatchBackground)
     }
 }
+
+// MARK: - 打开查找框时的预填词
+
+extension MarkdownTextView {
+
+    /// 正文里当前选中的那段文字，还原成 **markdown 源码**（按 ⌘F 时拿它预填查找框）。
+    ///
+    /// ### 为什么要查映射表，而不是直接读屏幕上的富文本
+    /// 富文本里混着「屏幕上显示、源码里并不是这样」的字符（图片占位符、列表圆点、纯装饰），
+    /// 直接读会拿到错的东西。所以一律走 `documentStore` 的映射表 —— 和复制功能（`handleCopy`）是同一条路。
+    ///
+    /// 选中跨了好几行时只取**第一行**：查找框是一行输入框，塞一段带换行的文字进去没有意义。
+    /// 没选中、或者选中的全是装饰字符时返回 `nil`。
+    var selectedSourceText: String? {
+        let range = selectedRange
+        guard range.length > 0 else { return nil }
+        let source = documentStore.sourceText(forRenderedRange: range)
+        let firstLine = source.components(separatedBy: .newlines).first ?? ""
+        // 选区两头常带着空格（双击选词、拖选拖过头），填进查找框之前顺手去掉
+        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
