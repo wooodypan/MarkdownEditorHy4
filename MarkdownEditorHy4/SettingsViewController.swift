@@ -2,7 +2,7 @@
 //  SettingsViewController.swift
 //  MarkdownEditorHy4
 //
-//  简易设置页：正文排版 + 阅读相关 + 大纲面板尺寸 + 表格列宽 + 图片尺寸，后面还会往里加
+//  简易设置页：正文排版 + 阅读位置 + 大纲面板 + 表格列宽 + 图片尺寸，后面还会往里加
 //
 //  这一页改了之后要「当场生效」的那几项（字号、行高、段间距、首行缩进、表格列宽），
 //  是由内容页监听 `MarkdownEditorSettings.didChangeNotification` 后重新渲染实现的，
@@ -34,7 +34,7 @@ final class SettingsViewController: UIViewController {
         case typography
         /// 阅读与大纲（开关类）
         case reading
-        /// 大纲面板多宽 / 多高
+        /// 大纲面板多宽 / 多高 / 背景多透
         case outlineSize
         /// 表格画出来时的列宽限制
         case tableLayout
@@ -45,7 +45,7 @@ final class SettingsViewController: UIViewController {
             switch self {
             case .typography: return "正文排版"
             case .reading: return "阅读位置"
-            case .outlineSize: return "大纲面板尺寸"
+            case .outlineSize: return "大纲面板"
             case .tableLayout: return "表格列宽"
             case .imageSize: return "图片尺寸"
             }
@@ -61,10 +61,11 @@ final class SettingsViewController: UIViewController {
             case .reading:
                 return [.remembersScrollPosition]
             case .outlineSize:
-                // 顺序就是界面上从上到下的顺序：宽度（怎么算 + 两个数值）、再高度（同样三行）。
+                // 顺序就是界面上从上到下的顺序：宽度（怎么算 + 两个数值）、再高度（同样三行）、最后是背景多透。
                 // 两种模式的说明都要跟模式联动，所以每一组里「怎么算」放最上面
                 return [.outlineWidthMode, .outlineWidthRatio, .outlineWidthPoints,
-                        .outlineHeightMode, .outlineHeightRatio, .outlineMaximumHeight]
+                        .outlineHeightMode, .outlineHeightRatio, .outlineMaximumHeight,
+                        .outlineBackgroundOpacity]
             case .tableLayout:
                 return [.tableMinColumnWidth, .tableMaxColumnWidth]
             case .imageSize:
@@ -105,6 +106,8 @@ final class SettingsViewController: UIViewController {
         case outlineHeightRatio
         /// 固定高度上限（点）
         case outlineMaximumHeight
+        /// 面板背景的不透明度（1 = 完全不透明）
+        case outlineBackgroundOpacity
         /// 表格最窄的一列（点）
         case tableMinColumnWidth
         /// 表格最宽的一列（点）
@@ -145,6 +148,8 @@ final class SettingsViewController: UIViewController {
                 return "高度百分比"
             case .outlineMaximumHeight:
                 return "最大高度"
+            case .outlineBackgroundOpacity:
+                return "背景不透明度"
             case .tableMinColumnWidth:
                 return "最小列宽"
             case .tableMaxColumnWidth:
@@ -223,6 +228,11 @@ final class SettingsViewController: UIViewController {
                 return usesRatio
                     ? "当前用的是「按百分比」，这一项暂不生效。"
                     : "面板高度最多是多少点。窗口太小的话还会被压一道，不会盖满整屏。"
+            case .outlineBackgroundOpacity:
+                return "面板卡片有多不透。100% 是**完全不透明**，背后的正文一点都看不到（卡片带毛玻璃，看着厚实）；"
+                    + "只要往下拖就变成一层半透明的底色，背后正文**清清楚楚**透出来 —— "
+                    + "这时候毛玻璃会关掉，不然透出来的只是一团糊影。最低 20%。"
+                    + "这一项只管背景，标题文字本身不会跟着变淡。"
             case .tableMinColumnWidth:
                 return "表格里再短的列也不窄于这个值，「姓名」这类两字列才不会挤成一团。"
                     + "如果调得比「最大列宽」还大，会按最大列宽算。"
@@ -260,6 +270,8 @@ final class SettingsViewController: UIViewController {
             case .outlineWidthPoints: return MarkdownEditorSettings.Limits.outlineWidthPoints
             case .outlineHeightRatio: return MarkdownEditorSettings.Limits.outlineHeightRatio
             case .outlineMaximumHeight: return MarkdownEditorSettings.Limits.outlineMaximumHeight
+            case .outlineBackgroundOpacity:
+                return MarkdownEditorSettings.Limits.outlineBackgroundOpacity
             case .tableMinColumnWidth: return MarkdownEditorSettings.Limits.tableMinColumnWidth
             case .tableMaxColumnWidth: return MarkdownEditorSettings.Limits.tableMaxColumnWidth
             case .imageWidthRatio: return MarkdownEditorSettings.Limits.imageWidthRatio
@@ -282,6 +294,8 @@ final class SettingsViewController: UIViewController {
             case .outlineWidthPoints: return 10
             case .outlineHeightRatio: return 0.05
             case .outlineMaximumHeight: return 20
+            // 一档 5%：这一项量程是 20%~100%，5% 一档拖起来手感和别的比例项一致
+            case .outlineBackgroundOpacity: return 0.05
             case .tableMinColumnWidth, .tableMaxColumnWidth: return 8
             case .imageWidthRatio: return 0.05
             case .imageWidthPoints, .imageMaxHeight: return 20
@@ -302,6 +316,7 @@ final class SettingsViewController: UIViewController {
             case .outlineWidthPoints: return settings.outlineWidthPoints
             case .outlineHeightRatio: return settings.outlineHeightRatio
             case .outlineMaximumHeight: return settings.outlineMaximumHeight
+            case .outlineBackgroundOpacity: return settings.outlineBackgroundOpacity
             case .tableMinColumnWidth: return settings.tableMinColumnWidth
             case .tableMaxColumnWidth: return settings.tableMaxColumnWidth
             case .imageWidthRatio: return settings.imageWidthRatio
@@ -333,7 +348,7 @@ final class SettingsViewController: UIViewController {
                 return value >= sliderRange.upperBound
                     ? "不限"
                     : "\(Int(value.rounded())) pt"
-            case .outlineWidthRatio, .outlineHeightRatio:
+            case .outlineWidthRatio, .outlineHeightRatio, .outlineBackgroundOpacity:
                 return "\(Int((value * 100).rounded()))%"
             case .outlineWidthPoints, .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
                 return "\(Int(value.rounded())) pt"
@@ -473,6 +488,8 @@ final class SettingsViewController: UIViewController {
             settings.setOutlineHeightRatio(stepped)
         case .outlineMaximumHeight:
             settings.setOutlineMaximumHeight(stepped)
+        case .outlineBackgroundOpacity:
+            settings.setOutlineBackgroundOpacity(stepped)
         case .tableMinColumnWidth:
             settings.setTableMinColumnWidth(stepped)
         case .tableMaxColumnWidth:
@@ -663,7 +680,7 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
         case .bodyFontSize, .lineHeightMultiple, .paragraphSpacing, .paragraphIndentCharacters,
              .bodyContentWidth,
              .outlineWidthRatio, .outlineWidthPoints,
-             .outlineHeightRatio, .outlineMaximumHeight,
+             .outlineHeightRatio, .outlineMaximumHeight, .outlineBackgroundOpacity,
              .tableMinColumnWidth, .tableMaxColumnWidth,
              .imageWidthRatio, .imageWidthPoints, .imageMaxHeight:
             return makeSliderCell(for: row)

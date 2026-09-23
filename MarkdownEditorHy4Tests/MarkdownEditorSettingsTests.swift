@@ -293,7 +293,56 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertEqual(appearance.maximumHeight, 420, accuracy: 0.0001)
     }
 
-    // MARK: - 设置页上的高度控件
+    // MARK: - 大纲面板背景：配置本身
+
+    /// 需求：默认 `1`，也就是**完全不透明**（卡片把背后的正文完全盖住）
+    func testOutlineBackgroundOpacityDefaults() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        XCTAssertEqual(settings.outlineBackgroundOpacity, 1, accuracy: 0.0001, "默认该是完全不透明")
+        XCTAssertEqual(MarkdownOutlineAppearance().backgroundOpacity, 1, accuracy: 0.0001,
+                       "组件层那个默认值也该是 1 —— 配置层的默认值是从它读的")
+    }
+
+    /// 落盘：重启之后还是用户调过的那一档
+    func testOutlineBackgroundOpacityIsPersisted() {
+        let url = makeTempFileURL()
+        MarkdownEditorSettings(fileURL: url).setOutlineBackgroundOpacity(0.4)
+
+        let reloaded = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(reloaded.outlineBackgroundOpacity, 0.4, accuracy: 0.0001)
+    }
+
+    /// 界面之外直接调 setter 传越界值 → 夹回 0.2 ~ 1
+    func testOutlineBackgroundOpacityIsClampedWhenSetting() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setOutlineBackgroundOpacity(0.05)
+        XCTAssertEqual(settings.outlineBackgroundOpacity, 0.2, accuracy: 0.0001,
+                       "比下限还小的值该夹到 0.2（再透就快看不见卡片了）")
+
+        settings.setOutlineBackgroundOpacity(3)
+        XCTAssertEqual(settings.outlineBackgroundOpacity, 1, accuracy: 0.0001, "超过 1 该夹到 1")
+    }
+
+    /// 配置文件被手改过 → 读的时候也得夹一道
+    func testOutlineBackgroundOpacityIsClampedWhenLoading() throws {
+        let url = makeTempFileURL()
+        try Data(#"{"outlineBackgroundOpacity": 0.01}"#.utf8).write(to: url)
+        XCTAssertEqual(MarkdownEditorSettings(fileURL: url).outlineBackgroundOpacity, 0.2,
+                       accuracy: 0.0001)
+    }
+
+    /// 配置 → 面板参数：一个数直接搬过去（这一项没有模式之分）
+    func testApplyOutlineBackgroundWritesOpacity() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setOutlineBackgroundOpacity(0.25)
+
+        var appearance = MarkdownOutlineAppearance()
+        settings.applyOutlineBackground(to: &appearance)
+
+        XCTAssertEqual(appearance.backgroundOpacity, 0.25, accuracy: 0.0001)
+    }
+
+    // MARK: - 设置页上的大纲控件
 
     /// 设置页里该有「高度怎么算」的分段控件和两个滑块；
     /// 当前模式下不生效的那一项要灰掉（光靠文字说明不够直观）
@@ -310,9 +359,9 @@ final class MarkdownEditorSettingsTests: XCTestCase {
                                     "设置页该有「高度怎么算」的分段控件")
         XCTAssertEqual(control.numberOfSegments, 2, "两个选项：按百分比 / 按最大高度")
 
-        let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1),
+        let ratioSlider = try XCTUnwrap(slider(in: controller.view, range: 0.3...1.0),
                                         "找不到「高度百分比」的滑块")
-        let heightSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 900),
+        let heightSlider = try XCTUnwrap(slider(in: controller.view, range: 120...900),
                                          "找不到「最大高度」的滑块")
 
         XCTAssertTrue(ratioSlider.isEnabled, "当前用百分比，它该是可调的")
@@ -337,8 +386,8 @@ final class MarkdownEditorSettingsTests: XCTestCase {
 
         // 界面刷新过了，重新取一遍滑块
         controller.view.layoutIfNeeded()
-        let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1))
-        let heightSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 900))
+        let ratioSlider = try XCTUnwrap(slider(in: controller.view, range: 0.3...1.0))
+        let heightSlider = try XCTUnwrap(slider(in: controller.view, range: 120...900))
         XCTAssertFalse(ratioSlider.isEnabled, "改用最大高度后，百分比那一项该灰掉")
         XCTAssertTrue(heightSlider.isEnabled)
     }
@@ -351,13 +400,35 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
-        let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1))
+        let ratioSlider = try XCTUnwrap(slider(in: controller.view, range: 0.3...1.0))
         ratioSlider.value = 0.63          // 故意给一个不在步进上的值
         ratioSlider.sendActions(for: .valueChanged)
 
         XCTAssertEqual(settings.outlineHeightRatio, 0.65, accuracy: 0.0001,
                        "0.63 该被吸到 0.65（步进 0.05）")
         XCTAssertEqual(ratioSlider.value, 0.65, accuracy: 0.0001, "滑块本身也该被拉正")
+    }
+
+    /// 「背景不透明度」这一行：有个滑块、默认停在不透明那一端、拖动写回配置并按步进吸附
+    func testSettingsPageHasBackgroundOpacitySliderAndWritesBack() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let controller = SettingsViewController(settings: settings)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
+        controller.view.layoutIfNeeded()
+
+        // ⚠️ 这一行的量程（0.2~1）**上界和「高度百分比」撞了**，所以必须连下限一起当身份证（只看上界会摸到别人那一条，表现出来是「滑块拖了、配置却没变」）—— 见 `slider(in:range:)`
+        let opacitySlider = try XCTUnwrap(slider(in: controller.view, range: 0.2...1.0),
+                                          "设置页该有「背景不透明度」的滑块")
+        XCTAssertEqual(opacitySlider.accessibilityLabel, "背景不透明度", "这一行的标识该是它自己的标题")
+        XCTAssertEqual(opacitySlider.value, 1, accuracy: 0.0001, "默认该停在最右端（完全不透明）")
+        XCTAssertTrue(opacitySlider.isEnabled, "这一项永远生效，不该被灰掉")
+
+        // 拖到一个不在步进上的值，该被吸到 0.05 的倍数上
+        opacitySlider.value = 0.33
+        opacitySlider.sendActions(for: .valueChanged)
+        XCTAssertEqual(settings.outlineBackgroundOpacity, 0.35, accuracy: 0.0001,
+                       "0.33 该被吸到 0.35（步进 0.05）")
     }
 
     // MARK: - 表格列宽：配置本身
@@ -429,10 +500,10 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
-        // 两个滑块用量程上界当身份证找（200 / 600，和大纲那两个 1 / 900 不冲突）
-        let minSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 200),
+        // 两个滑块用量程当身份证找（32~200 / 80~600，和别的分组都不冲突）
+        let minSlider = try XCTUnwrap(slider(in: controller.view, range: 32...200),
                                       "找不到「最小列宽」的滑块")
-        let maxSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 600),
+        let maxSlider = try XCTUnwrap(slider(in: controller.view, range: 80...600),
                                       "找不到「最大列宽」的滑块")
         XCTAssertTrue(minSlider.isEnabled)
         XCTAssertTrue(maxSlider.isEnabled, "表格列宽两项永远生效，不该被灰掉")
@@ -583,11 +654,11 @@ final class MarkdownEditorSettingsTests: XCTestCase {
                                     "图片这一组的「宽度怎么算」该存在")
         XCTAssertEqual(control.numberOfSegments, 2, "两个选项：按百分比 / 固定宽度")
 
-        let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 0.9),
+        let ratioSlider = try XCTUnwrap(slider(in: controller.view, range: 0.2...0.9),
                                         "找不到「宽度百分比」的滑块")
-        let pointsSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 800),
+        let pointsSlider = try XCTUnwrap(slider(in: controller.view, range: 80...800),
                                          "找不到「固定宽度」的滑块")
-        let heightSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1600),
+        let heightSlider = try XCTUnwrap(slider(in: controller.view, range: 120...1600),
                                          "找不到「图片最大高度」的滑块")
 
         XCTAssertTrue(ratioSlider.isEnabled, "当前用百分比，它该是可调的")
@@ -612,8 +683,8 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertEqual(settings.imageWidthMode, .fixedPoints, "切了模式要写回配置")
 
         controller.view.layoutIfNeeded()
-        let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 0.9))
-        let pointsSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 800))
+        let ratioSlider = try XCTUnwrap(slider(in: controller.view, range: 0.2...0.9))
+        let pointsSlider = try XCTUnwrap(slider(in: controller.view, range: 80...800))
         XCTAssertFalse(ratioSlider.isEnabled, "改用固定宽度后，百分比那一项该灰掉")
         XCTAssertTrue(pointsSlider.isEnabled)
 
@@ -631,12 +702,12 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 3600)
         controller.view.layoutIfNeeded()
 
-        let ratioSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 0.9))
+        let ratioSlider = try XCTUnwrap(slider(in: controller.view, range: 0.2...0.9))
         ratioSlider.value = 0.63
         ratioSlider.sendActions(for: .valueChanged)
         XCTAssertEqual(settings.imageWidthRatio, 0.65, accuracy: 0.0001, "0.63 该被吸到 0.65（步进 0.05）")
 
-        let heightSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1600))
+        let heightSlider = try XCTUnwrap(slider(in: controller.view, range: 120...1600))
         heightSlider.value = 513
         heightSlider.sendActions(for: .valueChanged)
         XCTAssertEqual(settings.imageMaxHeight, 520, accuracy: 0.0001, "513 该被吸到 520（步进 20）")
@@ -674,15 +745,20 @@ final class MarkdownEditorSettingsTests: XCTestCase {
     /// 按「滑块的量程」找一个滑块出来。
     ///
     /// ### 为什么不用顺序或者 tag
-    /// 顺序取决于视图树怎么排，挪一行就挂；tag 是行枚举的 rawValue，
-    /// 往枚举里插一个 case 就全错位。两行的量程是定死的（百分比 0.3~1.0、
-    /// 最大高度 120~900），拿上界当身份证最稳
-    private func slider(in view: UIView, maximumValue: Float) -> UISlider? {
+    /// 顺序取决于视图树怎么排，挪一行就挂；tag 是行枚举的 rawValue，往枚举里插一个 case 就全错位。
+    /// 两行的量程是定死的，拿它当身份证最稳。
+    ///
+    /// ### ⚠️ 上下界要**一起**看，只看上界已经不够了
+    /// 「高度百分比」（0.3~1.0）和「背景不透明度」（0.2~1.0）的上界都是 1：只按上界找会摸到别人那一条，表现出来是「滑块明明拖了、配置却没变」这种看不懂的失败；所以两行的下限也必须唯一。
+    private func slider(in view: UIView, range: ClosedRange<Double>) -> UISlider? {
+        let lower = Float(range.lowerBound)
+        let upper = Float(range.upperBound)
         for subview in view.subviews {
-            if let slider = subview as? UISlider, slider.maximumValue == maximumValue {
+            if let slider = subview as? UISlider,
+               slider.minimumValue == lower, slider.maximumValue == upper {
                 return slider
             }
-            if let found = slider(in: subview, maximumValue: maximumValue) { return found }
+            if let found = slider(in: subview, range: range) { return found }
         }
         return nil
     }

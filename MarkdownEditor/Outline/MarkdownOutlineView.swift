@@ -54,6 +54,16 @@ struct MarkdownOutlineAppearance {
     var edgeMargin: CGFloat = 12
     /// 卡片圆角
     var cornerRadius: CGFloat = 12
+    /// 面板背景的不透明度：`1`（默认）= 完全不透明，卡片把背后的正文完全盖住；越小越透。
+    ///
+    /// ### 这个值同时决定「卡片戴不戴毛玻璃」
+    /// - `1` → 底色做实 + 戴上毛玻璃 = 一张盖得严实的厚卡片；
+    /// - 小于 `1` → **把毛玻璃摘掉**，只剩一层半透明底色 = 背后正文清清楚楚透出来。
+    ///
+    /// 为什么要动毛玻璃：它的作用就是把背后的正文**糊掉**。用户一旦往下拖滑块，说明他就是想看见背后 —— 这时候留着毛玻璃，透出来的只是一团糊影，看着像设置没生效。
+    ///
+    /// 值由上层按用户的设置注入 —— 这个文件不认识 App 层的配置，只认别人塞给它的值；组件这一层不做下限（用户在设置页能选到的最低是 0.2，那个范围属于配置层）
+    var backgroundOpacity: CGFloat = 1
     /// 空文档时占位文字那块的高度
     var emptyStateHeight: CGFloat = 42
 }
@@ -163,8 +173,16 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     // MARK: 子视图
 
-    /// 毛玻璃卡片本体。收起 / 展开都是改它的宽高约束，不换视图
-    private let panel = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
+    /// 卡片本体。收起 / 展开都是改它的宽高约束，不换视图。
+    ///
+    /// 它是 `UIVisualEffectView`，但毛玻璃**可以随时摘**（`effect = nil` 之后它就是个普通空容器）——「背景不透明度」往下拖的时候摘掉毛玻璃，靠的就是这一点，见 `applyBackgroundOpacity`
+    private let panel = UIVisualEffectView(effect: MarkdownOutlineView.panelBlurEffect)
+    /// 铺在卡片最底下的那层底色，不透明度就是「背景不透明度」。
+    ///
+    /// ### 为什么要单独一层，而不是直接改 `panel.backgroundColor`
+    /// 毛玻璃那层是系统画的，透明度改不了；而且 `UIVisualEffectView` 的官方说明里只认「往 `contentView` 里放视图」这一种合法用法（半透明的 `alpha` 放在它自己或它的父视图上，效果会不正常或干脆不显示）。
+    /// 放的这一层是 `contentView` 的**第一个子视图**，所以它在标题栏、列表、按钮的下面，只当背景用
+    private let backgroundFill = UIView()
     private let headerBar = UIView()
     private let headerIcon = UIImageView()
     private let headerLabel = UILabel()
@@ -192,6 +210,16 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// ⚠️ 图形在它那张 256×256 的画布上只占中间 224×224，所以**实际看到的大小**是
     /// 这里的 87.5% 左右 —— 觉得图标偏小就调大这个数，别去改绘制代码里的坐标
     private static let collapseAllIconSize = CGSize(width: 18, height: 18)
+
+    /// 卡片底色的基色（不透明度另配）。
+    ///
+    /// ⚠️ 用 `.secondarySystemBackground` 而不是 `.systemBackground`：编辑区自己就是 `.systemBackground`，卡片跟它同色的话那条边界就看不见了 —— 卡片「浮在正文上面」的感觉全靠这点色差
+    private static let panelBaseColor = UIColor.secondarySystemBackground
+
+    /// 卡片用的毛玻璃效果。
+    ///
+    /// 抽成常量是为了能在 `applyBackgroundOpacity` 里把它**摘下来、再戴回去** —— `UIVisualEffectView` 的 `effect` 设成 `nil` 之后就是个普通透明容器，不用换视图类型
+    private static let panelBlurEffect = UIBlurEffect(style: .systemUltraThinMaterial)
 
     // MARK: 初始化
 
@@ -263,8 +291,7 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         requestedHighlightID = id
         refreshHighlightAppearance()
 
-        // 把高亮那一行滚进可视区。这一步**无条件做**：大纲不跟着光标走的话，
-        // 光标跑到文档后半段时目录还停在开头，等于没有大纲。
+        // 把高亮那一行滚进可视区。这一步**无条件做**：大纲不跟着光标走的话，光标跑到文档后半段时目录还停在开头，等于没有大纲。
         // 行本来就看得见时 `scrollRowIntoView` 会提前返回，不会来回抖
         guard let target = effectiveHighlightID else { return }
         scrollRowIntoView(for: target)
@@ -364,6 +391,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     func refreshAppearance() {
         collectionView.collectionViewLayout.invalidateLayout()
         panel.layer.cornerRadius = appearance.cornerRadius
+        // 背景不透明度也是「外观」的一部分，一起重刷（这一层不参与尺寸计算，改它不影响宽高）
+        applyBackgroundOpacity()
         // 同上：宽高变了也把位置保住，别让用户滚到一半被甩回顶部
         rebuildRows(animated: false, preserveScroll: true)
     }
@@ -378,6 +407,34 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 面板当前的宽度。读的同样是**约束**的值，理由见上面 `panelHeight`。
     /// 单元测试用它断言两种宽度模式（固定点数 / 按父视图比例）各算出多宽
     var panelWidth: CGFloat { panelWidthConstraint.constant }
+
+    /// 卡片背景**实际用上**的不透明度。单元测试用它断言「配置里的值真的刷到视图上了」。
+    ///
+    /// ⚠️ 读之前先 `resolvedColor`：底色是个**动态色**（浅色 / 深色两套），不按当前外观解一次就直接取 alpha，拿到的可能不是设进去的那个数
+    var panelBackgroundOpacity: CGFloat {
+        guard let color = backgroundFill.backgroundColor else { return 1 }
+        var alpha: CGFloat = 0
+        color.resolvedColor(with: traitCollection).getRed(nil, green: nil, blue: nil, alpha: &alpha)
+        return alpha
+    }
+
+    /// 卡片整体的 alpha。单元测试守着它**恒等于 1**（默认值就是 1，这里从没主动设过）。
+    ///
+    /// 为什么要守：给容器打上小于 1 的 alpha，会让「不透明度 = 100%」那一档也盖不严实，而且会连带把标题文字弄淡 —— 而设置页上写着「这一项只管背景，标题文字本身不会跟着变淡」。
+    /// 想让卡片透，唯一的入口是 `appearance.backgroundOpacity`
+    var panelAlpha: CGFloat { panel.alpha }
+
+    /// 卡片现在是不是戴着毛玻璃。
+    ///
+    /// 单元测试用它守一条用户看得见的规矩：不透明度 = 100% 时是「实心厚卡片」，一往下拖就把毛玻璃摘掉、让背后正文清清楚楚透出来（戴着毛玻璃的话透出来只是一团糊影，看着像设置没生效）
+    var panelUsesBlurGlass: Bool { panel.effect != nil }
+
+    /// 背景那一层是不是待在**内容底下**（`contentView` 的第一个子视图）。
+    ///
+    /// 单元测试用它守一条用户看得见的不变式：背景**不能加在标题栏 / 列表 / 按钮后面** —— 加到后面它就是一整块实色糊在最上面，屏幕上整个面板只剩一片底色，标题一个字都看不见
+    var backgroundLayerStaysBehindContent: Bool {
+        panel.contentView.subviews.first === backgroundFill
+    }
 
     // MARK: - 测试用的小口子
 
@@ -411,6 +468,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         panel.layer.cornerRadius = appearance.cornerRadius
         panel.layer.cornerCurve = .continuous
         panel.clipsToBounds = true
+        // ⚠️ 这里**故意不设** panel.alpha：一旦给毛玻璃容器打上小于 1 的 alpha，「背景不透明度 = 100%」就永远只有 70%，卡片盖不严实，连标题文字都跟着发灰 —— 而设置页上写着「这一项只管背景，标题文字不会跟着变淡」。
+        // 要让卡片透，请走 `appearance.backgroundOpacity`
         addSubview(panel)
 
         panelWidthConstraint = panel.widthAnchor.constraint(equalToConstant: appearance.width)
@@ -426,11 +485,45 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         ])
 
         let content = panel.contentView
+        // ⚠️ 顺序有意为之：底色那一层必须**第一个**加进去，才会待在标题栏、列表、按钮底下当背景
+        setupBackgroundFill(in: content)
         setupHeader(in: content)
         setupScrollArea(in: content)
         setupExpandButton(in: content)
 
         applyCollapseState()
+    }
+
+    /// 卡片最底下那层底色（背景不透明度就刷在它身上）
+    private func setupBackgroundFill(in content: UIView) {
+        backgroundFill.isUserInteractionEnabled = false
+        backgroundFill.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(backgroundFill)
+        NSLayoutConstraint.activate([
+            backgroundFill.topAnchor.constraint(equalTo: content.topAnchor),
+            backgroundFill.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            backgroundFill.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            backgroundFill.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        ])
+        applyBackgroundOpacity()
+    }
+
+    /// 把 `appearance.backgroundOpacity` 刷到底色那一层上，顺便决定卡片**戴不戴毛玻璃**。
+    ///
+    /// ### 为什么小于 1 就要摘掉毛玻璃
+    /// 毛玻璃的唯一作用就是把背后的正文**糊掉**。用户把滑块往下拖，意思就是「我要看见背后」—— 这时候还留着它，透出来的只是一团糊影；再叠上浅色模式下底色（`#F2F2F7`）和编辑区底色（`#FFFFFF`）几乎同色，屏幕上看着就像「这个设置根本没生效」。
+    /// 摘掉之后，背后正文是**清清楚楚**透出来的，拖动时一眼就能看出区别。
+    ///
+    /// ### 为什么不用「换成一个普通 UIView」
+    /// 效果一样，但要付出的代价大得多：`panel` 是标题栏 / 列表 / 按钮共同的父视图（`contentView`），换容器意味着这几样全都要搬家一次，来回切还会重建列表、可能丢掉滚动位置。
+    /// `UIVisualEffectView` 的 `effect` 设 `nil` 之后本身就是个普通透明容器，一步到位。
+    ///
+    /// 这里再夹一道 `0...1`：配置层已经有自己的下限（0.2），但组件是可以被单独拿走的 —— 别人塞个 1.5 进来也不该画出个怪东西
+    private func applyBackgroundOpacity() {
+        let opacity = min(max(appearance.backgroundOpacity, 0), 1)
+        // 只有「完全不透明」那一档戴毛玻璃（配置层的滑块是 0.05 一档，100% 是个精确值，比较不用担心浮点误差）
+        panel.effect = opacity >= 1 ? Self.panelBlurEffect : nil
+        backgroundFill.backgroundColor = Self.panelBaseColor.withAlphaComponent(opacity)
     }
 
     /// 标题栏：图标 + 「大纲 · N」+ 全部折叠 + 收起箭头，底部一条分隔线
@@ -813,9 +906,7 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     /// 重建之后把列表滚到该在的位置。
     ///
-    /// 传进来的偏移是 0 有两种情况：本来就停在顶部，或者「全部折叠」那条路
-    /// （`rebuildRows` 在那种情况下记的是 `.zero`）。后者要**真的回到顶部**，
-    /// 所以这里不能遇到 0 就直接 return，得主动设一次。
+    /// 传进来的偏移是 0 有两种情况：本来就停在顶部，或者「全部折叠」那条路（`rebuildRows` 在那种情况下记的是 `.zero`）。后者要**真的回到顶部**，所以这里不能遇到 0 就直接 return，得主动设一次。
     private func applyScrollOffset(_ offset: CGPoint) {
         scrollToContentOffsetY(offset.y, animated: false)
     }

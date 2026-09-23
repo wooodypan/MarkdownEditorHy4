@@ -113,6 +113,8 @@ final class MarkdownEditorSettings {
         /// 切到「按百分比」时默认占编辑器宽度的 30%
         static let outlineWidthRatio: Double = 0.3
         static let outlineWidthPoints = Double(outlineAppearance.width)
+        /// 面板背景默认**完全不透明**（就是 `MarkdownOutlineAppearance.backgroundOpacity` 那个数）
+        static let outlineBackgroundOpacity = Double(outlineAppearance.backgroundOpacity)
 
         /// 大纲高度默认按「父视图高度的 70%」算上限
         static let outlineHeightMode: OutlineHeightMode = .percentage
@@ -156,15 +158,23 @@ final class MarkdownEditorSettings {
     /// 夹在「配置的入口」这一层，别的使用方就永远能相信拿到的值是可用的。
     enum Limits {
         /// 大纲宽度百分比的合法范围。15% 再窄标题就整段被截，50% 已经是「编辑区让出一半」
-        static let outlineWidthRatio: ClosedRange<Double> = 0.15...0.5
+        static let outlineWidthRatio: ClosedRange<Double> = 0.15...0.8
         /// 大纲固定宽度的合法范围（点）。
         ///
-        /// ⚠️ 上限 **520** 不能和别人撞车（表格最大列宽 600、图片最大高度 1600 都已占用）—— 设置页的测试是按「量程上界」在视图树里找滑块的，上界重复就找错行。
+        /// ⚠️ 量程的**上下界一起**不能和别人撞车（表格最大列宽 600、图片最大高度 1600 都已占用）—— 设置页的测试是按「量程」在视图树里找滑块的，两行的上下界都一样就分不出谁是谁。
         ///
         /// 下限 160 比 `MarkdownOutlineAppearance.minimumWidth`（148）留了一点余量，免得用户在设置页上挑了个比「自动保底」还小的值、看到数字对不上
         static let outlineWidthPoints: ClosedRange<Double> = 160...520
         static let outlineHeightRatio: ClosedRange<Double> = 0.3...1.0
         static let outlineMaximumHeight: ClosedRange<Double> = 120...900
+        /// 大纲面板背景不透明度的合法范围。`1` = 完全不透明。
+        ///
+        /// 下限 **0.2** 是需求指定的：再往下拖，卡片就快看不见了，标题会和背后透出来的正文叠在一起、认不清。
+        ///
+        /// ⚠️ `1` 同时还是「卡片戴不戴毛玻璃」的分界线：只有 100% 这一档是厚实的实心卡片，往下拖会关掉毛玻璃、让背后正文清清楚楚透出来（见 `MarkdownOutlineView.applyBackgroundOpacity`）。
+        ///
+        /// ⚠️ 上限 `1.0` 和 `outlineHeightRatio` 撞了（都是 1）—— 这正是「量程必须连下限一起看」的原因：两行的下限 0.2 / 0.3 不一样，还能分得开
+        static let outlineBackgroundOpacity: ClosedRange<Double> = 0.2...1.0
         /// 表格「最小列宽」的合法范围
         static let tableMinColumnWidth: ClosedRange<Double> = 32...200
         /// 表格「最大列宽」的合法范围
@@ -189,8 +199,7 @@ final class MarkdownEditorSettings {
         static let imageWidthPoints: ClosedRange<Double> = 80...800
         /// 图片最大高度的合法范围（点）。
         ///
-        /// ⚠️ 上限 **1600** 不能和 `bodyContentWidth` 的 1200 撞车 ——
-        /// 设置页的测试是按「量程上界」在视图树里找滑块的，上界重复就找错行。
+        /// ⚠️ 量程的**上下界一起**不能和 `bodyContentWidth` 的 320...1200 撞车 —— 设置页的测试是按「量程」在视图树里找滑块的，两行完全一样就分不出谁是谁。
         static let imageMaxHeight: ClosedRange<Double> = 120...1600
     }
 
@@ -225,6 +234,8 @@ final class MarkdownEditorSettings {
         var outlineHeightMode: String?
         var outlineHeightRatio: Double?
         var outlineMaximumHeight: Double?
+        /// 大纲面板背景的不透明度
+        var outlineBackgroundOpacity: Double?
         var tableMinColumnWidth: Double?
         var tableMaxColumnWidth: Double?
         /// 正文排版那一组。同样都写成可选的，老配置文件里没有就各自退默认
@@ -284,6 +295,13 @@ final class MarkdownEditorSettings {
     /// 同样是上限不是固定高度。另外为了小屏上不把整屏盖住，
     /// 实际用时还会被父视图高度压一道（见 `MarkdownOutlineView.effectiveMaximumHeight`）
     private(set) var outlineMaximumHeight: Double
+
+    /// 大纲面板**背景**的不透明度。默认 `1`（完全不透明）。
+    ///
+    /// 面板是一张浮在正文上面的卡片：`1` 表示背后的正文被完全盖住，越小透出来越多（透出来的是糊过的正文，不是清清楚楚的字 —— 卡片本身有毛玻璃）。
+    ///
+    /// 这一项只管**背景**，标题文字本身永远是实色，不会跟着变淡
+    private(set) var outlineBackgroundOpacity: Double
 
     /// 表格**最窄**的一列有多宽（点）。默认 `64`。
     ///
@@ -418,6 +436,15 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「背景不透明度」。超出 `Limits.outlineBackgroundOpacity`（0.2 ~ 1）的值会被夹到边界上
+    func setOutlineBackgroundOpacity(_ value: Double) {
+        let clamped = clamp(value, to: Limits.outlineBackgroundOpacity)
+        guard clamped != outlineBackgroundOpacity else { return }
+        outlineBackgroundOpacity = clamped
+        save()
+        postChange()
+    }
+
     /// 改「表格最小列宽」。超出 `Limits.tableMinColumnWidth` 的值会被夹到边界上
     func setTableMinColumnWidth(_ value: Double) {
         let clamped = clamp(value, to: Limits.tableMinColumnWidth)
@@ -532,6 +559,7 @@ final class MarkdownEditorSettings {
         self.outlineHeightMode = Default.outlineHeightMode
         self.outlineHeightRatio = Default.outlineHeightRatio
         self.outlineMaximumHeight = Default.outlineMaximumHeight
+        self.outlineBackgroundOpacity = Default.outlineBackgroundOpacity
         self.tableMinColumnWidth = Default.tableMinColumnWidth
         self.tableMaxColumnWidth = Default.tableMaxColumnWidth
         self.bodyFontSize = Default.bodyFontSize
@@ -579,6 +607,9 @@ final class MarkdownEditorSettings {
         if let value = payload.outlineMaximumHeight {
             outlineMaximumHeight = clamp(value, to: Limits.outlineMaximumHeight)
         }
+        if let value = payload.outlineBackgroundOpacity {
+            outlineBackgroundOpacity = clamp(value, to: Limits.outlineBackgroundOpacity)
+        }
         if let value = payload.tableMinColumnWidth {
             tableMinColumnWidth = clamp(value, to: Limits.tableMinColumnWidth)
         }
@@ -623,6 +654,7 @@ final class MarkdownEditorSettings {
                               outlineHeightMode: outlineHeightMode.rawValue,
                               outlineHeightRatio: outlineHeightRatio,
                               outlineMaximumHeight: outlineMaximumHeight,
+                              outlineBackgroundOpacity: outlineBackgroundOpacity,
                               tableMinColumnWidth: tableMinColumnWidth,
                               tableMaxColumnWidth: tableMaxColumnWidth,
                               bodyFontSize: bodyFontSize,
@@ -696,6 +728,14 @@ extension MarkdownEditorSettings {
         case .maximumHeight:
             appearance.heightRatio = nil
         }
+    }
+
+    /// 把「背景不透明度」写进大纲面板的外观参数。
+    ///
+    /// 这一项没有模式之分，一个数直接搬过去；换算照样放在配置侧（理由同上一条）。
+    /// ⚠️ 搬过去之后要调一次 `MarkdownOutlineView.refreshAppearance()`，否则屏幕上的卡片纹丝不动
+    func applyOutlineBackground(to appearance: inout MarkdownOutlineAppearance) {
+        appearance.backgroundOpacity = CGFloat(outlineBackgroundOpacity)
     }
 
     /// 把表格列宽的配置写进编辑器主题的表格样式里。

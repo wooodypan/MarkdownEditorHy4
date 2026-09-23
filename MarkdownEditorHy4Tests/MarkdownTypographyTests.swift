@@ -478,16 +478,16 @@ final class MarkdownTypographyTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
-        // 按量程上界当身份证找（28 / 2 / 40 / 4 / 1200，和别的分组都不冲突）
-        let fontSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 28),
+        // 按量程当身份证找（12~28 / 1~2 / 0~40 / 0~4 / 320~1200，和别的分组都不冲突）
+        let fontSlider = try XCTUnwrap(slider(in: controller.view, range: 12...28),
                                        "找不到「正文字号」的滑块")
-        let lineSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 2),
+        let lineSlider = try XCTUnwrap(slider(in: controller.view, range: 1...2),
                                        "找不到「行高」的滑块")
-        let spacingSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 40),
+        let spacingSlider = try XCTUnwrap(slider(in: controller.view, range: 0...40),
                                           "找不到「段落间距」的滑块")
-        let indentSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 4),
+        let indentSlider = try XCTUnwrap(slider(in: controller.view, range: 0...4),
                                          "找不到「段落首行缩进」的滑块")
-        let widthSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1200),
+        let widthSlider = try XCTUnwrap(slider(in: controller.view, range: 320...1200),
                                         "找不到「行宽上限」的滑块")
 
         // 故意给不在步进上的值，验证会被吸到最近的一档
@@ -527,7 +527,7 @@ final class MarkdownTypographyTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
-        let widthSlider = try XCTUnwrap(slider(in: controller.view, maximumValue: 1200))
+        let widthSlider = try XCTUnwrap(slider(in: controller.view, range: 320...1200))
         widthSlider.value = 1200
         widthSlider.sendActions(for: .valueChanged)
 
@@ -540,13 +540,16 @@ final class MarkdownTypographyTests: XCTestCase {
     ///
     /// 为什么不用顺序或者 tag：顺序取决于视图树怎么排，挪一行就挂；
     /// tag 是行枚举的 rawValue，往枚举里插一个 case 就全错位。
-    /// 每行的量程是定死的，拿上界当身份证最稳
-    private func slider(in view: UIView, maximumValue: Float) -> UISlider? {
+    /// 每行的量程是定死的，拿它当身份证最稳（⚠️ 上下界要**一起**看：设置页里「高度百分比」和「背景不透明度」的上界都是 1）
+    private func slider(in view: UIView, range: ClosedRange<Double>) -> UISlider? {
+        let lower = Float(range.lowerBound)
+        let upper = Float(range.upperBound)
         for subview in view.subviews {
-            if let slider = subview as? UISlider, slider.maximumValue == maximumValue {
+            if let slider = subview as? UISlider,
+               slider.minimumValue == lower, slider.maximumValue == upper {
                 return slider
             }
-            if let found = slider(in: subview, maximumValue: maximumValue) { return found }
+            if let found = slider(in: subview, range: range) { return found }
         }
         return nil
     }

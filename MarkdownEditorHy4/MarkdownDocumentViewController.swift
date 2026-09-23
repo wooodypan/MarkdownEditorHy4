@@ -477,14 +477,15 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         editor.refreshTheme()
     }
 
-    /// 把「大纲面板尺寸」的配置同步给大纲面板。
+    /// 把「大纲面板」这一组的配置（宽高 + 背景不透明度）同步给面板本体。
     ///
     /// 「配置 → 面板参数」的换算本身放在配置那边
-    /// （`MarkdownEditorSettings.applyOutlineWidth` / `applyOutlineHeight`），这样它们能各自被单独测；
+    /// （`MarkdownEditorSettings.applyOutlineWidth` / `applyOutlineHeight` / `applyOutlineBackground`），这样它们能各自被单独测；
     /// 这里只负责把结果送过去、再让面板重算一次宽高
     private func applyOutlineAppearance() {
         settings.applyOutlineWidth(to: &outlineView.appearance)
         settings.applyOutlineHeight(to: &outlineView.appearance)
+        settings.applyOutlineBackground(to: &outlineView.appearance)
         // 宽高是算出来的（不算动画：拖滑块时不该一直有动画）
         outlineView.refreshAppearance()
     }
