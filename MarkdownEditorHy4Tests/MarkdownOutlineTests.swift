@@ -652,8 +652,11 @@ final class MarkdownOutlineTests: XCTestCase {
         outline.layoutIfNeeded()
 
         let rows = rowViews(in: outline)
-        XCTAssertGreaterThanOrEqual(rows.count, 5,
-                                    "示例文档里有一级 + 七个小节标题，目录不该只有 \(rows.count) 行")
+        // ⚠️ 断言「目录里有几行」看**数据层**（`visibleTitles`），**不能数 cell**：
+        // cell 只为「屏幕上放得下」的行创建，而面板高度上限是**用户可调的** —— 把「最大高度」调到 160 点时面板只放得下 4 行，数 cell 就会假红（2026-09-22 踩过）
+        XCTAssertGreaterThanOrEqual(outline.visibleTitles.count, 5,
+                                    "示例文档里有一级 + 七个小节标题，目录不该只有 \(outline.visibleTitles.count) 行"
+                                    + "（面板 \(outline.panelHeight) 点高、建出的 cell \(rows.count) 个）")
         XCTAssertEqual(rows.first?.item?.level, 1, "第一行应该是那个 H1")
         XCTAssertTrue(rows.allSatisfy { ($0.item?.level ?? 0) >= 1 && ($0.item?.level ?? 9) <= 6 },
                       "所有行的层级都必须在 1...6 之间")

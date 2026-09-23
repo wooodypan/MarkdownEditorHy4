@@ -441,7 +441,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         present(UINavigationController(rootViewController: controller), animated: true)
     }
 
-    /// 设置变了（用户在设置页拨了开关）→ 立刻作用到大纲面板上，不用重启
+    /// 设置变了 → 立刻生效，不用重启
     private func observeSettingsChanges() {
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(settingsDidChange),
@@ -450,7 +450,6 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     }
 
     @objc private func settingsDidChange() {
-        applyScrollSetting()
         applyOutlineAppearance()
         applyEditorStyle()
     }
@@ -476,11 +475,6 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 主题管「文字长什么样」，行宽取决于窗口有多宽，是布局的事
         editor.maxContentWidth = settings.bodyContentWidthLimit.map { CGFloat($0) }
         editor.refreshTheme()
-    }
-
-    /// 把「是否记住滚动位置」同步给大纲面板
-    private func applyScrollSetting() {
-        outlineView.remembersScrollPosition = settings.remembersScrollPosition
     }
 
     /// 把「大纲面板尺寸」的配置同步给大纲面板。

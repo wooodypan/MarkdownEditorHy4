@@ -50,6 +50,18 @@ final class DocumentListViewController: UIViewController {
 
     // MARK: - 生命周期
 
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        // ⚠️ 导航条按钮放在 init 里配，而不是 viewDidLoad：
+        // 这一页是挂在 PPTabBarController 里面的，外层导航条要拿它这颗「+」按钮
+        // （理由见 WorkspaceCoordinator.syncNavigationItem），那时候它的 view 还没加载
+        setupNavigationBar()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("DocumentListViewController 不支持从 coder 解档")
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "文档"
@@ -57,7 +69,6 @@ final class DocumentListViewController: UIViewController {
 
         setupTableView()
         setupEmptyLabel()
-        setupNavigationBar()
         setupTapGestures()
         observeWorkspaceChanges()
 
@@ -208,29 +219,18 @@ final class DocumentListViewController: UIViewController {
         open(first, mode: .preview)
     }
 
-    /// 把一份磁盘文件交给右侧编辑
+    /// 把一份磁盘文件交给右侧编辑。
+    ///
+    /// 打开这件事（读内容、记一笔「最近打开」、送给路由）统一在 `DocumentOpening` 里做 ——
+    /// 「最近」那一页走的是同一条路，两边的行为必须对得上。
     private func open(_ url: URL, mode: PPContentOpenMode) {
-        guard let item = contentItem(for: url) else {
+        guard DocumentOpening.open(url, mode: mode, using: router) else {
             showAlert(title: "打不开文件",
                       message: "「\(url.lastPathComponent)」读不出来，可能被删掉或者没有访问权限。")
             reloadFiles()
             return
         }
-        router?.open(item, mode: mode)
-    }
-
-    /// 把磁盘文件变成库认识的内容项。
-    ///
-    /// 内容**当场就读出来塞进 `body`**，不让编辑页自己去读：这样「读失败」在这里就能拦住，
-    /// 不会出现「编辑页拿到空内容 → 一保存就把用户的原文件清空」这种事故。
-    private func contentItem(for url: URL) -> PPContentItem? {
-        guard let text = DocumentsWorkspace.read(url) else { return nil }
-        return PPContentItem(id: url.path,
-                             title: DocumentsWorkspace.displayName(for: url),
-                             body: text,
-                             // 左侧栏只有一个平铺列表，用不上分组。留着这个字段是为了
-                             // 以后要按子目录 / 标签分组时不用改协议
-                             category: "Documents")
+        // 打开之后「最近」那一页的顺序会变，但那是它自己的事（它出现时会重列）
     }
 
     /// 新建一份空白文档，并立刻在右侧开个新 Tab 编辑它。

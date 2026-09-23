@@ -457,8 +457,8 @@ final class MarkdownOutlineFoldTests: XCTestCase {
 
     // MARK: - 第 3 层补测：列表滚动位置
 
-    /// 列表被换掉之后要保持滚动位置（「记住滚动位置」打开时，默认就是开的）
-    func testScrollOffsetSurvivesUpdateWhenRemembering() throws {
+    /// 列表被换掉之后要保持滚动位置 —— 正文里敲一下字就被甩回顶部的话，长文档根本没法用
+    func testScrollOffsetSurvivesUpdate() throws {
         let (view, host) = makeOutlineView()
         view.updateOutlineItems(makeLongList(40))
         host.layoutIfNeeded()
@@ -477,28 +477,9 @@ final class MarkdownOutlineFoldTests: XCTestCase {
                        "列表刷新之后位置被甩回顶部了")
     }
 
-    /// 关掉「记住滚动位置」→ 列表刷新后回到顶部
-    func testScrollOffsetResetsWhenNotRemembering() throws {
-        let (view, host) = makeOutlineView()
-        view.remembersScrollPosition = false
-        view.updateOutlineItems(makeLongList(40))
-        host.layoutIfNeeded()
-
-        let scrollView = try XCTUnwrap(firstScrollView(in: view), "视图树里找不到列表的滚动视图")
-        scrollView.setContentOffset(CGPoint(x: 0, y: 120), animated: false)
-        XCTAssertEqual(scrollView.contentOffset.y, 120, accuracy: 0.5, "测试前提：偏移得设得进去")
-
-        view.updateOutlineItems(makeLongList(40))
-        host.layoutIfNeeded()
-
-        XCTAssertEqual(scrollView.contentOffset.y, 0, accuracy: 0.5,
-                       "关掉「记住位置」之后，列表刷新应该回到顶部")
-    }
-
     /// 但「我自己在列表里折叠」永远不能把位置甩走 —— 手指刚点的地方不能跑
-    func testFoldingKeepsScrollPositionEvenWhenNotRemembering() throws {
+    func testFoldingKeepsScrollPosition() throws {
         let (view, host) = makeOutlineView()
-        view.remembersScrollPosition = false
         let items = makeLongFoldableList(15)
         view.updateOutlineItems(items)
         host.layoutIfNeeded()
@@ -514,6 +495,31 @@ final class MarkdownOutlineFoldTests: XCTestCase {
 
         XCTAssertEqual(scrollView.contentOffset.y, 120, accuracy: 0.5,
                        "折叠是用户自己在操作列表，不该把列表甩回顶部")
+    }
+
+    /// 高亮落到可视区外面时，把那一行滚进来。
+    ///
+    /// 这条**无条件成立**、也没有对应的设置项：大纲不跟着光标走的话，光标跑到文档后半段时目录还停在开头，等于没有大纲
+    func testHighlightScrollsRowIntoView() throws {
+        let (view, host) = makeOutlineView()
+        let items = makeLongList(40)
+        view.updateOutlineItems(items)
+        host.layoutIfNeeded()
+
+        let scrollView = try XCTUnwrap(firstScrollView(in: view), "视图树里找不到列表的滚动视图")
+        XCTAssertGreaterThan(scrollView.contentSize.height, scrollView.bounds.height,
+                             "测试前提：列表得真的能滚")
+        XCTAssertEqual(scrollView.contentOffset.y, 0, accuracy: 0.5, "测试前提：一开始停在顶部")
+
+        view.highlightOutlineItem(items[35].id)     // 靠后的一行，肯定在可视区外面
+        // 滚动是带动画的（用户得看得见它在动），跑一下 runloop 让它落地
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        host.layoutIfNeeded()
+
+        XCTAssertGreaterThan(scrollView.contentOffset.y, 0,
+                             "高亮到看不见的行了，列表该滚过去，实际还停在 \(scrollView.contentOffset.y)；"
+                             + "面板 \(view.panelHeight) 点高、列表可视高 \(scrollView.bounds.height)、"
+                             + "内容高 \(scrollView.contentSize.height)、可见行 \(view.visibleTitles.count) 条")
     }
 
     /// 三角真的能吃到手点的那些点击。

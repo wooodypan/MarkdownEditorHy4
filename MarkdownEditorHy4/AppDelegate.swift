@@ -101,6 +101,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // 左栏那份列表一起来就要读到内容，不能等到它出现才发现目录是空的。
         DocumentsWorkspace.installSampleIfNeeded()
 
+        // ### 启动再查一遍「最近打开」里那些文件还在不在
+        // 用户在 Finder /「文件」App 里把某份 .md 删了，App 是收不到通知的 ——
+        // 不查的话，「最近」那一页就会一直躺着一条点开就报错的记录。
+        // 这里把「文件已经不在了」的记录剔掉（只清记录，一份文件都不会动）。
+        RecentDocumentsStore.shared.pruneMissingFiles()
+
         // 兜底：个别系统版本冷启动时只把文件 URL 放在 launchOptions 里，不派发给 scene
         if let url = launchOptions?[.url] as? URL {
             MarkdownDocumentOpener.shared.handle(url: url)

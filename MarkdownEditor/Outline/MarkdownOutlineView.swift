@@ -127,15 +127,6 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 当前是不是收起状态
     private(set) var isCollapsed = false
 
-    /// 是否「记住滚动位置」（设置项，由上层容器按用户的配置注入；默认打开）。
-    ///
-    /// 打开时：光标所在章节切换 → 自动把那一行滚进可视区；列表因编辑重建 → 保持原位置。
-    /// 关掉时：高亮只换颜色，列表停在你手滚到的位置，重建后回到顶部。
-    ///
-    /// 刻意做成一个普通属性而不是去读配置单例 —— 这个文件必须保持
-    /// 「不认识编辑器、也不认识 App 层任何东西」，只认别人塞给它的值。
-    var remembersScrollPosition = true
-
     // MARK: 数据
 
     /// 完整的标题列表（包含被折叠藏起来的那些）。
@@ -261,7 +252,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         collapsibleIDs = Set(tree.collapsibleIndices.map { items[$0].id })
         // 列表换了，里面可能已经没有原来折着的那些标题了，清一遍残留标记
         collapsedIDs.formIntersection(collapsibleIDs)
-        rebuildRows(animated: false, preserveScroll: remembersScrollPosition)
+        // 编辑会让列表整份重建，位置**必须**保住 —— 否则正文里每敲一个字，右边的目录就「唰」地跳回顶部
+        rebuildRows(animated: false, preserveScroll: true)
     }
 
     /// 高亮某一行；传 nil 表示取消所有高亮
@@ -271,9 +263,10 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         requestedHighlightID = id
         refreshHighlightAppearance()
 
-        // 「记住滚动位置」关掉时不自动滚 —— 列表停在你手滚到的位置，
-        // 不然一边打字一边被列表拖着跑，想把某个章节固定住看都做不到
-        guard remembersScrollPosition, let target = effectiveHighlightID else { return }
+        // 把高亮那一行滚进可视区。这一步**无条件做**：大纲不跟着光标走的话，
+        // 光标跑到文档后半段时目录还停在开头，等于没有大纲。
+        // 行本来就看得见时 `scrollRowIntoView` 会提前返回，不会来回抖
+        guard let target = effectiveHighlightID else { return }
         scrollRowIntoView(for: target)
     }
 
@@ -371,7 +364,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     func refreshAppearance() {
         collectionView.collectionViewLayout.invalidateLayout()
         panel.layer.cornerRadius = appearance.cornerRadius
-        rebuildRows(animated: false, preserveScroll: remembersScrollPosition)
+        // 同上：宽高变了也把位置保住，别让用户滚到一半被甩回顶部
+        rebuildRows(animated: false, preserveScroll: true)
     }
 
     /// 面板当前的高度。
@@ -603,9 +597,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 所以增量 diff 本来也命中不了几行，不如整份重算 —— 反正 collection view
     /// 只为屏幕上那十几行创建 cell，整份快照的开销是数据层的几百次比较，很便宜。
     /// - parameter preserveScroll: 重建之后要不要把列表滚回原来的位置。
-    ///   列表**被换掉**（编辑改了标题）时，由「记住滚动位置」这个设置说了算；
-    ///   用户自己在列表里**折叠**时永远要保住位置 —— 手指刚点的地方不能跑。
-    ///   「全部折叠」例外：列表会缩到只剩几行，位置没有意义，直接回顶部
+    ///   默认都传 `true`：编辑改了标题、用户折叠某一行、面板宽高变了，位置都不该跑；
+    ///   唯一的例外是「全部折叠」—— 列表缩到只剩几行，原来的位置没有意义，直接回顶部
     private func rebuildRows(animated: Bool, preserveScroll: Bool) {
         // 先偷偷记下现在滚到哪儿 —— 快照换完内容就全变了，
         // 不还原的话列表会「唰」地跳回顶部
@@ -820,7 +813,7 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     /// 重建之后把列表滚到该在的位置。
     ///
-    /// 传进来的偏移是 0 有两种情况：本来就停在顶部，或者「记住滚动位置」关着
+    /// 传进来的偏移是 0 有两种情况：本来就停在顶部，或者「全部折叠」那条路
     /// （`rebuildRows` 在那种情况下记的是 `.zero`）。后者要**真的回到顶部**，
     /// 所以这里不能遇到 0 就直接 return，得主动设一次。
     private func applyScrollOffset(_ offset: CGPoint) {

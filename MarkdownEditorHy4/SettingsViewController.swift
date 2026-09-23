@@ -44,7 +44,7 @@ final class SettingsViewController: UIViewController {
         var title: String {
             switch self {
             case .typography: return "正文排版"
-            case .reading: return "阅读与大纲"
+            case .reading: return "阅读位置"
             case .outlineSize: return "大纲面板尺寸"
             case .tableLayout: return "表格列宽"
             case .imageSize: return "图片尺寸"
@@ -90,7 +90,7 @@ final class SettingsViewController: UIViewController {
         case paragraphIndentCharacters
         /// 正文栏宽上限（点），拖到最右端 = 不限
         case bodyContentWidth
-        // 阅读与大纲
+        // 阅读位置
         case remembersScrollPosition
         // 大纲面板：宽度
         /// 面板宽度按什么算（百分比 / 固定点数）
@@ -132,7 +132,7 @@ final class SettingsViewController: UIViewController {
             case .bodyContentWidth:
                 return "行宽上限"
             case .remembersScrollPosition:
-                return "记住目录大纲滚动位置"
+                return "记住上次阅读位置"
             case .outlineWidthMode:
                 return "宽度怎么算"
             case .outlineWidthRatio:
@@ -198,9 +198,8 @@ final class SettingsViewController: UIViewController {
                     + "（一行拉太长，读到行尾容易串行）；拖到最右边显示「不限」，"
                     + "正文就铺满整个窗口。"
             case .remembersScrollPosition:
-                return "打开：大纲跟着光标所在章节自动滚动，关闭文件时记住读到哪里，"
-                    + "下次打开同一个文件回到原处。关闭：大纲只在你手动滚动时才动，"
-                    + "列表刷新后回到顶部。"
+                return "打开：关闭文件时记住读到哪儿，下次打开同一个文件回到原处。"
+                    + "关闭：每次打开都从文档开头看起。目录大纲永远跟着光标走，不受这一项影响。"
             case .outlineWidthMode:
                 return "「按百分比」：宽度跟着窗口走，窗口拉宽面板也变宽；"
                     + "「固定宽度」：永远是你指定的点数，跟窗口无关。"
