@@ -894,7 +894,9 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                    range: NSRange(location: index, length: 1))
     }
 
-    /// 折叠状态下的**标题块**长什么样：标题文字 + 一个「⋯」占位符。
+    /// 折叠状态下的**标题块**长什么样：标题文字 + 一个「⋯」的**座位**。
+    ///
+    /// 座位自己不画东西（一个字符位、什么也不显示），画面上那个「⋯」圆角按钮由 UI 层摆在它上面 —— 见 `CollapsedBlockAttachment` 的说明。
     ///
     /// 和老版本「整块变成一个 ⋯」的区别：标题自己照常显示（用户看得见折叠了哪一节、
     /// 还能点进去改标题），被收起来的只有它**下面那一节**。
@@ -918,8 +920,8 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         var fragment = RenderedFragment(text: NSMutableAttributedString(attributedString: headingText),
                                         mappings: headingMappings)
 
+        // 座位只占位、一个像素都不画 —— 画面上那个「⋯」是浮层上的按钮画的，宽度必须和它同宽
         let placeholder = CollapsedBlockAttachment(width: theme.collapsedPlaceholderWidth,
-                                                   color: theme.collapsedPlaceholderColor,
                                                    font: theme.bodyFont)
         // 占位符从「标题文字结束处」开始吃源码，一直吃到整节结束。
         // 标成 attachmentView：光标不会停在这个字符上（免得用户一敲键就把整节删了），
@@ -928,7 +930,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                     sourceStart: headingSource.utf16Length,
                                     sourceLength: hiddenSourceLength,
                                     attributes: [.font: theme.bodyFont]))
-        // 打标记：UI 层靠它认出「这个 ⋯ 点一下能展开」
+        // 打标记：UI 层靠它认出「这个座位点一下能展开」，并在这个座位上摆那个圆角按钮
         fragment.text.addAttribute(.markdownCollapsedPlaceholder,
                                    value: CollapsedSectionInfo(blockID: blockID),
                                    range: NSRange(location: fragment.text.length - 1, length: 1))

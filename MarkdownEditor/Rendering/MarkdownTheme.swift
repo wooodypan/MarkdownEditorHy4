@@ -117,10 +117,16 @@ struct MarkdownTheme {
     /// 三角浮在这条带子里，不占正文的字符位，多行文字的左边缘才对得齐。
     /// 这个值会额外加到 `UITextView.textContainerInset.left` 上。
     var foldGutterWidth: CGFloat
-    /// 折叠后占位符「⋯」的宽度
+    /// 折叠后那个「⋯」占位的宽度。
+    ///
+    /// ⚠️ **一个数管两处**：文本流按这条宽度留空档，浮层上那个圆角按钮也按这条宽度画 —— 两边同一个数，按钮才正好盖在空档上，既不会压住标题文字、右边也不会多一块空白。
     var collapsedPlaceholderWidth: CGFloat
-    /// 折叠后占位符「⋯」的颜色
+    /// 折叠后那个「⋯」的颜色（同时当按钮的描边色和文字色用）
     var collapsedPlaceholderColor: UIColor
+    /// 折叠后那个「⋯」按钮的**高度**，固定值、不跟字号走。
+    ///
+    /// ⚠️ 为什么不跟字号：行高是随字号变的，按钮要是跟着变，用户在设置页拖字号时 这个「控件」会忽大忽小，看着就不像个按钮了。宽度不用另给一个数 —— 就是 `collapsedPlaceholderWidth`。
+    var collapsedButtonHeight: CGFloat = 20
     /// 是否显示「源码提示」：图片下面那行 `![alt](url)`、圆点后面的 `- `
     var showsSourceHints: Bool = true
     /// 代码块的 **``` 围栏行**（第一行 ```lang 和最后一行 ```）要不要跟着正文一起铺淡灰背景。
@@ -212,7 +218,8 @@ struct MarkdownTheme {
             foldButtonSide: 20,
             foldButtonGap: 2,
             foldGutterWidth: 22,
-            collapsedPlaceholderWidth: 20,
+            // 32 × 20：宽比高大约 3:2，'⋯' 摆在正中间才像个按钮（宽高一样就成了圆形）
+            collapsedPlaceholderWidth: 32,
             collapsedPlaceholderColor: .tertiaryLabel
         )
     }

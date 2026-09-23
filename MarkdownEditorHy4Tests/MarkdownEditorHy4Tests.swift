@@ -571,8 +571,46 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertEqual(collapsed.count, 1, "折叠之后应该只有一个三角变成 ▶")
     }
 
-    /// 折叠后的「⋯」在屏幕上要有一个能点的热区（点它展开）
-    func testCollapsedPlaceholderHasTapTarget() {
+    /// 折叠后文本流里那个座位**什么也不画**。
+    ///
+    /// 三个点改由浮层上的按钮画：两边各画一半的话是两份图形各自定位，字号或行高一变就有半个点的错位。
+    /// 但座位**必须还在**（占 1 个字符位、宽度非零）—— 「全选复制 === 源文件」的映射全靠它。
+    ///
+    /// ⚠️ 「不画」在实现上是**给一张全透明的图**，不是不给图：附件在 TextKit 眼里没内容时， 它会自己补画一张「缺省白纸」图标到屏幕上（用户看到那张纸报过 bug）。
+    func testCollapsedSeatDrawsNothingInTextFlow() {
+        let store = makeStore(sectionSample)
+        guard let index = headingIndex("二级 A", in: store) else {
+            return XCTFail("样例里找不到「二级 A」")
+        }
+        store.toggleCollapse(blockAt: index)
+
+        let content = store.blocks[index].renderedContent
+        var seats: [NSTextAttachment] = []
+        for offset in 0..<content.length {
+            if let attachment = content.attribute(.attachment, at: offset, effectiveRange: nil) as? NSTextAttachment {
+                seats.append(attachment)
+            }
+        }
+
+        XCTAssertEqual(seats.count, 1, "折叠后整节只该剩一个座位")
+        XCTAssertTrue(seats.first is CollapsedBlockAttachment, "那一个应该是折叠占位符")
+        XCTAssertGreaterThan(seats.first?.bounds.width ?? 0, 0,
+                             "座位仍要占一块宽度，按钮才正好盖在这块空档上")
+
+        // ⚠️ 座位必须带一张图，而且那张图必须**全透明**，两头都不能偏：
+        // 留 `image = nil` → TextKit 认为这个附件没内容，自己补画缺省图标（右上角卷起的白纸），屏幕上凭空多一张纸；
+        // 给一张画了东西的图 → 那个字符位上真的会出现东西，盖住旁边的字
+        guard let seat = seats.first as? CollapsedBlockAttachment, let seatImage = seat.image else {
+            return XCTFail("座位该带一张图 —— 留 `image = nil` 的话 TextKit 会自己补画一张「缺省白纸」图标")
+        }
+        XCTAssertEqual(seatImage.size.width, seat.bounds.width, accuracy: 0.5,
+                       "图要和占位一样宽，TextKit 是按图的尺寸决定这个字符位占多大的")
+        XCTAssertEqual(maxAlpha(of: seatImage), 0,
+                       "座位那张图必须全透明 —— 画面上那个「⋯」是浮层按钮画的")
+    }
+
+    /// 折叠后的「⋯」是一个**固定高度的圆角矩形按钮**（三个点由它自己画）
+    func testCollapsedMarkerIsFixedSizeRoundedButton() {
         let textView = makeEditor("# 标题\n\n正文。\n")
         guard let index = textView.documentStore.blocks.firstIndex(where: { $0.headingLevel != nil }) else {
             return XCTFail("样例里找不到标题")
@@ -580,9 +618,48 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         textView.toggleCollapse(blockID: textView.documentStore.blocks[index].id)
         textView.layoutIfNeeded()
 
-        let button = findSubview(in: textView) { $0 is CollapsedSectionButton }
-        XCTAssertNotNil(button, "折叠后的「⋯」应该有一个点击热区")
-        XCTAssertGreaterThan(button?.frame.width ?? 0, 0, "热区不该是零宽度的")
+        let theme = textView.renderer.theme
+        guard let button = findSubview(in: textView, where: { $0 is CollapsedSectionButton }) as? CollapsedSectionButton else {
+            return XCTFail("折叠后的「⋯」应该有一个按钮")
+        }
+        XCTAssertEqual(button.title(for: .normal), "⋯", "三个点该由按钮自己画")
+        XCTAssertEqual(button.frame.height, theme.collapsedButtonHeight, accuracy: 0.5,
+                       "高度是固定的，不该跟着行高走")
+        XCTAssertEqual(button.frame.width, theme.collapsedPlaceholderWidth, accuracy: 0.5,
+                       "宽度要正好盖住文本流给座位留的那块空档")
+        XCTAssertGreaterThan(button.layer.cornerRadius, 0, "得是圆角的")
+        XCTAssertLessThan(button.layer.cornerRadius, button.frame.height / 2,
+                          "圆角半径必须小于高度的一半，否则两端会变成半圆（那是胶囊，不是圆角矩形）")
+        XCTAssertGreaterThan(button.layer.borderWidth, 0, "得有描边，不然「⋯」看着还是三个孤零零的点")
+    }
+
+    /// ⚠️ 按钮的热区要比画出来的框大一圈，但**不能靠放大 frame** —— frame 就是画出来的那个框
+    func testCollapsedButtonHitAreaIsBiggerThanItsBox() {
+        let textView = makeEditor("# 标题\n\n正文。\n")
+        guard let index = textView.documentStore.blocks.firstIndex(where: { $0.headingLevel != nil }) else {
+            return XCTFail("样例里找不到标题")
+        }
+        textView.toggleCollapse(blockID: textView.documentStore.blocks[index].id)
+        textView.layoutIfNeeded()
+
+        guard let button = findSubview(in: textView, where: { $0 is CollapsedSectionButton }) as? CollapsedSectionButton else {
+            return XCTFail("折叠后的「⋯」应该有一个按钮")
+        }
+
+        // 框正上方 6 点：已经出了框，但框只有 20 点高，按着框点太考验准头
+        let above = CGPoint(x: button.bounds.midX, y: -6)
+        XCTAssertFalse(button.bounds.contains(above), "这个点该确实在框外面（不然这条测试就没意义）")
+        XCTAssertTrue(button.point(inside: above, with: nil), "框外面一圈也该点得中")
+
+        // 左边只撑一点点：座位紧贴在标题文字最后面，撑多了会把「点最后一个字放光标」也抢走
+        XCTAssertFalse(button.point(inside: CGPoint(x: -8, y: button.bounds.midY), with: nil),
+                       "左边不该往外撑到 8 点")
+
+        // 父层也要认这圈撑出来的热区：它以前先按 `frame.contains` 过滤，会把撑出来的部分又切掉
+        guard let layer = button.superview else { return XCTFail("按钮该挂在折叠控件层上") }
+        let pointInLayer = layer.convert(above, from: button)
+        XCTAssertTrue(layer.hitTest(pointInLayer, with: nil) === button,
+                      "父层 hitTest 必须把框外面那圈也判给按钮，否则看着点在按钮上却没反应")
     }
 
     /// 递归找符合条件的子视图（测试里用来挖 overlay 上的控件）
@@ -598,6 +675,30 @@ final class MarkdownEditorHy4Tests: XCTestCase {
     /// 把视图树拍平（数 overlay 上的控件时用）
     private func allSubviews(of root: UIView) -> [UIView] {
         [root] + root.subviews.flatMap { allSubviews(of: $0) }
+    }
+
+    /// 读一张图里所有像素的最大不透明度 —— 全透明的图返回 0。
+    ///
+    /// 用来验证「座位真的一点东西都没画」：`image == nil` 不算数（那样 TextKit 会补画一张缺省白纸图标）， 得看那张图本身是不是空的。CGImage 的字节序 / 每像素字节数各平台不一样， 所以先把它画进一张格式已知的位图再按 RGBA 读第 4 个分量
+    private func maxAlpha(of image: UIImage) -> UInt8 {
+        guard let cgImage = image.cgImage, cgImage.width > 0, cgImage.height > 0 else { return 0 }
+        var pixels = [UInt8](repeating: 0, count: cgImage.width * cgImage.height * 4)
+        guard let context = CGContext(data: &pixels,
+                                      width: cgImage.width,
+                                      height: cgImage.height,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: cgImage.width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return 0
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+
+        var maximum: UInt8 = 0
+        for index in stride(from: 3, to: pixels.count, by: 4) {
+            maximum = max(maximum, pixels[index])
+        }
+        return maximum
     }
 
     // MARK: - 按回车
@@ -1221,7 +1322,7 @@ final class MarkdownEditorHy4Tests: XCTestCase {
             return XCTFail("没有找到复选框标记")
         }
         tv.toggleCheckbox(info)
-        // 直接调 toggleCheckbox 不会自己标脏，要手动催一次布局（按钮在布局里重建）
+        // 直接调 toggleCheckbox 不会自己触发重新排版，得手动催一次（按钮是在排版过程中重建的）
         tv.setNeedsLayout()
         tv.layoutIfNeeded()
 

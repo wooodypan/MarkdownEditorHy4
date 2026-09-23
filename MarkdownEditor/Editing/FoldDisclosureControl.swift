@@ -13,8 +13,11 @@ import UIKit
 /// 否则会挡住正文的点击和光标定位。
 final class FoldControlLayer: UIView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        for subview in subviews where subview.frame.contains(point) {
-            if let hit = subview.hitTest(convert(point, to: subview), with: event) { return hit }
+        for subview in subviews {
+            // ⚠️ 这里**不能**先按 `subview.frame.contains(point)` 过滤一道：按钮允许把热区撑到 frame 外面 （见 `CollapsedSectionButton.point(inside:)`），先按 frame 过滤就把撑出来那圈又切掉了 —— 表现出来是「看着明明点在按钮上，却没反应」。改成直接问子视图自己。
+            let local = convert(point, to: subview)
+            guard subview.point(inside: local, with: event) else { continue }
+            if let hit = subview.hitTest(local, with: event) { return hit }
         }
         return nil
     }
@@ -67,28 +70,75 @@ final class FoldDisclosureButton: UIButton {
     }
 }
 
-/// 折叠标题后面那个「⋯」占位符的**点击热区**。
+/// 折叠标题后面那个「⋯」**本身**：一个固定高度的圆角矩形按钮。
 ///
-/// ### 为什么按钮是「透明」的
-/// 「⋯」这三个点是由文本流里的 `CollapsedBlockAttachment` 画出来的（它占 1 个字符位，
-/// 这样「全选复制 === 源文件」才成立）。按钮只是**盖在它上面**接点击，
-/// 自己什么都不画 —— 画面上看到的仍然是文本流里那个「⋯」。
+/// ### 它和以前那个「透明热区」的区别
+/// 以前那三个点由文本流里的 `CollapsedBlockAttachment` 画，按钮只是个盖在上面的透明热区。
+/// 现在文本流里只留一个**什么也不画的座位**，三个点连同这个圆角框都归按钮画 —— 好处是「⋯」和框永远对得齐（两边各画一半就会有半个点的错位），框的粗细 / 圆角 / 颜色也只此一处。
+/// 那个字符位还在、源码映射一个字没动，所以「全选复制 === 源文件」照样成立。
 ///
-/// 和复选框用的是同一套机制：位置由 `MarkdownTextView` 按字符矩形摆，
-/// 加在 `FoldControlLayer` 上（只有按钮吃点击，其余区域穿透给正文）。
+/// 位置由 `MarkdownTextView.positionFoldControls` 按座位的矩形摆（和复选框同一套机制）， 加在 `FoldControlLayer` 上（只有按钮吃点击，其余区域穿透给正文）。
 final class CollapsedSectionButton: UIButton {
 
     /// 这个「⋯」属于哪个标题块（点它时靠它反查要展开哪一节）
     var sectionID: UUID?
 
-    init() {
+    /// 圆角半径。
+    ///
+    /// ⚠️ 必须**小于高度的一半**（高度见 `MarkdownTheme.collapsedButtonHeight`，默认 20 → 上限 10）。
+    /// 正好取一半的话两端就是两个半圆，形状成了胶囊，不是「圆角矩形」了。
+    private static let cornerRadius: CGFloat = 6
+    /// 描边粗细
+    private static let borderWidth: CGFloat = 1.5
+    /// 热区在框的四周各向外撑出多少（**负数 = 向外**）。
+    ///
+    /// 框只有 20 点高，正好按着框点太考验准头，所以上下右各撑 10 点。
+    /// ⚠️ 左边只撑 4 点：座位紧贴在标题文字最后面，左边撑多了会把「点最后一个字放光标」也抢走。
+    ///
+    /// ⚠️ 也不许靠放大 `frame` 来撑热区 —— 这个按钮自己就是画出来的那个框，`frame` 一放大框也跟着变大。
+    private static let hitOutset = UIEdgeInsets(top: -10, left: -4, bottom: -10, right: -10)
+    /// 「⋯」的字号。比正文小一点，三个点才不会在 20 点高的框里顶到上下边
+    private static let titlePointSize: CGFloat = 13
+
+    /// 描边色 / 文字色。用主题里那个「折叠占位色」，浅色深色两套自动跟着走
+    private let strokeColor: UIColor
+
+    /// - parameter strokeColor: 框和「⋯」的颜色，从主题来
+    init(strokeColor: UIColor) {
+        self.strokeColor = strokeColor
         super.init(frame: .zero)
+
+        setTitle("⋯", for: .normal)
+        setTitleColor(strokeColor, for: .normal)
+        titleLabel?.font = .systemFont(ofSize: Self.titlePointSize, weight: .semibold)
         backgroundColor = .clear
+        layer.cornerRadius = Self.cornerRadius
+        layer.borderWidth = Self.borderWidth
         accessibilityLabel = "展开被折叠的内容"
         accessibilityTraits = .button
     }
 
     required init?(coder: NSCoder) {
         fatalError("CollapsedSectionButton 不支持从 coder 解档")
+    }
+
+    /// 描边色在这里赋，而不是在 `init` 里赋一次就完。
+    ///
+    /// ⚠️ 动态色（`.tertiaryLabel` 这类）的 `cgColor` 会把**赋值那一刻的外观定住**：
+    /// 浅色下画好，用户切到深色不会自己变，那条框会一直挂着浅色模式的灰。
+    /// `CALayer` 不认识动态色、只能吃解析好的 `cgColor`，所以换外观时得再解析一次。
+    /// 放 `layoutSubviews` 里最省事 —— 系统换外观一定会走一遍布局。
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        layer.borderColor = strokeColor.resolvedColor(with: traitCollection).cgColor
+    }
+
+    /// 热区比画出来的框大一圈（见 `hitOutset`）。
+    ///
+    /// ⚠️ 这里必须把 `isUserInteractionEnabled / isHidden / alpha` 一并判掉：
+    /// 父层 `FoldControlLayer.hitTest` 现在直接问这个方法、不再自己按 frame 过滤， 少了这几个判断的话，一个隐藏掉的按钮也会把点击吃走。
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return false }
+        return bounds.inset(by: Self.hitOutset).contains(point)
     }
 }

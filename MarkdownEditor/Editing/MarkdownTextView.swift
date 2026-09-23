@@ -1232,7 +1232,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             foldControlLayer.addSubview(button)
         }
 
-        // ② 「⋯」占位符的点击热区：扫出所有打了 `.markdownCollapsedPlaceholder` 的字符
+        // ② 「⋯」那个圆角按钮：扫出所有打了 `.markdownCollapsedPlaceholder` 的字符（座位）， 按钮摆在座位上 —— 三个点和圆角框都是它画的，座位自己不画
         var placeholders: [(range: NSRange, info: CollapsedSectionInfo)] = []
         textStorage.enumerateAttribute(.markdownCollapsedPlaceholder, in: full, options: []) { value, range, _ in
             guard let info = value as? CollapsedSectionInfo else { return }
@@ -1246,7 +1246,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
                   let textRange = NSTextRange(location: start, end: end) else { continue }
 
             // 字符级矩形：和复选框同一套取法（`enumerateTextSegments`）。
-            // 「⋯」是 attachment，这个 API 给的正是它在行里占的那块矩形
+            // 座位是 attachment（只占位、一个像素都不画），这个 API 给的正是它在行里占的那块矩形
             var rect: CGRect?
             layoutManager.enumerateTextSegments(in: textRange, type: .standard, options: []) { _, segment, _, _ in
                 guard !segment.isNull else { return true }
@@ -1257,18 +1257,23 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
             // 坐标系换算（推导见 computeCodeBlockFrames 里的注释）：
             // TextKit 的矩形不含 textContainerInset，画在 textView 里要补回来；
-            // 再减掉 contentOffset 换成 viewport 坐标
+            // 再减掉 contentOffset 换成 viewport 坐标。
+            //
+            // ⚠️ 这里**不再**把矩形四周撑开当热区（老写法是 `insetBy(dx: -8, dy: -8)`）：
+            // 按钮自己就是画出来的那个圆角框，frame 一撑大框也跟着变大。
+            // 热区改由 `CollapsedSectionButton.point(inside:)` 向外放宽。
+            let height = theme.collapsedButtonHeight
             var frame = CGRect(x: rect.minX + textContainerInset.left,
-                               y: rect.minY + textContainerInset.top,
-                               width: rect.width,
-                               height: rect.height)
-            // 三个小圆点太窄了，热区上下左右各撑开一点才点得中
-            frame = frame.insetBy(dx: -8, dy: -8)
+                               // 框比整行矮，垂直居中贴到那行文字上
+                               y: rect.minY + textContainerInset.top + (rect.height - height) / 2,
+                               // 宽度**读主题**、不读 `rect.width`：座位就是按这个宽度留的空档，一个数管两处才盖得准（改主题宽度时座位和按钮一起变，不会出现按钮压住标题最后一个字）
+                               width: theme.collapsedPlaceholderWidth,
+                               height: height)
             frame.origin.x -= contentOffset.x
             frame.origin.y -= contentOffset.y
             guard frame.intersects(visible) else { continue }
 
-            let button = CollapsedSectionButton()
+            let button = CollapsedSectionButton(strokeColor: theme.collapsedPlaceholderColor)
             button.sectionID = entry.info.blockID
             button.frame = frame
             button.addTarget(self, action: #selector(collapsedSectionTapped(_:)), for: .touchUpInside)
