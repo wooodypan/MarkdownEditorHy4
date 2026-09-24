@@ -102,7 +102,13 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     // MARK: 状态
 
     /// 上一次同步给模型的渲染文本。textView 的实际内容和它 diff，就能定位用户改了哪一段。
-    private var lastSyncedString = ""
+    ///
+    /// ⚠️ 带 `didSet` 是为了顺手把「行号缓存」作废：凡是给它赋值的地方都是「内容变了」
+    /// （整篇替换、整篇重排、增量编辑、折叠切换），行号缓存正好该在这几种时机重算。
+    /// 写在这一处，就不用去那四个地方挨个补一行。
+    private var lastSyncedString = "" {
+        didSet { lineNumbersStale = true }
+    }
     /// 正在把模型改动写回 textView —— 这段时间内忽略 textViewDidChange，避免递归
     private(set) var isApplyingModelChange = false
     /// 上一次渲染时用的容器宽度，窗口尺寸变了要整篇重排
@@ -154,6 +160,33 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// `id` 是引用层的唯一标识，`level` 是嵌套深度（0 = 最外层）
     private var quoteBarFrames: [(id: Int, level: Int, frame: CGRect)] = []
 
+    // MARK: 行号（画在正文左边的装订线里，默认关闭）
+
+    /// 要不要显示行号。由 App 层的设置项（`MarkdownEditorSettings.showsLineNumbers`）驱动。
+    ///
+    /// ### 为什么开关放在这里、样式放在主题里
+    /// 「显不显示」是用户偏好（App 层的事），「画出来多宽、什么颜色」是样式（主题的活）。
+    /// 打开时它会把 `lineNumberGutterWidth` 加进 `textContainerInset.left`，
+    /// 正文整体右移，行号落在让出来的那条带子里 —— 不占正文的字符位。
+    var showsLineNumbers: Bool = false {
+        didSet {
+            guard showsLineNumbers != oldValue else { return }
+            updateTextContainerInsetIfNeeded()
+            // 关掉的瞬间要把号码清掉：不然会有一帧号码留在屏幕上
+            if !showsLineNumbers { lineNumberGutter.entries = [] }
+            setNeedsLayout()
+        }
+    }
+
+    /// 行号画在这一层上：和引用竖条同一层（在文字下面、不吃点击）。
+    ///
+    /// 不开 `private`：绘制逻辑在 `MarkdownTextView+LineNumbers.swift` 里，跨文件够不到 `private`
+    var lineNumberGutter = LineNumberGutterView()
+    /// 「每一行开头的字符偏移」的缓存。内容没变就一直复用（见 `lineStartOffsetsIfNeeded`）
+    var lineStartOffsets: [Int]?
+    /// 行号缓存是不是过期了（内容一变就要重算）。作废的时机见 `lastSyncedString` 的 `didSet`
+    var lineNumbersStale = true
+
     // MARK: 任务列表复选框（浮在 `[x]` / `[ ]` 旁边）
 
     /// 复选框所在的控件层，加在最上层，只让按钮吃点击
@@ -193,6 +226,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
         configureTextView()
         setupCodeBlockDecorations()
+        setupLineNumbers()
         setupSearchDecorations()
         setupFoldDecorations()
         setMarkdown(markdown)
@@ -234,6 +268,14 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private func setupSearchDecorations() {
         searchHighlightLayer.isUserInteractionEnabled = false
         insertSubview(searchHighlightLayer, aboveSubview: quoteBarLayer)
+    }
+
+    /// 铺行号那一层：夹在引用竖条下面、代码块背景上面，纯粹是陪衬，不许抢点击。
+    ///
+    /// 绘制和定位都在 `MarkdownTextView+LineNumbers.swift` 里，这里只管插队秩序
+    private func setupLineNumbers() {
+        lineNumberGutter.isUserInteractionEnabled = false
+        insertSubview(lineNumberGutter, aboveSubview: codeBlockBackgroundLayer)
     }
 
     // MARK: 点图片预览
@@ -421,7 +463,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 而设置 `textContainerInset` 会再触发一轮布局 —— 不判等就是死循环。
     private func updateTextContainerInsetIfNeeded() {
         let base: CGFloat = 16
+        // 左边两条装订线：行号（开着才占地方）+ 折叠三角（一直占）
         var left = base + renderer.theme.foldGutterWidth
+            + (showsLineNumbers ? renderer.theme.lineNumberGutterWidth : 0)
         var right = base
 
         if let limit = maxContentWidth {
@@ -461,6 +505,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         positionFoldControls()
         // 查找命中的黄块：只有当某一处滚进视野附近时才去 TextKit 那儿量它的矩形
         updateSearchHighlightsIfNeeded()
+        // 行号：按当前视口里排好版的那几行重画（关着的时候这里几乎不干事）
+        positionLineNumbers()
 
         // 容器宽度变了（转屏、Catalyst 拉窗口）→ 图片尺寸要跟着变，整篇重排一次
         let width = currentContainerWidth
@@ -510,6 +556,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             self?.positionCheckboxes()
             self?.positionFoldControls()
             self?.positionSearchHighlights()
+            self?.positionLineNumbers()
             // 2) 再要一轮布局：重算必须发生在 `layoutSubviews` 里（**在 super.layoutSubviews()
             //    之后**）—— TextKit 是在那一轮里更新 viewport 的，在滚动回调里直接算拿到的是
             //    上一次 viewport 的估算值，等于白算。重算逻辑见 refreshDecorationsNearViewport。
@@ -1639,6 +1686,31 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         let length = (text as NSString).length
         selectedRange = NSRange(location: min(max(0, caret), length), length: 0)
     }
+
+    // MARK: - 键盘快捷键（markdown 语法）
+
+    /// 快捷键清单。真正去改源码的那些方法在 `MarkdownTextView+Formatting.swift`。
+    ///
+    /// ### 为什么挂在 textView 上，而不是挂在内容页（ViewController）
+    /// 这些快捷键改的是**编辑器里的文字**：编辑器自己就够得着源码、光标和渲染管线，
+    /// 挂在外面反而要内容页反过来问它「你现在选了什么」。挂在这里还有个好处 ——
+    /// 这个组件被别的项目拿去用时，这套快捷键是自带的。
+    ///
+    /// ⚠️ 要带上 `super.keyCommands`：UITextView 自己也可能挂了一批快捷键，
+    /// 只返回自己的数组会把系统那批挤掉。
+    override var keyCommands: [UIKeyCommand]? {
+        (super.keyCommands ?? []) + Self.markdownKeyCommands
+    }
+
+    /// ⌘B 在 UITextView 里的默认动作是「给富文本加粗」—— 改的是渲染属性，不是 markdown 源码。
+    ///
+    /// markdown 的粗体是源码里的 `**`，所以这里把它接过来（系统的 Edit 菜单、
+    /// 富文本快捷键那条路也会走到这儿），改成往源码里插 `**`。
+    override func toggleBoldface(_ sender: Any?) { toggleBoldMarkdown() }
+    /// 同 `toggleBoldface`：⌘I → `*斜体*`
+    override func toggleItalics(_ sender: Any?) { toggleItalicMarkdown() }
+    /// 同 `toggleBoldface`：⌘U → `<u>下划线</u>`
+    override func toggleUnderline(_ sender: Any?) { toggleUnderlineMarkdown() }
 
     // MARK: - MarkdownAttachmentHost
 

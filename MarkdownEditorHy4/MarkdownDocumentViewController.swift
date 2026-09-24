@@ -474,6 +474,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 行宽是**编辑器自己的布局参数**，不走主题 ——
         // 主题管「文字长什么样」，行宽取决于窗口有多宽，是布局的事
         editor.maxContentWidth = settings.bodyContentWidthLimit.map { CGFloat($0) }
+        // 行号是编辑器自己的显示开关：改它会让左边的装订线占/让出一条带子，
+        // 正文宽度跟着变，所以放在 `refreshTheme()`（整篇重排）之前一起生效
+        editor.showsLineNumbers = settings.showsLineNumbers
         editor.refreshTheme()
     }
 

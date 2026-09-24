@@ -32,7 +32,7 @@ final class SettingsViewController: UIViewController {
     private enum Section: Int, CaseIterable {
         /// 正文字体与段落排版。放最上面：这是用户最常进来改的一组
         case typography
-        /// 阅读与大纲（开关类）
+        /// 阅读与显示（开关类）
         case reading
         /// 大纲面板多宽 / 多高 / 背景多透
         case outlineSize
@@ -44,7 +44,7 @@ final class SettingsViewController: UIViewController {
         var title: String {
             switch self {
             case .typography: return "正文排版"
-            case .reading: return "阅读位置"
+            case .reading: return "阅读与显示"
             case .outlineSize: return "大纲面板"
             case .tableLayout: return "表格列宽"
             case .imageSize: return "图片尺寸"
@@ -59,7 +59,8 @@ final class SettingsViewController: UIViewController {
                 return [.bodyFontSize, .lineHeightMultiple, .paragraphSpacing,
                         .paragraphIndentCharacters, .bodyContentWidth]
             case .reading:
-                return [.remembersScrollPosition]
+                // 行号放最上面：它是「一眼能看出开关有没有生效」的那一项
+                return [.showsLineNumbers, .remembersScrollPosition]
             case .outlineSize:
                 // 顺序就是界面上从上到下的顺序：宽度（怎么算 + 两个数值）、再高度（同样三行）、最后是背景多透。
                 // 两种模式的说明都要跟模式联动，所以每一组里「怎么算」放最上面
@@ -91,7 +92,9 @@ final class SettingsViewController: UIViewController {
         case paragraphIndentCharacters
         /// 正文栏宽上限（点），拖到最右端 = 不限
         case bodyContentWidth
-        // 阅读位置
+        // 阅读与显示
+        /// 正文左边要不要显示行号
+        case showsLineNumbers
         case remembersScrollPosition
         // 大纲面板：宽度
         /// 面板宽度按什么算（百分比 / 固定点数）
@@ -134,6 +137,8 @@ final class SettingsViewController: UIViewController {
                 return "段落首行缩进"
             case .bodyContentWidth:
                 return "行宽上限"
+            case .showsLineNumbers:
+                return "显示行号"
             case .remembersScrollPosition:
                 return "记住上次阅读位置"
             case .outlineWidthMode:
@@ -202,6 +207,11 @@ final class SettingsViewController: UIViewController {
                 return "一行最多排多宽。窗口比它宽时正文居中、两边留白"
                     + "（一行拉太长，读到行尾容易串行）；拖到最右边显示「不限」，"
                     + "正文就铺满整个窗口。"
+            case .showsLineNumbers:
+                return "打开：正文左边多出一条装订线，按**屏幕上看到的行**编号。"
+                    + "写长文、对着文档讨论「第几行」时有用；关掉则一点地方都不占。"
+                    + "行号数的是屏幕上那一行 —— 图片、表格在源码里占好几行、"
+                    + "在屏幕上只占一个字符位，所以行号和「源文件第几行」会错开。"
             case .remembersScrollPosition:
                 return "打开：关闭文件时记住读到哪儿，下次打开同一个文件回到原处。"
                     + "关闭：每次打开都从文档开头看起。目录大纲永远跟着光标走，不受这一项影响。"
@@ -303,6 +313,19 @@ final class SettingsViewController: UIViewController {
             }
         }
 
+
+        /// 开关类这一项现在是开还是关（滑块那几行走不到这里，`makeToggleCell` 才会用它）。
+        ///
+        /// ### 为什么不写成「按 tag 判断」
+        /// 每个开关行各自从配置里读自己那一项，加新开关就不用回来改一处集中判断 ——
+        /// 漏改的表现是「拨了开关没反应」，很难查
+        func isOn(in settings: MarkdownEditorSettings) -> Bool {
+            switch self {
+            case .showsLineNumbers: return settings.showsLineNumbers
+            case .remembersScrollPosition: return settings.remembersScrollPosition
+            default: return false
+            }
+        }
 
         /// 配置里这一项现在的值
         func currentValue(in settings: MarkdownEditorSettings) -> Double {
@@ -430,6 +453,8 @@ final class SettingsViewController: UIViewController {
     @objc private func switchChanged(_ sender: UISwitch) {
         guard let row = Row(rawValue: sender.tag) else { return }
         switch row {
+        case .showsLineNumbers:
+            settings.setShowsLineNumbers(sender.isOn)
         case .remembersScrollPosition:
             settings.setRemembersScrollPosition(sender.isOn)
         default:
@@ -500,7 +525,8 @@ final class SettingsViewController: UIViewController {
             settings.setImageWidthPoints(stepped)
         case .imageMaxHeight:
             settings.setImageMaxHeight(stepped)
-        case .remembersScrollPosition, .outlineWidthMode, .outlineHeightMode, .imageWidthMode:
+        case .showsLineNumbers, .remembersScrollPosition,
+             .outlineWidthMode, .outlineHeightMode, .imageWidthMode:
             // 这两行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
             // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
             // 编译器会直接报「switch must be exhaustive」逼你回来接上 ——
@@ -669,7 +695,7 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
         guard let row = row(at: indexPath) else { return UITableViewCell() }
 
         switch row {
-        case .remembersScrollPosition:
+        case .showsLineNumbers, .remembersScrollPosition:
             return makeToggleCell(for: row)
         case .outlineWidthMode:
             return makeOutlineWidthModeCell()
@@ -706,7 +732,7 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
 
         let toggle = UISwitch()
         toggle.tag = row.rawValue
-        toggle.isOn = settings.remembersScrollPosition
+        toggle.isOn = row.isOn(in: settings)
         toggle.addTarget(self, action: #selector(switchChanged(_:)), for: .valueChanged)
         toggle.accessibilityLabel = row.accessibilityLabel
         cell.accessoryView = toggle

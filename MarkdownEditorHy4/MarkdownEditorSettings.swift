@@ -105,6 +105,10 @@ final class MarkdownEditorSettings {
         /// 「记住目录大纲滚动位置」默认打开
         static let remembersScrollPosition = true
 
+        /// 「显示行号」默认**关闭**：对读代码 / 校对长文的人来说它有用，
+        /// 但默认打开会白占正文左边一条带子 —— 纯读文档的人不需要它
+        static let showsLineNumbers = false
+
         /// 大纲面板的默认外观 —— 「宽度默认多少点」这一项**从它读**，免得同一个数字在配置层和组件层各写一份（改了一边忘了另一边）。
         /// 只构造一次，别在下面反复访问
         static let outlineAppearance = MarkdownOutlineAppearance()
@@ -224,6 +228,8 @@ final class MarkdownEditorSettings {
     /// 不会因为「缺字段」整份解析失败、把所有设置一起丢回默认。
     private struct Payload: Codable {
         var remembersScrollPosition: Bool?
+        /// 正文左边要不要显示行号
+        var showsLineNumbers: Bool?
         /// 大纲宽度那一组。模式同样存字符串，理由见下面 `outlineHeightMode` 的注释
         var outlineWidthMode: String?
         var outlineWidthRatio: Double?
@@ -262,6 +268,13 @@ final class MarkdownEditorSettings {
     ///
     /// 关掉时以上三件事都不做 —— 大纲面板只在你手动滚它的时候才动，列表刷新后回到顶部。
     private(set) var remembersScrollPosition: Bool
+
+    /// 正文左边要不要显示行号。默认 `false`（关）。
+    ///
+    /// 打开时编辑器左边多出一条装订线，按**屏幕上看到的那一行的序号**编号
+    /// （渲染文本和源码不是一对一 —— 图片、表格只占一个字符位却吃掉一大段源码 ——
+    /// 所以行号数的是「屏幕上第几行」，不是「源文件第几行」）。
+    private(set) var showsLineNumbers: Bool
 
     /// 大纲面板的宽度按什么算，默认「固定宽度」。
     /// 两种模式的详细解释见 `OutlineWidthMode`
@@ -380,6 +393,14 @@ final class MarkdownEditorSettings {
     func setRemembersScrollPosition(_ value: Bool) {
         guard value != remembersScrollPosition else { return }
         remembersScrollPosition = value
+        save()
+        postChange()
+    }
+
+    /// 改「显示行号」。开关一拨，编辑器左边那条装订线当场出现 / 消失
+    func setShowsLineNumbers(_ value: Bool) {
+        guard value != showsLineNumbers else { return }
+        showsLineNumbers = value
         save()
         postChange()
     }
@@ -553,6 +574,7 @@ final class MarkdownEditorSettings {
         self.fileURL = fileURL
         // 先给一套默认值，再用盘上的内容覆盖 —— 这样「读文件失败」也能得到一份可用的配置
         self.remembersScrollPosition = Default.remembersScrollPosition
+        self.showsLineNumbers = Default.showsLineNumbers
         self.outlineWidthMode = Default.outlineWidthMode
         self.outlineWidthRatio = Default.outlineWidthRatio
         self.outlineWidthPoints = Default.outlineWidthPoints
@@ -586,6 +608,7 @@ final class MarkdownEditorSettings {
         guard let data = try? Data(contentsOf: fileURL) else { return }
         guard let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return }
         if let value = payload.remembersScrollPosition { remembersScrollPosition = value }
+        if let value = payload.showsLineNumbers { showsLineNumbers = value }
         // 宽度那一组：模式和高度一样存字符串，认不出来就只让这一项退回默认
         if let raw = payload.outlineWidthMode, let value = OutlineWidthMode(rawValue: raw) {
             outlineWidthMode = value
@@ -648,6 +671,7 @@ final class MarkdownEditorSettings {
 
     private func save() {
         let payload = Payload(remembersScrollPosition: remembersScrollPosition,
+                              showsLineNumbers: showsLineNumbers,
                               outlineWidthMode: outlineWidthMode.rawValue,
                               outlineWidthRatio: outlineWidthRatio,
                               outlineWidthPoints: outlineWidthPoints,

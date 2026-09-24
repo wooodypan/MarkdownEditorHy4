@@ -2,6 +2,26 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+<!-- 文档类型：让 Finder 在 .md 上右键「打开方式」里列出本 App -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Markdown Document</string>
+			<!-- Editor = 可读可写；Viewer = 只读。我们要能存回去，所以用 Editor -->
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<!-- Alternate = 只出现在「打开方式」菜单，不抢别的 App 的默认关联；
+			     想让 .md 默认就由本 App 打开，把这里改成 Default -->
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>net.daringfireball.markdown</string>
+				<string>public.plain-text</string>
+			</array>
+		</dict>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -23,41 +43,25 @@
 			</array>
 		</dict>
 	</dict>
-
-	<!-- 文档类型：让 Finder 在 .md 上右键「打开方式」里列出本 App -->
-	<key>CFBundleDocumentTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleTypeName</key>
-			<string>Markdown Document</string>
-			<!-- Editor = 可读可写；Viewer = 只读。我们要能存回去，所以用 Editor -->
-			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
-			<!-- Alternate = 只出现在「打开方式」菜单，不抢别的 App 的默认关联；
-			     想让 .md 默认就由本 App 打开，把这里改成 Default -->
-			<key>LSHandlerRank</key>
-			<string>Alternate</string>
-			<key>LSItemContentTypes</key>
-			<array>
-				<string>net.daringfireball.markdown</string>
-				<string>public.plain-text</string>
-			</array>
-		</dict>
-	</array>
-
+	<!-- 把 App 的 Documents 目录摆到「文件」App 里（iPhone / iPad 上的
+	     「我的 iPhone → MarkdownEditorHy4」）。
+	     开了沙盒之后，往容器里放文件 / 取文件都得有个正经入口，这就是那个入口。
+	     Mac 上没有「文件」App 这一套，这一项对 Mac 不起作用。 -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
 	<!-- UTI 声明：macOS 认识 net.daringfireball.markdown，iOS 不认识，这里补一份。
 	     系统已有的声明优先级更高，重复声明不会冲突。 -->
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>net.daringfireball.markdown</string>
-			<key>UTTypeDescription</key>
-			<string>Markdown Document</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.plain-text</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>Markdown Document</string>
+			<key>UTTypeIdentifier</key>
+			<string>net.daringfireball.markdown</string>
 			<key>UTTypeReferenceURL</key>
 			<string>https://daringfireball.net/projects/markdown/</string>
 			<key>UTTypeTagSpecification</key>
@@ -80,13 +84,6 @@
 
 	<!-- 允许直接编辑原文件（配合安全作用域书签），而不是先拷一份副本 -->
 	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
-
-	<!-- 把 App 的 Documents 目录摆到「文件」App 里（iPhone / iPad 上的
-	     「我的 iPhone → MarkdownEditorHy4」）。
-	     开了沙盒之后，往容器里放文件 / 取文件都得有个正经入口，这就是那个入口。
-	     Mac 上没有「文件」App 这一套，这一项对 Mac 不起作用。 -->
-	<key>UIFileSharingEnabled</key>
 	<true/>
 </dict>
 </plist>

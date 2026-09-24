@@ -127,6 +127,32 @@ struct MarkdownTheme {
     ///
     /// ⚠️ 为什么不跟字号：行高是随字号变的，按钮要是跟着变，用户在设置页拖字号时 这个「控件」会忽大忽小，看着就不像个按钮了。宽度不用另给一个数 —— 就是 `collapsedPlaceholderWidth`。
     var collapsedButtonHeight: CGFloat = 20
+
+    // MARK: 行号（开关在 App 层的设置里，这里只管「画出来长什么样」）
+
+    /// 左边行号装订线的宽度（只有「显示行号」打开时才占这块地方）。
+    ///
+    /// 和折叠三角那条装订线（`foldGutterWidth`）是同一个套路：这个宽度会被加进
+    /// `textContainerInset.left`，所以行号**不占正文的字符位** —— 正文左边缘仍然是
+    /// 整齐的一条线，行号画在它左边的带子里。
+    var lineNumberGutterWidth: CGFloat = 46
+    /// 行号的颜色。默认用系统的三级标签色（浅灰），浅色/深色模式下都看得清又不抢眼
+    var lineNumberColor: UIColor = .tertiaryLabel
+    /// 行号右边缘和正文（严格说是和折叠三角那条带子）之间留的空
+    var lineNumberTrailingGap: CGFloat = 10
+    /// 行号的字体：比正文小 2 号的**等宽数字**。
+    ///
+    /// ### 为什么必须是等宽数字
+    /// 行号是竖着排成一列的，数字不等宽的话「1」和「8」的宽度不一样，
+    /// 一列号码会左右参差。等宽数字让每个字符占一样的宽，右对齐时才是一条直线。
+    ///
+    /// ### 为什么是计算属性而不是存一个 `UIFont`
+    /// 字号是从 `bodyFont` **派生**出来的，用户在设置页拖正文字号时要跟着变。
+    /// 存一份就得在 `applyBodyFontSize` 里同步一份，漏一处就会「字号变了行号没变」。
+    var lineNumberFont: UIFont {
+        UIFont.monospacedDigitSystemFont(ofSize: max(9, bodyFont.pointSize - 2), weight: .regular)
+    }
+
     /// 是否显示「源码提示」：图片下面那行 `![alt](url)`、圆点后面的 `- `
     var showsSourceHints: Bool = true
     /// 代码块的 **``` 围栏行**（第一行 ```lang 和最后一行 ```）要不要跟着正文一起铺淡灰背景。
