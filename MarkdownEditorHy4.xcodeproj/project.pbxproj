@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		3B1B7821305990CB0021A784 /* MultiTabController in Frameworks */ = {isa = PBXBuildFile; productRef = 3B1B7820305990CB0021A784 /* MultiTabController */; };
+		3B55D4993065740E001100BF /* SwiftMath in Frameworks */ = {isa = PBXBuildFile; productRef = 3B55D4983065740E001100BF /* SwiftMath */; };
 		AA0000000000000000000004 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000003 /* Markdown */; };
 /* End PBXBuildFile section */
 
@@ -77,6 +78,7 @@
 			files = (
 				3B1B7821305990CB0021A784 /* MultiTabController in Frameworks */,
 				AA0000000000000000000004 /* Markdown in Frameworks */,
+				3B55D4993065740E001100BF /* SwiftMath in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -141,6 +143,7 @@
 			packageProductDependencies = (
 				AA0000000000000000000003 /* Markdown */,
 				3B1B7820305990CB0021A784 /* MultiTabController */,
+				3B55D4983065740E001100BF /* SwiftMath */,
 			);
 			productName = MarkdownEditorHy4;
 			productReference = 3B41EA4A304497FB00F4E5EA /* MarkdownEditorHy4.app */;
@@ -226,6 +229,7 @@
 			packageReferences = (
 				AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */,
 				3B1B781F305990CB0021A784 /* XCRemoteSwiftPackageReference "iOSDemoHub" */,
+				3B55D4973065740E001100BF /* XCRemoteSwiftPackageReference "SwiftMath" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3B41EA4B304497FB00F4E5EA /* Products */;
@@ -636,6 +640,14 @@
 				minimumVersion = 1.0.1;
 			};
 		};
+		3B55D4973065740E001100BF /* XCRemoteSwiftPackageReference "SwiftMath" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mgriebling/SwiftMath.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.7.3;
+			};
+		};
 		AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/swiftlang/swift-markdown.git";
@@ -651,6 +663,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 3B1B781F305990CB0021A784 /* XCRemoteSwiftPackageReference "iOSDemoHub" */;
 			productName = MultiTabController;
+		};
+		3B55D4983065740E001100BF /* SwiftMath */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3B55D4973065740E001100BF /* XCRemoteSwiftPackageReference "SwiftMath" */;
+			productName = SwiftMath;
 		};
 		AA0000000000000000000003 /* Markdown */ = {
 			isa = XCSwiftPackageProductDependency;

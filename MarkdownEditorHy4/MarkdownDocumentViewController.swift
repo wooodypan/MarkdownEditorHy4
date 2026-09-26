@@ -124,6 +124,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 粘贴的图片存到 Documents，bundle 里的 sample.png 走兜底逻辑也能找到
         editor.imageBaseURL = FileManager.default.urls(for: .documentDirectory,
                                                        in: .userDomainMask).first
+        // 装上公式渲染器：有这一行，`$...$` / `$$...$$` 才会被渲染成公式图。
+        // 没有也照样能用 —— 编辑器组件本身不认识任何公式引擎，
+        // 没注入的时候公式就按源码原文显示（这是给将来开源出去留的默认降级）
+        editor.renderer.mathRenderer = SwiftMathRenderer.shared
         view.addSubview(editor)
 
         bottomConstraint = editor.bottomAnchor.constraint(equalTo: view.bottomAnchor)

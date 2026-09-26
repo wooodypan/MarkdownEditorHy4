@@ -203,6 +203,9 @@ struct MarkdownTheme {
     /// 任务列表（`- [x] xxx`）的样式
     var taskList = TaskListStyle()
 
+    /// 数学公式（`$...$` / `$$...$$`）的样式，见 `MathStyle`
+    var math = MathStyle()
+
     // MARK: 默认样式
 
     static var `default`: MarkdownTheme {
@@ -416,6 +419,22 @@ struct MarkdownTheme {
         style.paragraphSpacing = paragraphSpacing + 4
         return style
     }
+
+    /// 块级公式（`$$...$$`）的段落样式：**居中**，上下各留一点呼吸。
+    ///
+    /// ### 为什么不能直接用上面那个 `blockAttachmentParagraphStyle`
+    /// 图片是「铺在正文里的一块」，跟着缩进左对齐；公式块是「单独列出的一个式子」，
+    /// 课本里那套排版惯例是居中。另外它的高度可能比一行正文高不少，
+    /// 段前段后各留一点才不会顶着上下的段落。
+    func mathBlockParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.headIndent = indent
+        style.firstLineHeadIndent = indent
+        style.paragraphSpacingBefore = math.blockSpacingBefore
+        style.paragraphSpacing = math.blockSpacingAfter
+        return style
+    }
 }
 
 // MARK: - 图片样式
@@ -450,6 +469,40 @@ extension MarkdownTheme {
 
         /// 最大高度（点），默认 `420`。只防「一张长图撑爆屏幕」，正常大小的图碰不到它。
         var maxHeight: CGFloat = 420
+    }
+}
+
+// MARK: - 公式样式
+
+extension MarkdownTheme {
+    /// 数学公式的样式。
+    ///
+    /// 这里只管「公式本身的排版参数」（多大、多宽、留多少空），**不管公式长什么样** ——
+    /// 那件事由注入进来的 `MarkdownMathRenderer` 决定。
+    struct MathStyle {
+        /// 行内公式的字号 = 正文字号 × 这个倍率。
+        ///
+        /// 默认 `1.0`：行内公式应该和周围文字一般大，大了会把行高撑开、
+        /// 小了看着像下标。
+        var inlineFontScale: CGFloat = 1.0
+
+        /// 块级公式的字号 = 正文字号 × 这个倍率。
+        ///
+        /// 默认 `1.15`：单独列出的式子比正文略大一号，才像「被列出来重点强调的东西」，
+        /// 这也是 LaTeX 里 display style 的默认观感。
+        var blockFontScale: CGFloat = 1.15
+
+        /// 块级公式最多占容器宽度的比例，默认 `0.9`。
+        ///
+        /// 留一点边距：一条刚好撑满宽度的式子看着像要溢出屏幕，
+        /// 两边各让出 5% 会明显舒服些。超宽的式子会**等比缩小**（不会换行、也不会拉糊）。
+        var maxWidthRatio: CGFloat = 0.9
+
+        /// 块级公式上方的留白（点），默认 `12`（和正文的段落间距一致）
+        var blockSpacingBefore: CGFloat = 12
+
+        /// 块级公式下方的留白（点），默认 `12`
+        var blockSpacingAfter: CGFloat = 12
     }
 }
 

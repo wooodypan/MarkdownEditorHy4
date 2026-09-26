@@ -44,6 +44,20 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     /// 精确解析器，只要实现同一个协议塞进来就行，UI 层一行都不用改。
     var codeHighlighter: CodeHighlighting? = SimpleCodeHighlighter()
 
+    /// 公式渲染器（`MarkdownMathRenderer`）。给 nil 就**不渲染**公式 ——
+    /// `$x^2$` 会按源码原文连 `$` 一起显示，功能降级但不会出错。
+    ///
+    /// ### 为什么不直接依赖 SwiftMath
+    /// `MarkdownEditor` 是要单独开源给别人用的库，而 LaTeX 排版只能靠第三方库
+    /// （本项目用 SwiftMath）。直接 import 的话，**所有**用这个库的人都被迫拖上这个依赖，
+    /// 哪怕他一篇公式都不写。做成注入之后：库本身保持零第三方依赖，
+    /// 想要公式的人实现这个协议塞进来，不想要的人什么都不用做。
+    /// 详见 `MarkdownMathRenderer.swift` 里的说明。
+    ///
+    /// （挂在**这里**而不是 `MarkdownTextView` 上，理由同 `codeHighlighter`：
+    /// 公式是在「AST → 富文本」这一步变成图的，而这一步就是这里做的。）
+    var mathRenderer: MarkdownMathRenderer?
+
     // MARK: 当前块的上下文（只在 render(blockSource:) 执行期间有效）
 
     private var source: String = ""
@@ -55,6 +69,10 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     private var indent: CGFloat = 0
     /// 正在列表项内部：段落样式由列表项统一设置，段落自己不要重复设置
     private var isInsideListItem = false
+    /// 当前列表的嵌套层数：顶层列表是 0，它里面的子列表是 1，以此类推。
+    /// 拿它决定列表标记画成实心圆 / 空心圆 / 方块（跟 GitHub 一致），见 `BulletAttachment.Shape.at(depth:)`。
+    /// ⚠️ 别拿 `indent / theme.listIndent` 反推层数：任务列表项的缩进是 `max(listIndent, 任务标记宽度)`，除不尽会算错层。
+    private var listDepth = 0
     /// 当前所处的引用嵌套链（每进一层 BlockQuote 追加一项，见 QuoteChain 的注释）
     private var quoteChain: QuoteChain = QuoteChain(ids: [])
     /// 本次渲染的块在整篇文档里的起始偏移（给引用链 ID 加盐，见 render 的注释）
@@ -105,6 +123,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         self.currentTextColor = theme.textColor
         self.indent = 0
         self.isInsideListItem = false
+        self.listDepth = 0
         self.quoteChain = QuoteChain(ids: [])
     }
 
@@ -114,6 +133,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         fontStack = []
         indent = 0
         isInsideListItem = false
+        listDepth = 0
         quoteChain = QuoteChain(ids: [])
         blockOrigin = 0
     }
@@ -143,10 +163,132 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
 
     func visitText(_ text: Text) -> RenderedFragment {
         // 优先用源码原文：这样 `\*` 这种转义会原样显示，也保证渲染串长度和源码范围严格一致
-        if let range = localRange(of: text) {
+        guard let range = localRange(of: text) else {
+            return .sourceSliced(text.string, sourceStart: -1, attributes: bodyAttributes)
+        }
+        let raw = sourceText(in: range)
+
+        // 只有「注入了公式渲染器」且「这段文字里有 $」才去扫 ——
+        // 绝大多数正文不含 `$`，这个提前返回能省掉一个大扫描
+        guard mathRenderer != nil, raw.contains("$") else {
+            return .sourceSliced(raw, sourceStart: range.location, attributes: bodyAttributes)
+        }
+        return renderTextWithMath(raw, in: range)
+    }
+
+    // MARK: 数学公式
+
+    /// 把一段文字里夹着的公式渲染成图，其余部分原样保留。
+    ///
+    /// ### 为什么不一次性判断、而是先切片段
+    /// 一段文字里可以有好几个公式（`由 $a$ 推得 $b$`），也可能一个都没有
+    /// （`$ 100`）。扫描器把文字切成「普通文字 / 公式」两种片段，
+    /// 逐个处理既不用假设位置，也不用担心公式之间互相干扰。
+    private func renderTextWithMath(_ raw: String, in range: NSRange) -> RenderedFragment {
+        var out = RenderedFragment.empty
+        let localScope = NSRange(location: 0, length: (raw as NSString).length)
+
+        for segment in MarkdownMathScanner.scan(raw as NSString, in: localScope) {
+            switch segment {
+            case .plain(let local):
+                // 扫描器给的是相对 `raw` 的坐标，加回这段在块源码里的起点
+                let piece = NSRange(location: local.location + range.location, length: local.length)
+                out.append(.sourceSliced(sourceText(in: piece),
+                                         sourceStart: piece.location,
+                                         attributes: bodyAttributes))
+
+            case .math(let localWhole, let localLatex, let mode):
+                let whole = NSRange(location: localWhole.location + range.location,
+                                    length: localWhole.length)
+                let latex = NSRange(location: localLatex.location + range.location,
+                                    length: localLatex.length)
+                // 行内公式跟着正文走：最宽也不能超过这一行剩下能用的宽度
+                let availableWidth = max(60, containerWidth - indent - 16)
+                out.append(renderMath(range: whole,
+                                      latexRange: latex,
+                                      mode: mode,
+                                      maxWidth: availableWidth))
+            }
+        }
+        return out
+    }
+
+    /// 渲染一条公式：拿不到图就**退化成源码原文**（`$...$` 连符号一起显示）。
+    ///
+    /// ### 为什么拿不到图时是「显示源码」而不是「画个错误提示」
+    /// 这是编辑器，用户会边打边看：`\frac{` 刚敲到一半，这一瞬间它必然是非法 LaTeX。
+    /// 如果这时弹一个红色报错框，用户每敲一个字符都会被闪一下。
+    /// 退化成源码原文最省心 —— 至少用户能看见自己写了什么（和图片加载不出来时的处理一致）。
+    private func renderMath(range: NSRange,
+                            latexRange: NSRange,
+                            mode: MarkdownMathMode,
+                            maxWidth: CGFloat) -> RenderedFragment {
+        guard let mathRenderer else {
             return .sourceSliced(sourceText(in: range), sourceStart: range.location, attributes: bodyAttributes)
         }
-        return .sourceSliced(text.string, sourceStart: -1, attributes: bodyAttributes)
+
+        // 块级公式的正文前后常带换行（`$$\nE=mc^2\n$$`），排版用不上，去掉再交给引擎 ——
+        // 顺带让「同一条公式换个换行写法」也命中同一份缓存
+        let latexText = sourceText(in: latexRange).trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = MarkdownMathRequest(
+            latex: latexText,
+            fontSize: theme.bodyFont.pointSize
+                * (mode == .block ? theme.math.blockFontScale : theme.math.inlineFontScale),
+            textColor: currentTextColor,
+            mode: mode
+        )
+
+        guard let image = mathRenderer.image(for: request),
+              image.size.width > 0, image.size.height > 0 else {
+            return .sourceSliced(sourceText(in: range), sourceStart: range.location, attributes: bodyAttributes)
+        }
+
+        let attachment = MathAttachment(image: image, font: currentFont, mode: mode, maxWidth: maxWidth)
+        return .attachment(attachment,
+                           sourceStart: range.location,
+                           sourceLength: range.length,
+                           attributes: [.font: currentFont])
+    }
+
+    /// 这一整段是不是「就一条块级公式」（`$$\n a=b \n$$`）。
+    ///
+    /// 允许两侧有空白 / 换行，但**除此之外不能有别的内容** ——
+    /// `$$a$$ 和 $$b$$` 这种写法要保持原段落的样子，不能抽走一半。
+    private func wholeBlockMath(in range: NSRange) -> (whole: NSRange, latex: NSRange)? {
+        var result: (NSRange, NSRange)?
+        for segment in MarkdownMathScanner.scan(source as NSString, in: range) {
+            switch segment {
+            case .plain(let piece):
+                guard sourceText(in: piece).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+            case .math(let whole, let latex, let mode):
+                guard mode == .block, result == nil else { return nil }
+                result = (whole, latex)
+            }
+        }
+        return result
+    }
+
+    /// 块级公式：独占一块、居中，下面照例弱化一行源码方便对照（和图片同一套做法）。
+    private func renderBlockMath(whole: NSRange, latex: NSRange) -> RenderedFragment {
+        let availableWidth = max(60, containerWidth - indent - 16)
+        let maxWidth = max(60, availableWidth * theme.math.maxWidthRatio)
+        let style = theme.mathBlockParagraphStyle(indent: indent)
+
+        var out = RenderedFragment.empty
+        out.append(renderMath(range: whole, latexRange: latex, mode: .block, maxWidth: maxWidth))
+        out.setAttributes([.paragraphStyle: style, .font: theme.bodyFont])
+
+        if theme.showsSourceHints {
+            out.append(.decoration("\n", attributes: [.paragraphStyle: style, .font: theme.bodyFont]))
+            var hintAttributes = theme.markerAttributes
+            hintAttributes[.paragraphStyle] = style
+            out.append(.sourceHint(sourceText(in: whole),
+                                   sourceStart: whole.location,
+                                   attributes: hintAttributes))
+        }
+        return out
     }
 
     /// 段落里的软换行（`1\n这是…` 中间那个换行）。
@@ -391,6 +533,12 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     // MARK: 块级节点
 
     func visitParagraph(_ paragraph: Paragraph) -> RenderedFragment {
+        // 整段就是一条块级公式时走专门那一路（居中、独占一块），别混进普通段落的处理
+        if let range = localRange(of: paragraph),
+           let pieces = wholeBlockMath(in: range) {
+            return renderBlockMath(whole: pieces.whole, latex: pieces.latex)
+        }
+
         let wasInsideListItem = isInsideListItem
         isInsideListItem = false
         defer { isInsideListItem = wasInsideListItem }
@@ -710,9 +858,11 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             } else {
                 // 无序列表：圆点 attachment 占 1 个字符位，但映射到源码里的 `- ` 这段，
                 // 于是「复制还原」和「退格降级」两个行为自动就对了。
+                // 形状按嵌套层数换（实心圆 → 空心圆 → 方块），跟 GitHub 渲染的规矩一致。
                 let bullet = BulletAttachment(diameter: theme.bulletDiameter,
                                               color: theme.bulletColor,
-                                              font: theme.bodyFont)
+                                              font: theme.bodyFont,
+                                              shape: .at(depth: listDepth))
                 out.append(.attachment(bullet,
                                        sourceStart: markerRange.location,
                                        sourceLength: markerRange.length,
@@ -732,9 +882,13 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         let savedInsideListItem = isInsideListItem
         indent = contentIndent
         isInsideListItem = true
+        // 进子内容前先把层数 +1：这样嵌套在里面的子列表（它是 item.children 的一员）渲染时
+        // 读到的 `listDepth` 就是它自己的层数，画出来的标记形状才是「下一级」的那一个
+        listDepth += 1
         for child in item.children {
             out.append(visit(child))
         }
+        listDepth -= 1
         isInsideListItem = savedInsideListItem
         indent = markerIndent
 

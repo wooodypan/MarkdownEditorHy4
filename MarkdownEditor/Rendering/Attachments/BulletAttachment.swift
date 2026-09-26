@@ -18,45 +18,99 @@ import UIKit
 /// 2. **退格自然**：光标停在圆点后面按退格，删掉的就是 `- ` 这两个源码字符，列表项自动降级成普通段落，
 ///    不需要为退格键写任何特殊逻辑。
 final class BulletAttachment: NSTextAttachment {
+    /// 圆点画成什么样子。跟 GitHub 渲染 markdown 的规矩一致：**按嵌套层数轮换** ——
+    /// 一级列表是实心圆、二级是空心圆、三级是实心方块，再往下又从头开始（实心圆 → 空心圆 → 方块……）。
+    ///
+    /// 这么换是为了「一眼看出这是第几层」：三层列表都用一个样子的圆点，缩进一多就分不清自己在哪一层了。
+    enum Shape: Equatable {
+        /// 实心圆（一级）
+        case disc
+        /// 空心圆：只画一圈边，中间是空的（二级）
+        case circle
+        /// 实心方块（三级）
+        case square
+
+        /// 第 `depth` 层列表该用哪个形状。顶层列表的 `depth` 是 0。
+        /// 超过三层就 `% 3` 循环，跟 GitHub 一样。
+        static func at(depth: Int) -> Shape {
+            switch max(0, depth) % 3 {
+            case 0: return .disc
+            case 1: return .circle
+            default: return .square
+            }
+        }
+    }
+
     let diameter: CGFloat
     let color: UIColor
+    /// 画成实心圆 / 空心圆 / 方块（见 `Shape` 的注释）
+    let shape: Shape
 
     /// 圆点右边留出的间距（紧贴 `-[空格]` 的那个位置，让圆点和 `-` 之间有点呼吸感）
     private static let trailingGap: CGFloat = 2
+    /// 空心圆那一圈边的粗细，按直径的比例算（直径 12 时约 1.4 点，和实心圆一样「重」）
+    private static let hollowLineRatio: CGFloat = 0.12
+    /// 方块边长相对直径的比例：同样边长的方块看着比圆点「实」，缩一点视觉重量才跟圆点差不多
+    private static let squareRatio: CGFloat = 0.78
 
     /// 原因见 `MarkdownBlock` 里 `nonisolated deinit` 的注释：
     /// 隔离 deinit 一旦嵌套就会踩 Swift 6.2 运行时的野指针 free。
     nonisolated deinit {}
 
-    init(diameter: CGFloat, color: UIColor, font: UIFont) {
+    init(diameter: CGFloat, color: UIColor, font: UIFont, shape: Shape) {
         self.diameter = diameter
         self.color = color
+        self.shape = shape
         super.init(data: nil, ofType: nil)
 
         // bounds 的 y 是相对文本基线、向上为正的偏移。
         // 想让圆点垂直居中对齐文字的大写字母高度，就让它的中心落在 capHeight 的一半处：
         //   中心 = y + 高度/2 = capHeight/2   ==>   y = (capHeight - 高度) / 2
         let y = (font.capHeight - diameter) / 2
+        // 宽度恒为「直径 + 间距」：三种形状的占位宽度一样，换形状时正文不会左右抖
         bounds = CGRect(x: 0, y: y, width: diameter + Self.trailingGap, height: diameter)
 
         // 直接给一张画好的圆点图，让 TextKit 当普通文本元素画出来。
         // 不用 view provider 的原因见 ImageAttachment 的注释（那种方式在整篇替换后会「圆点消失」）。
-        self.image = Self.circleImage(diameter: diameter, color: color, gap: Self.trailingGap)
+        self.image = Self.markerImage(diameter: diameter, color: color,
+                                      gap: Self.trailingGap, shape: shape)
     }
 
     required init?(coder: NSCoder) {
         fatalError("BulletAttachment 不支持从 coder 解档")
     }
 
-    /// 画一个实心圆点，右边留 `gap` 的空白
-    private static func circleImage(diameter: CGFloat, color: UIColor, gap: CGFloat) -> UIImage {
+    /// 画列表标记，右边留 `gap` 的空白。三种形状共用同一块画布，形状只影响「在这块画布里怎么画」。
+    private static func markerImage(diameter: CGFloat, color: UIColor,
+                                    gap: CGFloat, shape: Shape) -> UIImage {
         let size = CGSize(width: diameter + gap, height: diameter)
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = UIScreen.main.scale     // 按屏幕倍率出图，圆点边缘才不会糊
+        format.opaque = false                  // 空心圆中间要能透出背景色，画布不能是不透明的
         return UIGraphicsImageRenderer(size: size, format: format).image { context in
-            color.setFill()
-            // 圆点靠左，右边那段是间距
-            context.cgContext.fillEllipse(in: CGRect(x: 0, y: 0, width: diameter, height: diameter))
+            switch shape {
+            case .disc:
+                color.setFill()
+                // 实心圆靠左，右边那段是间距
+                context.cgContext.fillEllipse(in: CGRect(x: 0, y: 0, width: diameter, height: diameter))
+
+            case .circle:
+                // 空心圆：只描一圈边。描边是「骑」在路径上的（一半在里一半在外），
+                // 所以要把圆往里缩半个线宽，否则边会被画布裁掉一圈，看着比实心圆大。
+                let lineWidth = max(1, diameter * hollowLineRatio)
+                let inset = lineWidth / 2
+                color.setStroke()
+                context.cgContext.setLineWidth(lineWidth)
+                context.cgContext.strokeEllipse(
+                    in: CGRect(x: inset, y: inset,
+                               width: diameter - lineWidth, height: diameter - lineWidth))
+
+            case .square:
+                // 实心方块：比直径小一点（见 `squareRatio` 的注释），并且在这块画布里上下居中
+                let side = diameter * squareRatio
+                color.setFill()
+                context.fill(CGRect(x: 0, y: (diameter - side) / 2, width: side, height: side))
+            }
         }
     }
 }
