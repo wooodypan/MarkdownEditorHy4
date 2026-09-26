@@ -1270,7 +1270,6 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             let button = FoldDisclosureButton()
             button.anchor = anchor.info
             button.apply(isCollapsed: anchor.info.isCollapsed)
-            print("==========",line.midY)
             button.frame = CGRect(x: x,
                                   y: line.midY + side/2 - 5,
                                   width: side,
@@ -1310,9 +1309,20 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             // 按钮自己就是画出来的那个圆角框，frame 一撑大框也跟着变大。
             // 热区改由 `CollapsedSectionButton.point(inside:)` 向外放宽。
             let height = theme.collapsedButtonHeight
+            // 垂直对齐：按钮**底边**贴基线（= x 的底部），不是行盒底（那含 j 的降部）。
+            // ⚠️ 座位 `.standard` 段矩形的 maxY 是**行盒底**（行高含降部深），不是基线 —— 别拿它当基线用。
+            //    真基线要从行片段算：片段原点 + 行原点 + `glyphOrigin.y`（行顶 → 基线的距离）。
+            //    实测 H1：行盒 38 = 31(基线) + 7(降部)，`glyphOrigin.y` 正是那个 31。
+            //    座位在标题行末尾，标题若折行它在**最后一行**，所以取 last 不取 first。
+            var baselineY = rect.maxY   // 行片段还没排版好时的退路：按行盒底摆，下个布局周期会被摆正
+            if let seatFragment = layoutManager.textLayoutFragment(for: start),
+               let seatLine = seatFragment.textLineFragments.last {
+                baselineY = seatFragment.layoutFragmentFrame.minY
+                          + seatLine.typographicBounds.minY
+                          + seatLine.glyphOrigin.y
+            }
             var frame = CGRect(x: rect.minX + textContainerInset.left,
-                               // 框比整行矮，垂直居中贴到那行文字上
-                               y: rect.minY + textContainerInset.top + (rect.height - height) / 2,
+                               y: baselineY - height + textContainerInset.top,
                                // 宽度**读主题**、不读 `rect.width`：座位就是按这个宽度留的空档，一个数管两处才盖得准（改主题宽度时座位和按钮一起变，不会出现按钮压住标题最后一个字）
                                width: theme.collapsedPlaceholderWidth,
                                height: height)

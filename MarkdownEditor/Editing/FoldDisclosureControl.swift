@@ -92,11 +92,13 @@ final class CollapsedSectionButton: UIButton {
     private static let borderWidth: CGFloat = 1.5
     /// 热区在框的四周各向外撑出多少（**负数 = 向外**）。
     ///
-    /// 框只有 20 点高，正好按着框点太考验准头，所以上下右各撑 10 点。
+    /// 框只有 20 点高，正好按着框点太考验准头，所以下右各撑 10 点。
     /// ⚠️ 左边只撑 4 点：座位紧贴在标题文字最后面，左边撑多了会把「点最后一个字放光标」也抢走。
+    /// ⚠️ 上方撑 6 点就够：按钮现在是**底边贴基线**摆的，框顶已经贴近标题字迹，
+    ///    上边再撑多就是把「点这行文字放光标」从正文手里抢走。
     ///
     /// ⚠️ 也不许靠放大 `frame` 来撑热区 —— 这个按钮自己就是画出来的那个框，`frame` 一放大框也跟着变大。
-    private static let hitOutset = UIEdgeInsets(top: -10, left: -4, bottom: -10, right: -10)
+    private static let hitOutset = UIEdgeInsets(top: -6, left: -4, bottom: -10, right: -10)
     /// 「⋯」的字号。比正文小一点，三个点才不会在 20 点高的框里顶到上下边
     private static let titlePointSize: CGFloat = 13
 
