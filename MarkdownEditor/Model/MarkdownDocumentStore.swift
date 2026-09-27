@@ -458,6 +458,11 @@ final class MarkdownDocumentStore {
             block.headingLevel = heading.level
             block.headingTitle = heading.plainText
         }
+        // 代码块标记：列表续写要靠它整块排除（理由见 `MarkdownBlock.isCodeBlock` 的注释）。
+        // 和标题一样是「AST 就在手上顺手取一次」，零成本。
+        if ast is CodeBlock {
+            block.isCodeBlock = true
+        }
         // 折叠三角**不在这里打**：它只挂在标题上，而「这个标题下面有没有东西可折」
         // 要等所有块都建好才知道（见 `refreshCollapseState` 的注释）。
         return block
