@@ -163,9 +163,10 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
 
     func visitText(_ text: Text) -> RenderedFragment {
         // 优先用源码原文：这样 `\*` 这种转义会原样显示，也保证渲染串长度和源码范围严格一致
-        guard let range = localRange(of: text) else {
-            return .sourceSliced(text.string, sourceStart: -1, attributes: bodyAttributes)
-        }
+        //
+        // ⚠️ 拿不到范围时必须返回空，不能返回 `text.string`（跟 `visitSoftBreak` 是同一个坑）
+        // cmark 给「懒惰延续」里的文字标的范围是**退化的** —— 比如源码 `- 1⏎- 2⏎3` 里，第二项被 lazy continuation 续上来的那个 `3`，cmark 给的 range 换算成长度 0。这时要是自己把 `3` 输出，补漏步骤并不知道这几个源码字符已经被消费过，会把它们**再补一遍** —— 屏幕上同一个字符出现两次，渲染串平白多出几个字符。后果就是「系统刚插进去的长度」和「模型回写后的长度」对不上，撤销直接废掉。返回空、交给补漏步骤用源码原文补，才是正好一个（字符还会带正确的源码映射）。
+        guard let range = localRange(of: text) else { return .empty }
         let raw = sourceText(in: range)
 
         // 只有「注入了公式渲染器」且「这段文字里有 $」才去扫 ——
@@ -648,7 +649,20 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             codeSourceStart = codeRange.location
             out.append(.sourceSliced(code, sourceStart: codeRange.location, attributes: theme.codeBlockAttributes))
         } else if !code.isEmpty {
-            out.append(.decoration(code, attributes: theme.codeBlockAttributes))
+            // ⚠️ 搜不到时**不能**直接退化成 `.decoration`（这里踩过坑，别改回去）
+            // 未闭合的围栏（`⏎code` 后面既没有闭合的 ```、结尾也没有换行）cmark 会给`code` 补一个**源码里根本不存在**的尾巴换行（拿到的是 "code\n"）。
+            // 拿这一整段去源码里搜必然搜不到，于是走进 `.decoration` 那条路：正文不带源码映射，补漏步骤不知道这些字符已经被消费过，会把整块源码再补一遍 —— 屏幕上代码整段出现两次，渲染串凭空多出近一倍长度，接着「系统按插入长度记账」的撤销也就跟着废了（撤销完源码缺斤少两）。
+            // 退一步：把 cmark 补的那个尾巴换行去掉再搜一次，绝大多数情况就能对上源码。
+            let withoutSyntheticBreak = code.hasSuffix("\n") ? String(code.dropLast()) : code
+            if let codeRange = source.nsRange(of: withoutSyntheticBreak, fromUTF16Offset: searchStart) {
+                codeSourceStart = codeRange.location
+                out.append(.sourceSliced(withoutSyntheticBreak,
+                                         sourceStart: codeRange.location,
+                                         attributes: theme.codeBlockAttributes))
+            } else {
+                // 真搜不到（比如源码里那几个字符被转义改写了）：一个字符都不输出，全交给补漏步骤用源码原文补 —— 和 `visitText` / `visitSoftBreak` 同一条规矩：
+                // 拿不到源码映射就别自己造字符，否则补漏会再补一遍，内容重复、长度失控。
+            }
         }
 
         // 首尾的 ``` 由补漏步骤补进来。
@@ -1194,11 +1208,67 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         // MarkupChildren 只是 Sequence，不是 Collection，没有 `.first` 属性，
         // 所以这里用迭代器取第一个子节点。
         var iterator = item.children.makeIterator()
-        guard let firstChild = iterator.next(), let childRange = firstChild.range else { return nil }
-        let firstChildStart = table.utf16Range(of: childRange).location
-        let length = firstChildStart - itemRange.location
-        guard length > 0, length < 12 else { return nil }   // 标记不该太长，防止算错时吃掉正文
-        return NSRange(location: itemRange.location, length: length)
+        if let firstChild = iterator.next(), let childRange = firstChild.range {
+            let firstChildStart = table.utf16Range(of: childRange).location
+            let length = firstChildStart - itemRange.location
+            if length > 0, length < 12 {   // 标记不该太长，防止算错时吃掉正文
+                return NSRange(location: itemRange.location, length: length)
+            }
+        }
+        // 空列表项（`- ` 后面一个字都还没有）：cmark 压根不给内容节点，上面那条路走不通。
+        // 这时直接从源码把这一行开头的标记扫出来 —— 空项也**必须**有标记，理由见下面。
+        return scannedMarkerRange(from: itemRange.location)
+    }
+
+    /// 空列表项的标记范围：从 `start` 起扫出这一行开头的 `- ` / `1. ` / `- [ ] ` 这类标记。
+    ///
+    /// ### 为什么空项也非得画出标记（撤销失效的真正根因，别改回去）
+    /// 标记在渲染串里是**额外多出来的一个字符**（圆点占位符 `￼`）。
+    /// 空项不画标记的话，渲染串长度就会跟着「这一项有没有内容」来回变：
+    /// `- ` 渲染成 `- `（2 个字符），在里面打一个 `4` 变成 `- 4`，渲染却成了 `￼- 4`（4 个字符）—— **用户只敲了 1 个字符，渲染串长了 2 个**。
+    /// 而系统替键盘输入记的撤销账是「按插入时的字符数」记的：插 1 个就撤销掉 1 个。
+    /// 于是 ⌘Z 会从这个 4 字符的段落里删掉 1 个，删错了地方 ——表现为「撤销一次还能用，连按几次就再也回不到最初的 `- 1\n- 2`」。
+    /// 把空项的标记也画出来，长度就稳定了：**打字时渲染串长多少 = 用户敲进去几个字符**。
+    private func scannedMarkerRange(from start: Int) -> NSRange? {
+        let text = source as NSString
+        let end = text.length
+        var index = start
+
+        // 嵌套列表的缩进不属于标记本身，先跳过去
+        while index < end, isSpaceOrTab(text.character(at: index)) { index += 1 }
+        let markStart = index
+        guard markStart < end else { return nil }
+
+        let first = text.character(at: markStart)
+        guard isBulletCharacter(first) || isDigitCharacter(first) else { return nil }
+        index += 1
+
+        // 有序列表：数字后面必须跟 `.` 或 `)`
+        if isDigitCharacter(first) {
+            while index < end, isDigitCharacter(text.character(at: index)) { index += 1 }
+            guard index < end else { return nil }
+            let delimiter = text.character(at: index)
+            guard delimiter == 0x2E /* . */ || delimiter == 0x29 /* ) */ else { return nil }
+            index += 1
+        }
+
+        // 标记后面必须紧跟空格 / tab，或者这一行就到此为止 —— 否则 `-abc` 只是普通文字，不是列表
+        guard index == end || isSpaceOrTab(text.character(at: index)) else { return nil }
+        // 吃掉标记后面的空白，让标记一直认到「内容该开始的地方」。
+        // 只吃空格 / tab：换行说明这一项真的没内容，标记到换行前为止。
+        while index < end, isSpaceOrTab(text.character(at: index)) { index += 1 }
+
+        let length = index - markStart
+        guard length > 0, length < 12 else { return nil }
+        return NSRange(location: markStart, length: length)
+    }
+
+    private func isSpaceOrTab(_ character: unichar) -> Bool { character == 0x20 || character == 0x09 }
+    private func isBulletCharacter(_ character: unichar) -> Bool {
+        character == 0x2D /* - */ || character == 0x2A /* * */ || character == 0x2B /* + */
+    }
+    private func isDigitCharacter(_ character: unichar) -> Bool {
+        character >= 0x30 && character <= 0x39
     }
 }
 
