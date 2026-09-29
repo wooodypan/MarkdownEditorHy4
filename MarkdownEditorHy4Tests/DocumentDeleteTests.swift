@@ -72,18 +72,21 @@ final class DocumentDeleteTests: XCTestCase {
                       "把旁边那份也删了 —— 删错文件比删不掉严重得多")
     }
 
-    /// 右键菜单里必须**有且只有**一项「删除」，而且是 destructive 样式
-    /// （destructive 在界面上是红的，等于提前告诉用户「这一步不可逆」）
+    /// 右键菜单里必须**恰有一项**「删除」，而且是 destructive 样式
+    /// （destructive 在界面上是红的，等于提前告诉用户「这一步不可逆」）。
+    ///
+    /// ⚠️ 这里刻意**不数「菜单里一共几项」**：以后菜单要是再多一项别的功能，
+    /// 写死数量会误伤。只数 **destructive 的那一项** —— 那个才是「删除」的身份特征。
     func testDeleteMenuHasOneDestructiveAction() {
         let controller = DocumentListViewController()
         let menu = controller.deleteMenu(for: URL(fileURLWithPath: "/tmp/示例文档.md"))
 
-        XCTAssertEqual(menu.children.count, 1, "右键菜单现在应该只有「删除」一项")
+        let destructiveActions = menu.children
+            .compactMap { $0 as? UIAction }
+            .filter { $0.attributes.contains(.destructive) }
 
-        let action = menu.children.first as? UIAction
-        XCTAssertEqual(action?.title, "删除")
-        XCTAssertTrue(action?.attributes.contains(.destructive) ?? false,
-                      "「删除」该是 destructive，不然界面上不会显示成红色")
+        XCTAssertEqual(destructiveActions.count, 1, "右键菜单里该恰有一项删除")
+        XCTAssertEqual(destructiveActions.first?.title, "删除")
         XCTAssertEqual(menu.title, "示例文档",
                        "菜单标题该用文件名（去掉 .md），好让用户确认右键点的是哪一份")
     }

@@ -222,6 +222,47 @@ enum DocumentsWorkspace {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    // MARK: - 列表行上那两行附加信息
+
+    /// 为了拿「首行」最多读这么多字节。
+    ///
+    /// 只想要第一行文字，没必要把整份文档读进来 —— 一份几百 KB 的笔记，首行一定在前 4 KB 之内。
+    /// 这也是为什么这里**不缓存**：读这么一小块跟查一次文件属性差不多贵，
+    /// 加缓存反而要多管一份「什么时候该失效」的账（改完名、存完盘都得清）。
+    private static let previewByteLimit = 4 * 1024
+
+    /// 列表行上那行浅灰预览：文档的**首行文字**。
+    ///
+    /// ### 为什么取的是「第一个非空行」而不是字面意义上的第 1 行
+    /// 不少文档第一行是空行（标题前面习惯空一行），照字面取会得到一片空白，
+    /// 那一行就白占了。所以跳过空行，取第一个真有内容的行。
+    ///
+    /// 读不出来（权限、文件刚被删掉）返回空串，界面那边会用「空文档」这类占位文字顶上。
+    static func previewText(of url: URL) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+        // defer：不管从哪条分支出去，句柄都得还回去，不然文件一直被占着
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: previewByteLimit), !data.isEmpty else { return "" }
+
+        // 跟 read(_:) 用同一种解码方式：遇到不合法的字节换成替换字符，总比整篇读不出来强
+        var text = String(decoding: data, as: UTF8.self)
+        // 正好在第 4096 个字节把一个字切成两半时，尾巴上会留一个替换字符 —— 去掉它
+        while text.hasSuffix("\u{FFFD}") { text.removeLast() }
+
+        for line in text.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    /// 文件的修改时间。
+    ///
+    /// 取不到（文件刚被删、没权限）返回 nil —— 界面拿它决定最下面那行日期显不显示。
+    static func modificationDate(of url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
     // MARK: - 删除
 
     /// 删掉一份文档。

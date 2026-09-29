@@ -26,6 +26,11 @@ import MultiTabController
 /// **Mac 上对着某一行点右键**（iPad 上是长按）→ 菜单里选「删除」；
 /// iPhone 上没有右键，改成**往左滑**那一行。两条路都会先弹一次确认框，
 /// 删掉的文件在 Mac 上会进系统废纸篓（还能捞回来），手机上就是真删了。
+///
+/// ### 一行里显示什么
+/// 文件名 + 浅灰的**预览**（文档首行文字，一行放不下从尾巴省略）+ 文件的**修改日期**。
+/// 后两样是每次填 cell 时现读的（`DocumentsWorkspace.previewText` / `modificationDate`），
+/// 所以 Mac 上「在右栏改完按 ⌘S」，左栏这两行会跟着变 —— 存盘时也会发一条目录变更通知。
 final class DocumentListViewController: UIViewController {
 
     /// 「打开一份文档」的出口。iPhone / iPad / Mac 三种环境注入不同实现
@@ -95,8 +100,12 @@ final class DocumentListViewController: UIViewController {
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.rowHeight = 46
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: Self.cellIdentifier)
+        // 行高交给系统按内容算：这一行有三行字（文件名 / 预览 / 日期），字号还会跟着系统的
+        // 「文字大小」设置变，写死一个数字迟早会在某种字号下把字挤住
+        tableView.rowHeight = UITableView.automaticDimension
+        // 估个大概值只为滚动条长度好看，真实高度还是系统算的
+        tableView.estimatedRowHeight = 76
+        tableView.register(DocumentListCell.self, forCellReuseIdentifier: Self.cellIdentifier)
         view.addSubview(tableView)
 
         NSLayoutConstraint.activate([
@@ -385,13 +394,15 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: Self.cellIdentifier, for: indexPath)
         let url = files[indexPath.row]
-        var content = cell.defaultContentConfiguration()
-        content.text = DocumentsWorkspace.displayName(for: url)
-        content.image = UIImage(systemName: "doc.text")
-        // 只有一行字：文件名**去掉扩展名**（这里所有文件都是 md，后缀只是噪音）。
-        // 不再加一行「secondary text」写完整文件名 —— 那跟上面那行几乎一模一样，看着是重复的
-        cell.contentConfiguration = content
-        return cell
+        // 上面注册的就是 DocumentListCell，这里一定转得成；真转不成说明那行注册被改坏了
+        guard let documentCell = cell as? DocumentListCell else { return cell }
+
+        // 第一行文件名**去掉扩展名**（这里所有文件都是 md，后缀只是噪音），
+        // 第二行是文档首行的浅灰预览，第三行是修改日期
+        documentCell.configure(name: DocumentsWorkspace.displayName(for: url),
+                               preview: DocumentsWorkspace.previewText(of: url),
+                               date: DocumentsWorkspace.modificationDate(of: url))
+        return documentCell
     }
 
     /// ⚠️ 这里**故意不打开文档**。

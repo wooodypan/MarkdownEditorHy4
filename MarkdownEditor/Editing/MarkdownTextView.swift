@@ -437,6 +437,38 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     // MARK: 对外接口
 
+    /// 撤销栈最多留多少步（**0 = 无限**，那是系统默认值）。
+    ///
+    /// ### 为什么不能让它无限
+    /// 一条撤销记录不只存「改了哪几个字符」：改动跨块记不下来时会退回**整篇源码快照**，一条就存两份整篇源码（改动前 + 改动后）。大文档上连续 ⌘B / 替换全部，几百条轻松堆到上百 MB —— 而用户几乎不可能撤到那么早。设了上限之后系统自动丢最旧的那条，内存有界，用户能撤的步数一点没少（见下面的取值理由）。
+    ///
+    /// ### 为什么是 100 而不是 20
+    /// 连续打字时系统是按「事件」分组的，一口气打两屏字也就占几组；
+    /// 真正吃内存的是命令类编辑（替换全部、整篇格式化），那种操作用户撤几十步已经绰绰有余。
+    private static let maxUndoLevels = 100
+
+    /// 把「撤销栈最多几步」这件事落到当前的 UndoManager 上。
+    ///
+    /// ### 为什么放在编辑流程里设，不在 view 挂载时（`didMoveToWindow`）设
+    /// `undoManager` 是沿响应者链找的，view 正在挂到 window 的那个时刻响应者链还没稳定，拿到的未必是最后真正用的那个实例。放在编辑流程里设就没有这个问题 ——
+    /// 那时 `undoManager` 一定已经就位，而且吃内存的那批记录（整篇快照）**全都来自命令类编辑**，正好覆盖得到。
+    private func applyUndoLimitIfNeeded() {
+        undoManager?.levelsOfUndo = Self.maxUndoLevels
+    }
+
+    /// 把撤销栈里的记录全部作废 —— 换文档、折叠这类「旧账已经对不上号」的时刻调用。
+    ///
+    /// ### 什么时候必须调用
+    /// 栈里的记录是按**记账那一刻的文本**记的（范围、长度、整篇快照都是），
+    /// 文本被整个换掉之后它们就再也套不上：撤销它们会把别的文档的内容灌进当前编辑器。
+    /// 换文档是其中最彻底的一种 —— 不清栈的话，在新文档里按 ⌘Z 会把上一份文档的旧账翻出来。
+    ///
+    /// ⚠️ **不能**挪进 `setMarkdown` 里：撤销 / 重做自己也靠 `setMarkdown` 整篇恢复，
+    /// 挪进去等于每撤销一次就把剩下的栈清空（表现就是「第一次 ⌘Z 有反应，之后怎么按都没用」）。
+    func resetUndoHistory() {
+        undoManager?.removeAllActions()
+    }
+
     /// 整篇替换内容
     func setMarkdown(_ markdown: String) {
         documentStore.load(markdown: markdown, containerWidth: currentContainerWidth)
@@ -1231,15 +1263,21 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 受影响的那一块（成本很小）、渲染结果和模型永远一致（不会出现「按钮显示已勾选、
     /// 源码还是 `[ ]`」这种两套状态）。
     ///
+    /// ### ⚠️ 撤销这笔账得我们自己补（别再只设 `isProgrammaticEdit`）
+    /// 点复选框是**程序自己发起**的编辑，系统不会替它记撤销。以前这里只设了
+    /// `isProgrammaticEdit`，结果用户勾掉一个任务后按 ⌘Z，撤销的是**更早的另一件事**、
+    /// 勾选纹丝不动 —— 既违反直觉，又可能一路误撤到别处去。
+    /// 套一层 `performUndoableModelEdit` 就补上了这笔账（它顺带也替我们开 `isProgrammaticEdit`）。
+    ///
     /// - parameter info: 被点到的复选框（它带着 `[` 在整篇源码里的偏移）
     func toggleCheckbox(_ info: CheckboxInfo) {
         let sourceRange = NSRange(location: info.sourceStart, length: 3)
         guard let rendered = documentStore.renderedRange(forSourceRange: sourceRange) else { return }
-        isProgrammaticEdit = true
-        defer { isProgrammaticEdit = false }
-        applyEdit(renderedRange: rendered,
-                  replacementText: info.isChecked ? "[ ]" : "[x]",
-                  alreadyAppliedToTextStorage: false)
+        performUndoableModelEdit(actionName: "切换任务状态") {
+            applyEdit(renderedRange: rendered,
+                      replacementText: info.isChecked ? "[ ]" : "[x]",
+                      alreadyAppliedToTextStorage: false)
+        }
     }
 
     // MARK: - 折叠 / 展开（顶层块左侧的小三角）
@@ -1453,7 +1491,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 这里不能用 `disableUndoRegistration` / `enableUndoRegistration` 包住上面的替换：
         // 在「不是系统发起的编辑」这个时机调用它，UIKit 的 _UITextUndoManager 会直接抛
         // `NSInternalInconsistencyException`（实测崩溃，别再改回去）。
-        undoManager?.removeAllActions()
+        resetUndoHistory()
 
         lastSyncedString = documentStore.renderedString
         needsCodeBlockRefresh = true
@@ -1567,8 +1605,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 键盘输入时系统已经替这次输入记过账了，这里只是把「模型算出来的渲染结果」写回去，不能再记一笔（一次编辑两笔账 = 撤销一次退两步）。
         //
         // ⚠️ 程序自己发起的编辑**反过来**：它连 disable/enable 都不能碰 ——那个时机不属于「系统刚发起的编辑」，_UITextUndoManager 会直接抛 `enableUndoRegistration may only be invoked with matching call to disableUndoRegistration`
-        // （实测崩溃，别再改回去）。那种编辑交给系统照常记账，账是精确的：
-        // 我们替换的是整段渲染内容，系统记下的就是「这段被换成了什么」，撤销一步就能换回来。
+        // （实测崩溃，别再改回去）。那种编辑交给系统照常记账 —— 这一点是**实证过**的，不是猜测：
+        // 系统确实会替程序性替换记一笔（见 `MarkdownUndoDocumentSwitchTests.testSystemAlsoRecordsProgrammaticReplacement`），
+        // 那笔账不用管，它会和我们的那笔被 `performUndoableModelEdit` 包进同一个撤销组，⌘Z 一次一起退掉。
         if !isProgrammaticEdit {
             undoManager?.disableUndoRegistration()
         }
@@ -1694,10 +1733,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// Cmd+Z 时从 21 个字符里删掉 19 个，末尾正好剩下「完成」两个字。
     ///
     /// ### 改成了什么
-    /// 撤销记录不再交给系统，而是我们自己按**整篇源码快照**登记：撤销时
-    /// 把整篇源码换回粘贴之前的样子。渲染是确定性的（同样的源码 + 同样的宽度 →
-    /// 逐字符一样的渲染结果），所以换回去之后 textStorage 和当初完全一致，
-    /// 撤销栈里更早的那些记录也不会被带歪。
+    /// 我们自己按**源码里改了哪一段**登记一笔（`SourceEditUndo`），撤销时做一次局部替换。
+    /// ⚠️ 系统那边还会**照常**替这次替换再记一笔（按渲染坐标），这笔不用管：
+    /// `performUndoableModelEdit` 会把两笔包进同一个撤销组，⌘Z 一次整体退掉，
+    /// 不会出现「一次粘贴要按两次 ⌘Z」。
     func insertMarkdownSourceUndoably(_ source: String) {
         performUndoableModelEdit(actionName: "粘贴") {
             insertMarkdownSource(source)
@@ -1725,6 +1764,17 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     ///
     /// 不开 `private` 是因为查找 / 替换也算「命令类编辑」，要用同一套登记方式（见 `MarkdownTextView+Search.swift`）。
     func performUndoableModelEdit(actionName: String, _ edit: () -> Void) {
+        // ⚠️ 整次编辑必须包进**一个**撤销组（别删这对调用，理由见下）。
+        //
+        // 实证过的行为（`MarkdownUndoDocumentSwitchTests.testSystemAlsoRecordsProgrammaticReplacement`）：我们自己发起的 storage 替换，**系统也会照常替它记一笔账**（按渲染坐标记）。
+        // 也就是说一次粘贴天然是两笔账 —— 系统一笔（渲染坐标）+ 我们一笔（源码坐标），两笔的坐标系和记账方式都不一样。不包起来的话：用户得按两次 ⌘Z 才退掉一次粘贴，而且两笔分开执行时，先跑的那笔会把文本改到另一笔预设的范围之外，互相污染。
+        // 包成一组之后它们变成一步：撤销时我们先按源码把内容换回去，系统那笔再把渲染文本换成同一份内容（等幂，等于什么都没做）—— ⌘Z 一次退一步，不会「一步退两步」。
+        // 顺带这也解决了「记账时机」：`_UITextUndoManager` 在没有打开撤销组时登记会直接抛`must begin a group before registering undo`（实测），自己开组就不必看系统的脸色。
+        // 顺手把撤销栈的上限钉上（键盘输入那种小额记录系统自己会管，这里管的是会存整篇快照的那批）
+        applyUndoLimitIfNeeded()
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+
         // 整篇源码快照：只在「改动的不是连续一段」时当兜底用
         let previousSource = documentStore.sourceDocument
         let previousCaretSource = documentStore.sourceCaret(forRenderedOffset: selectedRange.location)

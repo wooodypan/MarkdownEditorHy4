@@ -571,6 +571,13 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         savedSource = item.body
         // 换了一份文档 → 「我改过了」这件事重新从零算（新 Tab 该有新的机会被固定）
         didReportEdited = false
+        // ⚠️ 换文档必须把撤销栈清空：栈里的旧账是按**上一份文档的文本**记的（范围、长度、整篇快照都是），
+        // 套到新文档上要么越界崩溃（实测：在空文档里 ⌘Z 弹出上一份文档的旧记录，直接 NSRangeException），
+        // 要么把上一份文档的内容整篇灌进当前编辑器 —— 再按一次 ⌘S 就把新文件覆盖掉了。
+        // 只在这里清、不放进 setMarkdown：撤销 / 重做自己也靠 setMarkdown 整篇恢复，放进等于每撤销一次就清空一次。
+        if !isSameDocument {
+            editor.resetUndoHistory()
+        }
         // md 里的图片多是相对路径，基准目录要指向文件所在目录，否则图片全裂
         editor.imageBaseURL = url.deletingLastPathComponent()
         editor.setMarkdown(item.body)
@@ -699,6 +706,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         }
 
         savedSource = source
+        // 说一声，让左侧栏重新扫一遍目录。
+        // 左栏每一行上显示着**文档首行的预览**和**修改日期**，不通知的话用户按完 ⌘S左边那两行还是旧的 —— Mac 上左栏一直看得见，这个陈旧会更明显。
+        // 照旧走通知，别在这儿直接去刷别的视图控制器
+        NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
         // 存盘是个天然的「我读到这儿了」的时间点，顺手记一次
         rememberCurrentScrollPosition()
         refreshStatus()
