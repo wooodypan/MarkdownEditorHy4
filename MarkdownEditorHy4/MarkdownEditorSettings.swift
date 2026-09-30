@@ -75,6 +75,10 @@ enum ImageWidthMode: String, Codable, CaseIterable {
 
 /// 编辑器的用户配置。
 ///
+/// ### 颜色主题存在这里的是什么
+/// 只存「选了哪一套内置主题」（`MarkdownColorTheme`）和「有没有指定一份 JSON 文件」。
+/// 颜色值本身一个都不在这儿 —— 它们全在渲染层，将来渲染层单独开源，这一层不用改。
+///
 /// ### 落盘在哪
 /// 按需求放沙盒的 `Library/Caches/MarkdownEditorHy4/settings.json`。
 ///
@@ -145,6 +149,11 @@ final class MarkdownEditorSettings {
         static let paragraphIndentCharacters: Double = 0
         /// 行宽默认「不限」—— 就是量程上限那个值，正文照旧铺满窗口宽度
         static let bodyContentWidth = Limits.bodyContentWidth.upperBound
+
+        /// 颜色主题默认「默认」：一套都不覆盖，全部用 `MarkdownTheme` 自带的颜色
+        static let colorTheme = MarkdownColorTheme.default
+        /// 自定义主题 JSON 默认「没有」—— 用户没指定过就不加载任何文件
+        static let customThemeFileName: String? = nil
 
         /// 图片尺寸默认值同样**从主题读**，不在这里写第二份数字（理由同上）
         static let imageWidthMode: ImageWidthMode = .percentage
@@ -255,6 +264,9 @@ final class MarkdownEditorSettings {
         var imageWidthRatio: Double?
         var imageWidthPoints: Double?
         var imageMaxHeight: Double?
+        /// 颜色主题那一组（都写成可选 + 字符串，理由同前）
+        var colorTheme: String?
+        var customThemeFileName: String?
     }
 
     // MARK: 配置项
@@ -382,6 +394,22 @@ final class MarkdownEditorSettings {
 
     /// 「固定宽度」模式下图片的最大宽度（点）。默认 `200`。
     private(set) var imageWidthPoints: Double
+
+    // MARK: 颜色主题
+
+    /// 用哪一套内置配色，默认「默认」（= 不覆盖，全用 `MarkdownTheme` 自带的颜色）。
+    ///
+    /// 三套可选：`default` / `vue` / `vueDark`，名字和颜色都由渲染层提供，这里只记选择。
+    private(set) var colorTheme: MarkdownColorTheme
+
+    /// 用户自己指定的那份主题 JSON 的**文件名**（只在设置页上显示用）。
+    ///
+    /// `nil` = 用户没指定过，一律用内置主题的颜色。
+    ///
+    /// ### 为什么这里只记名字
+    /// 内容本身由 `MarkdownCustomThemeStore` 保管（挑完就拷进 App 自己的目录），
+    /// 这层只留一个「显示给用户看」的名字 —— 存路径没用，下次启动那份路径已经读不了了。
+    private(set) var customThemeFileName: String?
 
     /// 图片的最大高度（点）。默认 `420`。
     ///
@@ -568,6 +596,24 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    // MARK: 改颜色主题
+
+    /// 换一套内置配色
+    func setColorTheme(_ value: MarkdownColorTheme) {
+        guard value != colorTheme else { return }
+        colorTheme = value
+        save()
+        postChange()
+    }
+
+    /// 记住「用户指定了哪份 JSON」（传 `nil` = 清除，回到只用内置主题的状态）
+    func setCustomThemeFileName(_ value: String?) {
+        guard value != customThemeFileName else { return }
+        customThemeFileName = value
+        save()
+        postChange()
+    }
+
     // MARK: 初始化
 
     init(fileURL: URL = MarkdownEditorSettings.defaultFileURL) {
@@ -593,6 +639,8 @@ final class MarkdownEditorSettings {
         self.imageWidthRatio = Default.imageWidthRatio
         self.imageWidthPoints = Default.imageWidthPoints
         self.imageMaxHeight = Default.imageMaxHeight
+        self.colorTheme = Default.colorTheme
+        self.customThemeFileName = Default.customThemeFileName
         load()
     }
 
@@ -667,6 +715,14 @@ final class MarkdownEditorSettings {
         if let value = payload.imageMaxHeight {
             imageMaxHeight = clamp(value, to: Limits.imageMaxHeight)
         }
+        // 认不出来的主题名（老版本存的、或者手改坏了）只让这一项退回默认
+        if let raw = payload.colorTheme, let value = MarkdownColorTheme(rawValue: raw) {
+            colorTheme = value
+        }
+        // 文件名是「显示用」的，不需要夹范围；空串当成「没指定」
+        if let value = payload.customThemeFileName, !value.isEmpty {
+            customThemeFileName = value
+        }
     }
 
     private func save() {
@@ -689,7 +745,9 @@ final class MarkdownEditorSettings {
                               imageWidthMode: imageWidthMode.rawValue,
                               imageWidthRatio: imageWidthRatio,
                               imageWidthPoints: imageWidthPoints,
-                              imageMaxHeight: imageMaxHeight)
+                              imageMaxHeight: imageMaxHeight,
+                              colorTheme: colorTheme.rawValue,
+                              customThemeFileName: customThemeFileName)
         guard let data = try? JSONEncoder().encode(payload) else { return }
         do {
             // 目录可能还不存在（第一次跑），先建出来
@@ -822,5 +880,47 @@ extension MarkdownEditorSettings {
             theme.image.maxWidthPoints = CGFloat(imageWidthPoints)
         }
         theme.image.maxHeight = max(60, CGFloat(imageMaxHeight))
+    }
+}
+
+// MARK: - 套到编辑器的配色上
+
+extension MarkdownEditorSettings {
+
+    /// 当前该用的一套颜色：内置主题 +（可选的）用户 JSON 覆盖。
+    ///
+    /// ### 优先级（后者盖前者）
+    /// `MarkdownTheme` 自带默认色 → 内置主题（vue / vue-dark）→ 用户指定的 JSON 文件。
+    ///
+    /// JSON 只在「用户确实指定过」时才参与：没指定、文件读不出来、内容不合法，
+    /// 都退化成「只用内置主题」—— 一份坏掉的 JSON 不该让界面变成一片黑。
+    ///
+    /// - parameter customPalette: 从 `MarkdownCustomThemeStore` 读出来的那套；用户没指定过就传 `nil`
+    func resolvedColorPalette(customPalette: MarkdownColorPalette?) -> MarkdownColorPalette {
+        resolvedColorPalette(theme: colorTheme, customPalette: customPalette)
+    }
+
+    /// 某一套内置主题（**不是**当前选中的那套）+ 可选的 JSON 之后，实际会用到的配色。
+    ///
+    /// 主题页要给列表里每一套都画预览，`resolvedColorPalette(customPalette:)` 只能算「当前选中的」，所以真正的叠加规则写在这里，那边再包一层。
+    func resolvedColorPalette(theme: MarkdownColorTheme,
+                              customPalette: MarkdownColorPalette?) -> MarkdownColorPalette {
+        guard customThemeFileName != nil, let custom = customPalette else {
+            return theme.palette
+        }
+        return theme.palette.merging(custom)
+    }
+
+    /// 把当前配色写进编辑器主题。
+    ///
+    /// ### 换算照样放在配置这一侧（和上面几个 `apply...` 同一个理由）
+    /// 渲染层只认 `MarkdownColorPalette`，不认识「用户选了哪套、有没有指定文件」——
+    /// 这些是 App 层的事，依赖方向始终是「App 层 → 组件」。
+    ///
+    /// ### 改完必须整篇重渲染
+    /// 颜色是渲染那一刻烙进 `NSAttributedString` 的，只改主题不动画面。
+    /// 底色（`editorBackground`）倒是 view 自己的属性，由 `refreshTheme()` 一起搬过去。
+    func applyColors(to theme: inout MarkdownTheme, customPalette: MarkdownColorPalette?) {
+        theme.applyColorPalette(resolvedColorPalette(customPalette: customPalette))
     }
 }

@@ -411,6 +411,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
                 // 把编辑器整篇内容渲染成一张长图，弹系统分享面板
                 self?.exportEditorAsImage()
             },
+            UIAction(title: "主题", image: UIImage(systemName: "paintpalette")) { [weak self] _ in
+                // 单独一页挑配色（内置几套 + 可选的 JSON 文件）
+                self?.showThemePicker()
+            },
             UIAction(title: "设置", image: UIImage(systemName: "gearshape")) { [weak self] _ in
                 // 弹出设置页（正文排版、大纲、表格列宽都在那儿）
                 self?.showSettings()
@@ -445,6 +449,19 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         present(UINavigationController(rootViewController: controller), animated: true)
     }
 
+    /// 弹出主题页。
+    ///
+    /// 为什么单开一页而不是在设置页里加一个分组：主题往后不止三套，设置页那套「一个分组 + 一个分段控件」的写法选项一多就挤成了「…」。
+    /// 包导航栏的理由和设置页那个一样 —— 「完成」要挂在导航栏上。
+    ///
+    /// ### 这一页改了不用手动刷新编辑器
+    /// 它写的是同一个 `settings`，改动会发出 `didChangeNotification`，本页面的 `settingsDidChange` 收到后照旧调用 `applyEditorStyle()`；
+    /// 关掉页面的时候编辑区已经换成新配色了。
+    @objc private func showThemePicker() {
+        let controller = MarkdownThemeViewController(settings: settings)
+        present(UINavigationController(rootViewController: controller), animated: true)
+    }
+
     /// 设置变了 → 立刻生效，不用重启
     private func observeSettingsChanges() {
         NotificationCenter.default.addObserver(self,
@@ -458,9 +475,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         applyEditorStyle()
     }
 
-    /// 把「正文排版」「表格列宽」「图片尺寸」三组配置一起写进编辑器主题，再整篇重排一遍。
+    /// 把「配色」「正文排版」「表格列宽」「图片尺寸」四组配置一起写进编辑器主题，再整篇重排一遍。
     ///
-    /// ### 为什么这三组合成一个方法
+    /// ### 为什么这四组合成一个方法
     /// 它们走的是同一条路：改主题里的数值 → **必须重渲染才生效**
     /// （字号、行高、段间距、首行缩进是渲染时烙进段落样式的；表格是渲染时画成图的；
     /// 图片尺寸是渲染时就写进 attachment 的 `bounds` 的，事后改主题也改不动已经排好的图）。
@@ -472,6 +489,14 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// 也扛得住 —— 而且它保着光标位置（见 `MarkdownTextView.refreshTheme`），
     /// 不会拖两下就跳回文首。
     private func applyEditorStyle() {
+        // 配色放最前面：它只改颜色，后面那三组（字号、表格列宽、图片尺寸）
+        // 会再按用户拖过的滑块覆盖自己那几个值，两者不冲突
+        settings.applyColors(to: &editor.renderer.theme,
+                             customPalette: MarkdownCustomThemeStore.shared.loadPalette())
+        // 编辑区外面的这一圈（宿主留白、大纲底下的底板）也要跟着底色走 ——
+        // 深色主题下编辑区黑了、四周边框还是白的，看着像没换干净。
+        // ⚠️ 大纲面板那一块刻意不动：它用的是系统色，自己会跟着系统的浅色 / 深色外观走
+        view.backgroundColor = editor.renderer.theme.editorBackground
         settings.applyTypography(to: &editor.renderer.theme)
         settings.applyTableColumnWidths(to: &editor.renderer.theme)
         settings.applyImageSize(to: &editor.renderer.theme)

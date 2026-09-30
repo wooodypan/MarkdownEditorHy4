@@ -306,7 +306,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private func configureTextView() {
         font = renderer.theme.bodyFont
         textColor = renderer.theme.textColor
-        backgroundColor = .systemBackground
+        backgroundColor = renderer.theme.editorBackground
         alwaysBounceVertical = true
         syncLinkTextAttributes()
         // 左右内边距（含给折叠三角留的那条装订线）见 updateTextContainerInsetIfNeeded：
@@ -541,8 +541,10 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // textView 自己的 font 只影响「没被富文本属性覆盖的地方」（比如光标高度、
         // 打新字时的临时样式），但既然字号换了，这里也一起对齐
         font = renderer.theme.bodyFont
-        // 主题可能换了（配色联动时），链接颜色也得跟着换
+        // 主题可能换了（配色联动时），链接颜色和整片底色都得跟着换 ——
+        // 底色不在富文本里，是 view 自己的属性，只能在这儿手动搬一次
         syncLinkTextAttributes()
+        backgroundColor = renderer.theme.editorBackground
         reRenderPreservingCaret()
     }
 

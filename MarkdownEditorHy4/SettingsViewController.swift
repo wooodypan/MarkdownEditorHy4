@@ -8,6 +8,8 @@
 //  是由内容页监听 `MarkdownEditorSettings.didChangeNotification` 后重新渲染实现的，
 //  设置页自己只负责把值写回配置 —— 它不认识编辑器，也不需要认识。
 //
+//  ⚠️ 配色（颜色主题）**不在这**一页：主题以后不止三套，一行分段控件放不下，单开了一页 `MarkdownThemeViewController`，从文档的「更多」菜单进。
+//
 
 import UIKit
 
@@ -527,7 +529,7 @@ final class SettingsViewController: UIViewController {
             settings.setImageMaxHeight(stepped)
         case .showsLineNumbers, .remembersScrollPosition,
              .outlineWidthMode, .outlineHeightMode, .imageWidthMode:
-            // 这两行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
+            // 这几行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
             // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
             // 编译器会直接报「switch must be exhaustive」逼你回来接上 ——
             // 少了这层保护就会出现「滑块能拖、但拖了什么都没发生」这种静默失效。

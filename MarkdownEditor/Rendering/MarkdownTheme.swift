@@ -22,6 +22,11 @@ struct MarkdownTheme {
 
     // MARK: 颜色
 
+    /// 编辑区的底色（文字铺在它上面）。
+    ///
+    /// 默认跟着系统的浅色 / 深色走；深色主题（比如 vue-dark）会把它换成自己的底色 ——
+    /// 只换正文文字颜色、背景还是白的，深色主题看着就是「黑字压在白纸上」，没有意义。
+    var editorBackground: UIColor = .systemBackground
     var textColor: UIColor
     /// 语法标记（`#`、`**`、`-`、`>` 这些）的弱化色
     var markerColor: UIColor
@@ -280,6 +285,83 @@ struct MarkdownTheme {
         bodyFont = UIFont.systemFont(ofSize: size)
         codeFont = UIFont.monospacedSystemFont(ofSize: max(9, size - 1), weight: .regular)
         headingFonts = Self.makeHeadingFonts(baseSize: size)
+    }
+
+    // MARK: 换配色
+
+    /// 套一套配色（`MarkdownColorPalette`）。
+    ///
+    /// ### 只动颜色，别的都不动
+    /// 字号、行高、段间距、首行缩进、图片尺寸是用户在设置页一格一格调出来的，
+    /// 换配色不该把它们冲掉 —— 所以这里一个非颜色的字段都不碰。
+    ///
+    /// ### 为什么要先「退回默认」再覆盖
+    /// 配色表是**覆盖表**（没给的色是 `nil`）：`nil` 的意思是「继续用 `MarkdownTheme` 自带的颜色」。
+    /// 从 vue-dark 切回「默认」时，如果直接拿那张空表去覆盖，深色会**留在原地** ——
+    /// 因为空表一项都不覆盖。所以先把所有颜色整组退回内建默认，再按配色表覆盖，
+    /// 「默认」才真的是默认。
+    ///
+    /// ### 改完必须整篇重渲染
+    /// 颜色是**渲染那一刻烙进** `NSAttributedString` 的（代码块背景那种矩形除外），
+    /// 只改主题不动画面。改完调 `MarkdownTextView.refreshTheme()`。
+    mutating func applyColorPalette(_ palette: MarkdownColorPalette) {
+        let base = MarkdownTheme.default
+        editorBackground = base.editorBackground
+        textColor = base.textColor
+        markerColor = base.markerColor
+        orderedListMarkerColor = base.orderedListMarkerColor
+        linkColor = base.linkColor
+        inlineCodeColor = base.inlineCodeColor
+        inlineCodeBacktickColor = base.inlineCodeBacktickColor
+        inlineCodeBackground = base.inlineCodeBackground
+        codeBlockBackground = base.codeBlockBackground
+        quoteTextColor = base.quoteTextColor
+        bulletColor = base.bulletColor
+        separatorColor = base.separatorColor
+        searchMatchBackground = base.searchMatchBackground
+        searchCurrentMatchBackground = base.searchCurrentMatchBackground
+        lineNumberColor = base.lineNumberColor
+        collapsedPlaceholderColor = base.collapsedPlaceholderColor
+        quoteBarColor = base.quoteBarColor
+        syntaxColors = base.syntaxColors
+        table.headerBackground = base.table.headerBackground
+        table.borderColor = base.table.borderColor
+        table.sourceTextColor = base.table.sourceTextColor
+        taskList.checkedColor = base.taskList.checkedColor
+        taskList.uncheckedBorderColor = base.taskList.uncheckedBorderColor
+        taskList.checkmarkColor = base.taskList.checkmarkColor
+
+        // 覆盖：配色表里给了才写，没给的保持上面刚退回来的默认色
+        if let color = palette.editorBackground?.color { editorBackground = color }
+        if let color = palette.text?.color { textColor = color }
+        if let color = palette.marker?.color { markerColor = color }
+        if let color = palette.orderedListMarker?.color { orderedListMarkerColor = color }
+        if let color = palette.link?.color { linkColor = color }
+        if let color = palette.inlineCode?.color { inlineCodeColor = color }
+        if let color = palette.inlineCodeBacktick?.color { inlineCodeBacktickColor = color }
+        if let color = palette.inlineCodeBackground?.color { inlineCodeBackground = color }
+        if let color = palette.codeBlockBackground?.color { codeBlockBackground = color }
+        if let color = palette.quoteText?.color { quoteTextColor = color }
+        if let color = palette.bullet?.color { bulletColor = color }
+        if let color = palette.separator?.color { separatorColor = color }
+        if let color = palette.searchMatchBackground?.color { searchMatchBackground = color }
+        if let color = palette.searchCurrentMatchBackground?.color {
+            searchCurrentMatchBackground = color
+        }
+        if let color = palette.lineNumber?.color { lineNumberColor = color }
+        if let color = palette.collapsedPlaceholder?.color { collapsedPlaceholderColor = color }
+        if let color = palette.quoteBar?.color { quoteBarColor = color }
+        if let color = palette.keyword?.color { syntaxColors.keyword = color }
+        if let color = palette.string?.color { syntaxColors.string = color }
+        if let color = palette.comment?.color { syntaxColors.comment = color }
+        if let color = palette.number?.color { syntaxColors.number = color }
+        if let color = palette.type?.color { syntaxColors.type = color }
+        if let color = palette.tableHeaderBackground?.color { table.headerBackground = color }
+        if let color = palette.tableBorder?.color { table.borderColor = color }
+        if let color = palette.tableSourceText?.color { table.sourceTextColor = color }
+        if let color = palette.taskChecked?.color { taskList.checkedColor = color }
+        if let color = palette.taskUncheckedBorder?.color { taskList.uncheckedBorderColor = color }
+        if let color = palette.taskCheckmark?.color { taskList.checkmarkColor = color }
     }
 
     // MARK: 派生的属性字典
