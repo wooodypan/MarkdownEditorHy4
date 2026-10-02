@@ -7,72 +7,6 @@
 
 import UIKit
 
-/// 一次编辑在**源码**里改了哪一段：撤销 = 把这段换回 `oldText`，重做 = 换回 `newText`。
-///
-/// ### 为什么记「源码里改了哪一段」，而不是「整篇源码快照」（撤销链断裂的根因，别改回去）
-/// 编辑器的撤销栈是**两套记账混着用**的：
-/// 1. 键盘输入由 UITextView 自己记账，记的是「在某个范围上做了一次替换」；
-/// 2. 列表续写 / 粘贴 / 剪切这些是我们自己发起的，以前是按**整篇源码快照**记的
-///    （撤销 = `setMarkdown` 把整篇文本重建一遍）。
-///
-/// 混在一根撤销链上时，两边的记录是**交替**执行的：撤销完我们那笔，下一个就该轮到系统的那笔。
-/// 可系统那笔账的前提是「文本从它记账那一刻起是一步步变过来的」——中间只要插进来一次整篇重建，这个前提就没了，系统那笔再也接不上，撤销链当场断在半路（用户的话：第一次 ⌘Z 正常，之后怎么按都回不到最初那段）。
-///
-/// 改成只记**这一段**的改动，撤销时做一次普普通通的局部替换、让编辑管线照常跑一遍（局部 parse → 局部渲染 → 局部回写）。
-/// 在系统看来这就是一次再正常不过的文本编辑，两条路于是能严丝合缝地交错执行。
-///
-/// ### 为什么必须是源码文本，不能是渲染文本（踩过的坑，别改回去）
-/// 渲染串里那些圆点、复选框占位符（`￼`）在源码里**根本不存在**，拿渲染文本去走编辑管线，映射表上查不到它，就会被原样写进源码 ——撤销几次之后源码里凭空冒出 `￼- 1\n￼- 2`，文档直接废掉。
-private struct SourceEditUndo {
-    /// 改动起点的源码偏移
-    let location: Int
-    /// 编辑前那一段的源码
-    let oldText: String
-    /// 编辑后那一段的源码
-    let newText: String
-    /// 编辑前的光标（**源码**坐标）
-    let caretBefore: Int
-    /// 编辑后的光标（**源码**坐标）
-    let caretAfter: Int
-    /// 编辑前的整篇源码（局部替换要是没换对，就整篇恢复到这儿 —— 正确性优先于「不断链」）
-    let sourceBefore: String
-    /// 编辑后的整篇源码（重做的目标）
-    let sourceAfter: String
-
-    /// 比一比编辑前后的整篇源码，揪出**真正变了的那一小段**。
-    ///
-    /// 公共前缀 + 公共后缀，夹在中间的就是改动 —— 和 `reconcileFromTextChange` 用的是同一招。
-    ///
-    /// - returns: 改动集中在一处时返回记录；源码没变、或者变得七零八落（比如「替换全部」改了多处）时返回 `nil`，
-    ///   让调用方退回整篇源码快照。
-    static func diff(before: String, after: String, caretBefore: Int, caretAfter: Int) -> SourceEditUndo? {
-        let old = before as NSString
-        let new = after as NSString
-        guard old.length != new.length || !old.isEqual(to: after) else { return nil }   // 一个字都没改
-
-        var prefix = 0
-        let maxPrefix = min(old.length, new.length)
-        while prefix < maxPrefix, old.character(at: prefix) == new.character(at: prefix) { prefix += 1 }
-
-        var suffix = 0
-        let maxSuffix = min(old.length, new.length) - prefix
-        while suffix < maxSuffix,
-              old.character(at: old.length - 1 - suffix) == new.character(at: new.length - 1 - suffix) {
-            suffix += 1
-        }
-
-        let oldText = old.substring(with: NSRange(location: prefix, length: old.length - prefix - suffix))
-        let newText = new.substring(with: NSRange(location: prefix, length: new.length - prefix - suffix))
-        return SourceEditUndo(location: prefix,
-                              oldText: oldText,
-                              newText: newText,
-                              caretBefore: caretBefore,
-                              caretAfter: caretAfter,
-                              sourceBefore: before,
-                              sourceAfter: after)
-    }
-}
-
 /// 一个能「所见即所得显示 markdown、但复制出来还是源码」的 UITextView。
 ///
 /// ### 数据流（一次编辑的完整闭环）
@@ -97,7 +31,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     let renderer: MarkupToAttributedRenderer
     let documentStore: MarkdownDocumentStore
     private let editController: MarkdownEditController
-    private let pasteboardController: MarkdownPasteboardController
+    /// 不开 `private`：复制 / 剪切 / 粘贴搬到了 `MarkdownTextView+Clipboard.swift`。
+    let pasteboardController: MarkdownPasteboardController
 
     /// 相对路径图片的基准目录（demo 里指向 App 包资源目录）
     var imageBaseURL: URL? {
@@ -184,7 +119,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 这种编辑**不是系统记的**，`applyEdit` 里 disable/enable undo 的配对在这种时机
     /// 会踩 `_UITextUndoManager invalid state` 崩溃（和折叠功能是同一个坑，
     /// 详见 toggleCollapse 里的长注释），所以要跳过那对调用。
-    private var isProgrammaticEdit = false
+    /// 不开 `private`：撤销登记（`MarkdownTextView+UndoSupport.swift`）也要在编辑前后翻这个开关。
+    var isProgrammaticEdit = false
     /// 有一整篇内容等着写进 textStorage（真正的写入要等到布局阶段）
     private var pendingFullReplace = false
     /// 输入法组合还没结束，等结束（markedTextRange == nil）再补一次排版
@@ -193,7 +129,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     // MARK: 代码块装饰（整块背景矩形 + 右上角复制按钮）
 
     /// 背景层：加在最底层，画在文字下面
-    private let codeBlockBackgroundLayer = CodeBlockBackgroundLayer()
+    /// 不开 `private`：导出长图要直接 render 这一层（见 `MarkdownTextView+Export.swift`）。
+    let codeBlockBackgroundLayer = CodeBlockBackgroundLayer()
     /// 控件层：加在最上层，放复制按钮
     private let codeBlockControlLayer = CodeBlockControlLayer()
     /// 已经算好的代码块矩形（**文档坐标系**，滚动时只需要整体平移）
@@ -221,7 +158,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     // MARK: 引用块竖条（每层嵌套一条，画在文字下面）
 
     /// 竖条所在的层：加在代码块背景之上、文字之下（引用里可以嵌代码块）
-    private let quoteBarLayer = UIView()
+    /// 不开 `private`：导出长图要直接 render 这一层（见 `MarkdownTextView+Export.swift`）。
+    let quoteBarLayer = UIView()
     /// 已经算好的竖条矩形（**文档坐标系**，滚动时只需整体平移）
     /// `id` 是引用层的唯一标识，`level` 是嵌套深度（0 = 最外层）
     private var quoteBarFrames: [(id: Int, level: Int, frame: CGRect)] = []
@@ -256,7 +194,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     // MARK: 任务列表复选框（浮在 `[x]` / `[ ]` 旁边）
 
     /// 复选框所在的控件层，加在最上层，只让按钮吃点击
-    private let checkboxLayer = CheckboxLayer()
+    /// 不开 `private`：导出长图要直接 render 这一层（见 `MarkdownTextView+Export.swift`）。
+    let checkboxLayer = CheckboxLayer()
     /// 已经算好的 `[x]` / `[ ]` 三个字符的矩形（**文档坐标系**，滚动时只需整体平移）
     private var checkboxFrames: [(info: CheckboxInfo, frame: CGRect)] = []
 
@@ -437,37 +376,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     // MARK: 对外接口
 
-    /// 撤销栈最多留多少步（**0 = 无限**，那是系统默认值）。
-    ///
-    /// ### 为什么不能让它无限
-    /// 一条撤销记录不只存「改了哪几个字符」：改动跨块记不下来时会退回**整篇源码快照**，一条就存两份整篇源码（改动前 + 改动后）。大文档上连续 ⌘B / 替换全部，几百条轻松堆到上百 MB —— 而用户几乎不可能撤到那么早。设了上限之后系统自动丢最旧的那条，内存有界，用户能撤的步数一点没少（见下面的取值理由）。
-    ///
-    /// ### 为什么是 100 而不是 20
-    /// 连续打字时系统是按「事件」分组的，一口气打两屏字也就占几组；
-    /// 真正吃内存的是命令类编辑（替换全部、整篇格式化），那种操作用户撤几十步已经绰绰有余。
-    private static let maxUndoLevels = 100
-
-    /// 把「撤销栈最多几步」这件事落到当前的 UndoManager 上。
-    ///
-    /// ### 为什么放在编辑流程里设，不在 view 挂载时（`didMoveToWindow`）设
-    /// `undoManager` 是沿响应者链找的，view 正在挂到 window 的那个时刻响应者链还没稳定，拿到的未必是最后真正用的那个实例。放在编辑流程里设就没有这个问题 ——
-    /// 那时 `undoManager` 一定已经就位，而且吃内存的那批记录（整篇快照）**全都来自命令类编辑**，正好覆盖得到。
-    private func applyUndoLimitIfNeeded() {
-        undoManager?.levelsOfUndo = Self.maxUndoLevels
-    }
-
-    /// 把撤销栈里的记录全部作废 —— 换文档、折叠这类「旧账已经对不上号」的时刻调用。
-    ///
-    /// ### 什么时候必须调用
-    /// 栈里的记录是按**记账那一刻的文本**记的（范围、长度、整篇快照都是），
-    /// 文本被整个换掉之后它们就再也套不上：撤销它们会把别的文档的内容灌进当前编辑器。
-    /// 换文档是其中最彻底的一种 —— 不清栈的话，在新文档里按 ⌘Z 会把上一份文档的旧账翻出来。
-    ///
-    /// ⚠️ **不能**挪进 `setMarkdown` 里：撤销 / 重做自己也靠 `setMarkdown` 整篇恢复，
-    /// 挪进去等于每撤销一次就把剩下的栈清空（表现就是「第一次 ⌘Z 有反应，之后怎么按都没用」）。
-    func resetUndoHistory() {
-        undoManager?.removeAllActions()
-    }
+    // 撤销栈上限 / 清栈已挪到 `MarkdownTextView+UndoSupport.swift`。
 
     /// 整篇替换内容
     func setMarkdown(_ markdown: String) {
@@ -747,7 +656,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         refreshCodeBlockDecorations()
     }
 
-    private func refreshCodeBlockDecorations() {
+    /// 不开 `private`：导出长图把视口撑到全文后要同步刷一轮（见 `MarkdownTextView+Export.swift`）。
+    func refreshCodeBlockDecorations() {
         let (frames, _) = computeCodeBlockFrames()
         let (bars, _) = computeQuoteBarFrames()
         let (boxes, _) = computeCheckboxFrames()
@@ -1673,226 +1583,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         return index
     }
 
-    // MARK: - 剪贴板
-
-    /// 把选区对应的 **markdown 源码** 放进剪贴板
-    @discardableResult
-    func copyMarkdownSourceToPasteboard() -> Bool {
-        pasteboardController.handleCopy()
-    }
-
-    override func copy(_ sender: Any?) {
-        // 接管复制：放进去的是源码文本，不是渲染出来的富文本
-        if pasteboardController.handleCopy() { return }
-        super.copy(sender)
-    }
-
-    override func cut(_ sender: Any?) {
-        guard pasteboardController.handleCopy(), selectedRange.length > 0 else {
-            super.cut(sender)
-            return
-        }
-        // 复制成功后删掉选区，走同一套增量管线（保证源码和渲染同时更新）。
-        // 外面套一层「可撤销」：剪切是我们自己做的，系统没替我们记过账 ——
-        // 不补这一笔的话，Cmd+Z 会去弹更早的一条记录，而那条记录的范围早就失效了
-        performUndoableModelEdit(actionName: "剪切") {
-            applyEdit(renderedRange: selectedRange, replacementText: "", alreadyAppliedToTextStorage: false)
-        }
-    }
-
-    override func paste(_ sender: Any?) {
-        // 1) 剪贴板里是图片：存成临时文件，插入 ![](路径) 源码
-        if pasteboardController.handlePasteImage() { return }
-        // 2) 纯文本：走下面那个「可撤销插入」。
-        //    ⚠️ 千万别退回 `super.paste(sender)` —— 系统的撤销记录按**源码长度**记账，
-        //    而这段文本会被渲染成另一个长度，撤销就会残留尾巴（详见下面方法的注释）
-        if let text = pasteboardController.pasteboardText() {
-            insertMarkdownSourceUndoably(text)
-            return
-        }
-        super.paste(sender)
-    }
-
-    /// 供 PasteboardController 调用：把一段 markdown 源码插到光标处。
-    ///
-    /// 只负责插入、不注册撤销。要能撤销请用 `insertMarkdownSourceUndoably(_:)`。
-    func insertMarkdownSource(_ source: String) {
-        applyEdit(renderedRange: selectedRange, replacementText: source, alreadyAppliedToTextStorage: false)
-    }
-
-    /// 把一段 markdown 源码插到光标处，**并且这次插入可以安全撤销**。
-    ///
-    /// ### 为什么粘贴必须自己接管撤销（这是「撤销残留」bug 的根因，别改回去）
-    /// 编辑器存进 textStorage 的是**渲染文本**，它和源码的长度不一定相等。
-    /// 无序列表每行开头会多一个圆点占位符（`U+FFFC`），实测粘贴这两行：
-    /// ```
-    /// - [x] 已完成      ← 源码 19 个 UTF-16 单元
-    /// - [ ] 未完成      ← 渲染出来是 21 个（每行行首多一个 ￼）
-    /// ```
-    /// 系统的撤销是**按插入时的长度记账**的：插进去 19 个字符，它就记成
-    /// 「撤销 = 删掉 19 个字符」。可插入之后我们又把这 19 个字符重渲染成了 21 个
-    /// （而且那次替换特意不注册撤销，免得栈里多记一笔），这条账就彻底对不上了 ——
-    /// Cmd+Z 时从 21 个字符里删掉 19 个，末尾正好剩下「完成」两个字。
-    ///
-    /// ### 改成了什么
-    /// 我们自己按**源码里改了哪一段**登记一笔（`SourceEditUndo`），撤销时做一次局部替换。
-    /// ⚠️ 系统那边还会**照常**替这次替换再记一笔（按渲染坐标），这笔不用管：
-    /// `performUndoableModelEdit` 会把两笔包进同一个撤销组，⌘Z 一次整体退掉，
-    /// 不会出现「一次粘贴要按两次 ⌘Z」。
-    func insertMarkdownSourceUndoably(_ source: String) {
-        performUndoableModelEdit(actionName: "粘贴") {
-            insertMarkdownSource(source)
-        }
-    }
-
-    /// 跑一次「会改到文档内容」的命令类编辑，并登记一条整篇快照式的撤销。
-    ///
-    /// ### 只给谁用
-    /// 粘贴、剪切、插入图片、列表续写 —— 它们的共同点是**不经过系统的文本输入**：
-    /// 系统不会替我们记撤销，所以我们得自己补。
-    ///
-    /// ### 撤销这笔账由谁记
-    /// **我们自己记**：程序发起的编辑系统不会替我们记账（实测：撤销栈里根本没有它），不补一笔的话 ⌘Z 会去弹更早的一条记录，而那条记录的范围早就对不上了。
-    ///
-    /// ### 记成什么（撤销链断裂的根因，别改回去）
-    /// 尽量记成「源码里改了哪一段」（`SourceEditUndo`）——和 UITextView 替键盘输入记的那种账**同构**，撤销链上两边的记录要交替执行，只有记法一致才接得上。
-    ///
-    /// 以前这里记的是**整篇源码快照**（撤销 = `setMarkdown` 把整篇重建一遍），结果撤销链会断：
-    /// 系统记的那些账是按「文本从记账那一刻起一步步变过来」算的，中间插一次整篇重建，它们就再也接不上 —— 用户的说法是「第一次 ⌘Z 正常，之后怎么按都回不到最初」。
-    ///
-    /// 记不下来时（这次命令改了不止一处，或者压根没走 `applyEdit`）才退回整篇快照。
-    ///
-    /// - parameter actionName: 撤销菜单上显示的名字（Edit 菜单会显示「撤销 粘贴」）
-    ///
-    /// 不开 `private` 是因为查找 / 替换也算「命令类编辑」，要用同一套登记方式（见 `MarkdownTextView+Search.swift`）。
-    func performUndoableModelEdit(actionName: String, _ edit: () -> Void) {
-        // ⚠️ 整次编辑必须包进**一个**撤销组（别删这对调用，理由见下）。
-        //
-        // 实证过的行为（`MarkdownUndoDocumentSwitchTests.testSystemAlsoRecordsProgrammaticReplacement`）：我们自己发起的 storage 替换，**系统也会照常替它记一笔账**（按渲染坐标记）。
-        // 也就是说一次粘贴天然是两笔账 —— 系统一笔（渲染坐标）+ 我们一笔（源码坐标），两笔的坐标系和记账方式都不一样。不包起来的话：用户得按两次 ⌘Z 才退掉一次粘贴，而且两笔分开执行时，先跑的那笔会把文本改到另一笔预设的范围之外，互相污染。
-        // 包成一组之后它们变成一步：撤销时我们先按源码把内容换回去，系统那笔再把渲染文本换成同一份内容（等幂，等于什么都没做）—— ⌘Z 一次退一步，不会「一步退两步」。
-        // 顺带这也解决了「记账时机」：`_UITextUndoManager` 在没有打开撤销组时登记会直接抛`must begin a group before registering undo`（实测），自己开组就不必看系统的脸色。
-        // 顺手把撤销栈的上限钉上（键盘输入那种小额记录系统自己会管，这里管的是会存整篇快照的那批）
-        applyUndoLimitIfNeeded()
-        undoManager?.beginUndoGrouping()
-        defer { undoManager?.endUndoGrouping() }
-
-        // 整篇源码快照：只在「改动的不是连续一段」时当兜底用
-        let previousSource = documentStore.sourceDocument
-        let previousCaretSource = documentStore.sourceCaret(forRenderedOffset: selectedRange.location)
-
-        // 标记成「程序自己发起的编辑」：这样 applyEdit 会跳过 disable/enable 那对调用
-        // （那对调用只在「系统刚替我们记过账」的时机才合法，别的时候会抛 invalid state）
-        let wasProgrammatic = isProgrammaticEdit
-        isProgrammaticEdit = true
-        edit()
-        isProgrammaticEdit = wasProgrammatic
-
-        let currentSource = documentStore.sourceDocument
-        let currentCaretSource = documentStore.sourceCaret(forRenderedOffset: selectedRange.location)
-
-        if let record = SourceEditUndo.diff(before: previousSource,
-                                            after: currentSource,
-                                            caretBefore: previousCaretSource,
-                                            caretAfter: currentCaretSource) {
-            registerSourceUndo(record, actionName: actionName, undoing: true)
-        } else {
-            // 改动不止连续一段（比如「替换全部」），一段记不下 —— 退回整篇快照
-            registerRestore(toSource: previousSource, caret: selectedRange.location, actionName: actionName)
-        }
-    }
-
-    /// 登记一条「把源码里那一段换回去」的撤销，顺便把重做也挂上。
-    ///
-    /// - parameter undoing: 这一笔是当「撤销」用还是当「重做」用。
-    ///   在撤销过程中再 `registerUndo`，NSUndoManager 会把它记进**重做**栈（标准用法），撤销和重做因此可以来回走 —— 两边共用同一个 `record`，只是换的方向不一样。
-    private func registerSourceUndo(_ record: SourceEditUndo, actionName: String, undoing: Bool) {
-        guard let undoManager else { return }
-        undoManager.registerUndo(withTarget: self) { target in
-            target.registerSourceUndo(record, actionName: actionName, undoing: !undoing)
-            target.applySourceUndo(record, undo: undoing)
-        }
-        // 让 Edit 菜单显示「撤销 粘贴」而不是干巴巴一个「撤销」
-        undoManager.setActionName(actionName)
-    }
-
-    /// 执行一条撤销 / 重做：把源码里那一段换回旧（或新）内容，再让编辑管线照常跑一遍。
-    ///
-    /// 走 `applyEdit` 而不是自己动手改 textStorage：管线负责「源码范围 → 渲染范围」的换算、局部 parse 和局部重渲染，改动因此是一次**局部替换** ——系统不会觉得「文本被整个重建了」，撤销栈里更早的记录也就还能接着用。
-    private func applySourceUndo(_ record: SourceEditUndo, undo: Bool) {
-        let replaced = undo ? record.newText : record.oldText
-        let backTo = undo ? record.oldText : record.newText
-
-        let source = documentStore.sourceDocument as NSString
-        let location = min(max(0, record.location), source.length)
-        let span = min((replaced as NSString).length, source.length - location)
-
-        // 编辑管线只认渲染坐标，先把源码范围翻译过去.
-        // 优先用 `renderedRange`（它对「一块里的小改动」最准）；
-        // 跨块时它可能给不出范围（比如粘进来的两行列表项横跨多个块），那就退一步：两端各换算一次光标位置，中间那段就是要动的范围。
-        // ⚠️ 千万别退化成长度 0 —— 那会变成「纯插入」，撤销时一点东西都删不掉。
-        let sourceRange = NSRange(location: location, length: span)
-        let start = documentStore.renderedCaret(forSourceOffset: location)
-        let end = documentStore.renderedCaret(forSourceOffset: NSMaxRange(sourceRange))
-        let rendered = documentStore.renderedRange(forSourceRange: sourceRange)
-            ?? NSRange(location: start, length: max(0, end - start))
-
-        // 撤销 / 重做本身不该再记一笔账（重做那笔由 registerSourceUndo 负责）
-        let wasProgrammatic = isProgrammaticEdit
-        isProgrammaticEdit = true
-        applyEdit(renderedRange: rendered, replacementText: backTo, alreadyAppliedToTextStorage: false)
-        isProgrammaticEdit = wasProgrammatic
-
-        // ⚠️ 兜底：**正确性优先于「撤销链不断」**。
-        // 「渲染范围 → 源码范围」在跨块时是不精确的（一段渲染文本可能被切进好几个块），上面那次局部替换有可能只改掉了一部分 —— 实测撤销一段跨块粘贴时会残留尾巴。
-        // 所以替换完比对一下整篇源码，对不上就整篇恢复到快照：
-        // 代价是这一次撤销会整篇重建（撤销链在这儿断一下），但用户看到的内容一定是对的。
-        let expected = undo ? record.sourceBefore : record.sourceAfter
-        if documentStore.sourceDocument != expected {
-            restoreDocument(source: expected, caret: documentStore.renderedCaret(forSourceOffset: undo ? record.caretBefore : record.caretAfter))
-            return
-        }
-
-        let caretSource = undo ? record.caretBefore : record.caretAfter
-        let caret = documentStore.renderedCaret(forSourceOffset: caretSource)
-        selectedRange = NSRange(location: min(max(0, caret), (text as NSString).length), length: 0)
-    }
-
-    /// 登记一条撤销：「把整篇源码恢复成 `source`，光标回到 `caret`」。
-    ///
-    /// ⚠️ 只在「一次命令改了不止一处、范围替换记不下来」时兜底用。
-    /// 能用 `registerSourceUndo` 就别用这个 —— 整篇重建会打断撤销链（理由见 `SourceEditUndo`）。
-    ///
-    /// 顺便把**重做**也挂上：撤销和重做共用同一个 UndoManager，
-    /// 在撤销过程中再 `registerUndo` 会被记进重做栈（NSUndoManager 的标准用法），
-    /// 所以撤销、重做可以来回走。
-    private func registerRestore(toSource source: String, caret: Int, actionName: String) {
-        guard let undoManager else { return }
-
-        // 记下「现在」的样子 —— 撤销之后要拿它当重做的目标
-        let currentSource = documentStore.sourceDocument
-        let currentCaret = selectedRange.location
-
-        undoManager.registerUndo(withTarget: self) { target in
-            target.registerRestore(toSource: currentSource, caret: currentCaret, actionName: actionName)
-            target.restoreDocument(source: source, caret: caret)
-        }
-        // 让 Edit 菜单显示「撤销 粘贴」而不是干巴巴一个「撤销」
-        undoManager.setActionName(actionName)
-    }
-
-    /// 整篇恢复到某个源码快照 —— 撤销和重做都走这里。
-    ///
-    /// 用 `setMarkdown` 而不是逐块替换：快照存的就是整篇源码，
-    /// 整篇重建最省心，而且渲染结果和当初逐字符一致
-    /// （`setMarkdown` 只动 storage，完全不会碰撤销栈，见 `replaceWholeStorage`）。
-    ///
-    /// 不开 `private`：替换也需要这个「整篇回到某个源码快照」的动作。
-    func restoreDocument(source: String, caret: Int) {
-        setMarkdown(source)
-        let length = (text as NSString).length
-        selectedRange = NSRange(location: min(max(0, caret), length), length: 0)
-    }
+    // 剪贴板 / 撤销记账已挪到 `MarkdownTextView+Clipboard.swift` 与 `MarkdownTextView+UndoSupport.swift`。
 
     // MARK: - 键盘快捷键（markdown 语法）
 
@@ -1951,96 +1642,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         layoutManager.invalidateLayout(for: textRange)
     }
 
-    // MARK: - 导出长图
-
-    /// 把**整篇内容**（包括滚出屏幕外的部分）渲染成一张图片，给「导出成图片 / 分享」用。
-    ///
-    /// ### 两步走：先撑大视口拿全文排版，再自己逐段画
-    /// 1. TextKit 2 是「viewport 按需排版」：屏幕外的文字不排不画，fragment 坐标还是估算值。
-    ///    所以先把 bounds（它就是视口）临时撑到整篇内容高度，强制布局，
-    ///    拿到准确的 contentSize 和全文 fragment。画完立刻恢复现场，中间不会真的闪一帧。
-    /// 2. **不能**指望 `layer.render(in:)` 把文字画出来 —— UITextView 只把「画过的」
-    ///    缓存进自己的 layer，屏幕外部分缓存里是空白（撑大视口强制重绘也只重绘它认定的可视区）。
-    ///    文字必须自己枚举 `NSTextLayoutFragment` 逐个 draw（`.rendersUnseenText` 让没画过的
-    ///    fragment 真正渲染出来）；装饰层是独立 subview，单独 render 各自的 layer 即可。
-    func renderFullContentImage() -> UIImage? {
-        layoutIfNeeded()
-        guard bounds.width > 1, contentSize.height > 1 else { return nil }
-
-        // 记住现场，画完恢复
-        let savedBounds = bounds
-        let savedOffset = contentOffset
-        let hadFocus = isFirstResponder
-        // 光标会被画进图里；键盘也占着屏幕。先退出编辑态，画完再还回去
-        if hadFocus { resignFirstResponder() }
-
-        // 视口撑到全文高度。注意 contentSize 首次拿到的是 TextKit 的**估算值**
-        // （viewport 外的排版是估的），撑大后全文排完高度可能变 → 循环到不再变化为止
-        for _ in 0..<3 {
-            bounds = CGRect(origin: .zero, size: contentSize)
-            contentOffset = .zero // 同步触发装饰层 KVO，按新视口重摆装饰
-            layoutIfNeeded()
-            if bounds.size == contentSize { break }
-        }
-
-        // 装饰矩形的重算（computeCodeBlockFrames）此刻全文已排完，坐标是准的；
-        // 同步刷一轮，保证代码块背景/竖条/勾选框和文字对齐
-        refreshCodeBlockDecorations()
-
-        // 像素密度跟屏幕一致，导出的图才不糊；
-        // GPU 单张纹理有上限（一般 16384px），超长文档按比例降像素密度防止渲染失败
-        let maxPixels: CGFloat = 16384
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = min(max(traitCollection.displayScale, 1), maxPixels / max(bounds.height, 1))
-        format.opaque = true
-        let renderer = UIGraphicsImageRenderer(size: bounds.size, format: format)
-
-        let image = renderer.image { context in
-            let cg = context.cgContext
-            // 先铺一层背景色，避免出现透明区域
-            (backgroundColor ?? .systemBackground).setFill()
-            context.fill(CGRect(origin: .zero, size: bounds.size))
-
-            // 层次和真实视图一致：代码块背景、引用竖条在文字下面，勾选框在文字上面。
-            // 复制按钮 / 折叠三角是操作入口，不画进分享图
-            codeBlockBackgroundLayer.layer.render(in: cg)
-            quoteBarLayer.layer.render(in: cg)
-            drawAllLayoutFragments(in: cg)
-            checkboxLayer.layer.render(in: cg)
-        }
-
-        // 恢复现场：bounds/offset 一改，装饰层 KVO 会把装饰摆回可见区
-        bounds = savedBounds
-        contentOffset = savedOffset
-        layoutIfNeeded()
-        if hadFocus { becomeFirstResponder() }
-        return image
-    }
-
-    /// 把每个 `NSTextLayoutFragment`（文字 + 表格/图片/圆点等 attachment）画进图片上下文。
-    /// 这是 TextKit 2 导出全文的姿势：直接 `layer.render` 只能拿到「画过的」缓存，
-    /// 屏幕外是空白；自己枚举 fragment 逐个 draw 才能把没画过的段落真正渲染出来
-    private func drawAllLayoutFragments(in context: CGContext) {
-        guard let layoutManager = textLayoutManager else { return }
-        // ### 坐标系换算（同 computeCodeBlockFrames 的注释）
-        // layoutFragmentFrame 原点是 textContainer 左上角（已扣掉 textContainerInset），
-        // 图片画在 textView 坐标系里，x/y 要把 inset 补回来
-        let inset = textContainerInset
-        layoutManager.enumerateTextLayoutFragments(
-            from: layoutManager.documentRange.location,
-            options: [.ensuresLayout]
-        ) { fragment in
-            let frame = fragment.layoutFragmentFrame
-            guard !frame.isNull, frame.width > 0, frame.height > 0 else { return true }
-            // 访问一次 textLineFragments 强制它把文字段渲染出来：
-            // 屏幕外的 fragment 是「排了但没画」状态，直接 draw 可能画的是空的
-            _ = fragment.textLineFragments
-            fragment.draw(at: CGPoint(x: frame.minX + inset.left,
-                                      y: frame.minY + inset.top),
-                          in: context)
-            return true
-        }
-    }
+    // 导出长图已挪到 `MarkdownTextView+Export.swift`。
 }
 
 // MARK: - 手势共存
