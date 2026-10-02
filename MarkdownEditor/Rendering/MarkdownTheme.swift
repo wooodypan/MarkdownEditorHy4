@@ -304,64 +304,20 @@ struct MarkdownTheme {
     /// ### 改完必须整篇重渲染
     /// 颜色是**渲染那一刻烙进** `NSAttributedString` 的（代码块背景那种矩形除外），
     /// 只改主题不动画面。改完调 `MarkdownTextView.refreshTheme()`。
+    ///
+    /// ### 为什么这里是一层循环，把每个字段名抄两遍不行吗
+    /// 不行 —— 抄两遍就一定会漏：加一个新颜色时只改了上面那一半，界面上就会出现「我明明改了这一色，画面纹丝不动」。
+    /// 现在「配色表的哪个键 → 主题的哪个字段」这份对应关系只有 `MarkdownPaletteColorKey.themeColorPath` 一处，套主题和用户逐色编辑读的是同一份，天然不会走岔。
     mutating func applyColorPalette(_ palette: MarkdownColorPalette) {
         let base = MarkdownTheme.default
-        editorBackground = base.editorBackground
-        textColor = base.textColor
-        markerColor = base.markerColor
-        orderedListMarkerColor = base.orderedListMarkerColor
-        linkColor = base.linkColor
-        inlineCodeColor = base.inlineCodeColor
-        inlineCodeBacktickColor = base.inlineCodeBacktickColor
-        inlineCodeBackground = base.inlineCodeBackground
-        codeBlockBackground = base.codeBlockBackground
-        quoteTextColor = base.quoteTextColor
-        bulletColor = base.bulletColor
-        separatorColor = base.separatorColor
-        searchMatchBackground = base.searchMatchBackground
-        searchCurrentMatchBackground = base.searchCurrentMatchBackground
-        lineNumberColor = base.lineNumberColor
-        collapsedPlaceholderColor = base.collapsedPlaceholderColor
-        quoteBarColor = base.quoteBarColor
-        syntaxColors = base.syntaxColors
-        table.headerBackground = base.table.headerBackground
-        table.borderColor = base.table.borderColor
-        table.sourceTextColor = base.table.sourceTextColor
-        taskList.checkedColor = base.taskList.checkedColor
-        taskList.uncheckedBorderColor = base.taskList.uncheckedBorderColor
-        taskList.checkmarkColor = base.taskList.checkmarkColor
-
-        // 覆盖：配色表里给了才写，没给的保持上面刚退回来的默认色
-        if let color = palette.editorBackground?.color { editorBackground = color }
-        if let color = palette.text?.color { textColor = color }
-        if let color = palette.marker?.color { markerColor = color }
-        if let color = palette.orderedListMarker?.color { orderedListMarkerColor = color }
-        if let color = palette.link?.color { linkColor = color }
-        if let color = palette.inlineCode?.color { inlineCodeColor = color }
-        if let color = palette.inlineCodeBacktick?.color { inlineCodeBacktickColor = color }
-        if let color = palette.inlineCodeBackground?.color { inlineCodeBackground = color }
-        if let color = palette.codeBlockBackground?.color { codeBlockBackground = color }
-        if let color = palette.quoteText?.color { quoteTextColor = color }
-        if let color = palette.bullet?.color { bulletColor = color }
-        if let color = palette.separator?.color { separatorColor = color }
-        if let color = palette.searchMatchBackground?.color { searchMatchBackground = color }
-        if let color = palette.searchCurrentMatchBackground?.color {
-            searchCurrentMatchBackground = color
+        for key in MarkdownPaletteColorKey.allCases {
+            // 先退回内建默认（原因见上面「为什么要先退回默认再覆盖」）
+            self[keyPath: key.themeColorPath] = base[keyPath: key.themeColorPath]
+            // 再覆盖：配色表里给了才写，没给的保持上面刚退回来的默认色
+            if let color = palette[key]?.color {
+                self[keyPath: key.themeColorPath] = color
+            }
         }
-        if let color = palette.lineNumber?.color { lineNumberColor = color }
-        if let color = palette.collapsedPlaceholder?.color { collapsedPlaceholderColor = color }
-        if let color = palette.quoteBar?.color { quoteBarColor = color }
-        if let color = palette.keyword?.color { syntaxColors.keyword = color }
-        if let color = palette.string?.color { syntaxColors.string = color }
-        if let color = palette.comment?.color { syntaxColors.comment = color }
-        if let color = palette.number?.color { syntaxColors.number = color }
-        if let color = palette.type?.color { syntaxColors.type = color }
-        if let color = palette.tableHeaderBackground?.color { table.headerBackground = color }
-        if let color = palette.tableBorder?.color { table.borderColor = color }
-        if let color = palette.tableSourceText?.color { table.sourceTextColor = color }
-        if let color = palette.taskChecked?.color { taskList.checkedColor = color }
-        if let color = palette.taskUncheckedBorder?.color { taskList.uncheckedBorderColor = color }
-        if let color = palette.taskCheckmark?.color { taskList.checkmarkColor = color }
     }
 
     // MARK: 派生的属性字典

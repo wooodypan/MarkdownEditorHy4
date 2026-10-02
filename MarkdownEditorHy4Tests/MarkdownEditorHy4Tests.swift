@@ -633,6 +633,113 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertGreaterThan(button.layer.borderWidth, 0, "得有描边，不然「⋯」看着还是三个孤零零的点")
     }
 
+    /// 按钮垂直对齐：**底边**贴基线 —— 也就是跟 `x` 的底部齐平，比 `j` 的尾部高。
+    ///
+    /// ### 为什么改成「数像素」，不再「再算一遍基线来比」
+    /// 期望值原来是 `frag.minY + typ.minY + glyphOrigin.y` —— 跟生产代码**同一个公式**，公式本身错了这条测试照样绿（它只证明了「代码等于代码」）。
+    /// 现在把同一段带属性的文字画成位图，**直接数字迹最下面那个像素**：
+    /// `x` 没有降部、它的底就压在基线上；`j` 有降部、底比基线低 4 点。
+    /// 座位 `.standard` 段矩形的 `maxY`（行盒底）含降部，用它当基线会偏低一个降部深 —— 这条测试同时排除它。
+    func testCollapsedButtonBottomAlignsWithBaseline() {
+        let textView = makeEditor("# xj 标题\n\n正文。\n")
+        guard let index = textView.documentStore.blocks.firstIndex(where: { $0.headingLevel != nil }) else {
+            return XCTFail("样例里找不到标题")
+        }
+        textView.toggleCollapse(blockID: textView.documentStore.blocks[index].id)
+        textView.layoutIfNeeded()
+        // 控件定位挂在布局之后，动画式的重排要跑一下 runloop 才落地
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        textView.layoutIfNeeded()
+
+        guard let button = findSubview(in: textView, where: { $0 is CollapsedSectionButton }) as? CollapsedSectionButton else {
+            return XCTFail("折叠后的「⋯」应该有一个按钮")
+        }
+
+        // 画一张 1pt = 1px 的位图；标题不折行，所以这张图的 y 轴就是文字排布的 y 轴
+        let attributed = NSAttributedString(attributedString: textView.textStorage)
+        let width = textView.textContainer.size.width
+        let imageHeight: CGFloat = 120
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: imageHeight),
+                                            format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: width, height: imageHeight))
+            attributed.draw(with: CGRect(x: 0, y: 0, width: width, height: imageHeight),
+                            options: [.usesLineFragmentOrigin, .usesFontLeading],
+                            context: nil)
+        }
+        guard let cgImage = image.cgImage else { return XCTFail("位图没出来") }
+
+        var pixels = [UInt8](repeating: 255, count: cgImage.width * cgImage.height * 4)
+        guard let context = CGContext(data: &pixels,
+                                      width: cgImage.width,
+                                      height: cgImage.height,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: cgImage.width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return XCTFail("位图上下文建不起来")
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+
+        /// 某几列里最靠下的墨迹（位图内存第 0 行在最上面）
+        func inkBottom(in columns: ClosedRange<Int>) -> Int? {
+            var y = min(cgImage.height, Int(imageHeight)) - 1
+            while y >= 0 {
+                for x in columns where x >= 0 && x < cgImage.width {
+                    let offset = (y * cgImage.width + x) * 4
+                    let darkness = (Int(pixels[offset]) + Int(pixels[offset + 1]) + Int(pixels[offset + 2])) / 3
+                    if darkness < 140 { return y }
+                }
+                y -= 1
+            }
+            return nil
+        }
+
+        let columns = glyphColumns(of: ["x", "j"], in: textView, width: width)
+        let insetTop = textView.textContainerInset.top
+        guard let xColumns = columns["x"], let jColumns = columns["j"],
+              let xBottom = inkBottom(in: xColumns), let jBottom = inkBottom(in: jColumns) else {
+            return XCTFail("位图里没找到 x / j 的墨迹，取样列 = \(columns)")
+        }
+
+        XCTAssertEqual(CGFloat(xBottom) + insetTop, button.frame.maxY, accuracy: 2,
+                       "按钮底边（\(button.frame.maxY)）该跟 x 的底部（\(CGFloat(xBottom) + insetTop)）齐平")
+        XCTAssertGreaterThanOrEqual(CGFloat(jBottom) + insetTop - button.frame.maxY, 3,
+                                    "j 有降部，它的底部该明显低于按钮底边，现在只差 \(CGFloat(jBottom) + insetTop - button.frame.maxY)")
+    }
+
+    /// 借 TextKit 1 的字形矩形算出某个字符横向占了哪几列。
+    ///
+    /// 只取字形矩形的**中段 60%**：相邻字形是紧挨着的，取整段会把邻居的降部也量进来。
+    /// 这里只借它算**横向**位置，纵向的对齐由位图上的真实墨迹决定。
+    private func glyphColumns(of needles: [String],
+                              in textView: MarkdownTextView,
+                              width: CGFloat) -> [String: ClosedRange<Int>] {
+        let storage = NSTextStorage(attributedString: textView.textStorage)
+        let layoutManager = NSLayoutManager()
+        let container = NSTextContainer(size: CGSize(width: width, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        container.widthTracksTextView = false
+        layoutManager.addTextContainer(container)
+        storage.addLayoutManager(layoutManager)
+        layoutManager.ensureLayout(for: container)
+
+        var result: [String: ClosedRange<Int>] = [:]
+        for needle in needles {
+            let range = (storage.string as NSString).range(of: needle)
+            guard range.location != NSNotFound else { continue }
+            let glyph = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil).location
+            let rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+            let from = Int((rect.minX + rect.width * 0.2).rounded())
+            let to = Int((rect.maxX - rect.width * 0.2).rounded())
+            if from <= to { result[needle] = from...to }
+        }
+        return result
+    }
+
     /// ⚠️ 按钮的热区要比画出来的框大一圈，但**不能靠放大 frame** —— frame 就是画出来的那个框
     func testCollapsedButtonHitAreaIsBiggerThanItsBox() {
         let textView = makeEditor("# 标题\n\n正文。\n")
@@ -646,8 +753,8 @@ final class MarkdownEditorHy4Tests: XCTestCase {
             return XCTFail("折叠后的「⋯」应该有一个按钮")
         }
 
-        // 框正上方 6 点：已经出了框，但框只有 20 点高，按着框点太考验准头
-        let above = CGPoint(x: button.bounds.midX, y: -6)
+        // 框正上方 5 点：已经出了框，但热区上方撑了 6 点（底边贴基线后框顶贴近字迹，上方不敢撑多）
+        let above = CGPoint(x: button.bounds.midX, y: -5)
         XCTAssertFalse(button.bounds.contains(above), "这个点该确实在框外面（不然这条测试就没意义）")
         XCTAssertTrue(button.point(inside: above, with: nil), "框外面一圈也该点得中")
 

@@ -45,6 +45,13 @@ final class MarkdownDocumentOpener {
     func handle(url: URL) {
         guard url.isFileURL else { return }
 
+        // ⚠️ `.json` 不是文档，是主题文件：交给主题那边收走，别再往下当 .md 打开。
+        // 不拦的话双击一份主题 JSON 会在编辑器里开出一页「#ff0000」这种鬼东西，而且一按 ⌘S 就会把那份主题文件覆盖成它的源码。
+        if MarkdownThemeFileImport.isThemeFile(url) {
+            MarkdownThemeOpener.shared.handle(url: url)
+            return
+        }
+
         // Finder 传过来的是「安全作用域」URL：不显式申请访问就读不到内容。
         // 没沙盒时这个调用会返回 false，直接读文件也没问题，不影响。
         beginAccessing(url)

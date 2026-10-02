@@ -492,7 +492,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 配色放最前面：它只改颜色，后面那三组（字号、表格列宽、图片尺寸）
         // 会再按用户拖过的滑块覆盖自己那几个值，两者不冲突
         settings.applyColors(to: &editor.renderer.theme,
-                             customPalette: MarkdownCustomThemeStore.shared.loadPalette())
+                             customPalette: MarkdownCustomThemeStore.shared
+            .loadPalette(named: settings.customThemeFileName))
         // 编辑区外面的这一圈（宿主留白、大纲底下的底板）也要跟着底色走 ——
         // 深色主题下编辑区黑了、四周边框还是白的，看着像没换干净。
         // ⚠️ 大纲面板那一块刻意不动：它用的是系统色，自己会跟着系统的浅色 / 深色外观走

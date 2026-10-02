@@ -606,11 +606,34 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 选一套内置主题，**同时**停用「我的主题」里那份自定义配色 —— 两者互斥，同一时刻只能选一个。
+    ///
+    /// ### 为什么要单独合成一个方法
+    /// 界面上连着调 `setColorTheme` + `setCustomThemeFileName(nil)` 的话会发两次「配置变了」通知，打开的文档就要整篇重渲染两遍（大文档上肉眼可见地卡一下）。这里一次写盘、一次广播。
+    ///
+    /// ### 为什么「换内置」要顺手清掉自定义配色
+    /// 不清的话，用户点「Vue」看到的还是旧样子 —— 自定义配色盖在上面，内置主题换了个底色也看不出来，表现出来就是「三个内置主题全都点不动」。
+    func selectBuiltInTheme(_ value: MarkdownColorTheme) {
+        // 已经是这套、又没在用自定义配色 → 什么都没变，别惊动界面
+        guard value != colorTheme || customThemeFileName != nil else { return }
+        colorTheme = value
+        customThemeFileName = nil
+        save()
+        postChange()
+    }
+
     /// 记住「用户指定了哪份 JSON」（传 `nil` = 清除，回到只用内置主题的状态）
     func setCustomThemeFileName(_ value: String?) {
         guard value != customThemeFileName else { return }
         customThemeFileName = value
         save()
+        postChange()
+    }
+
+    /// 自定义配色的**内容**变了，但文件名没变（比如只是把链接从绿改成红）—— 这种情况上面那个 setter 会直接 return，得手动广播一次。
+    ///
+    /// 不发的话打开的文档不知道要重渲染，用户改完颜色回到正文会看到「没生效」。
+    func noteCustomPaletteChanged() {
         postChange()
     }
 
@@ -905,10 +928,17 @@ extension MarkdownEditorSettings {
     /// 主题页要给列表里每一套都画预览，`resolvedColorPalette(customPalette:)` 只能算「当前选中的」，所以真正的叠加规则写在这里，那边再包一层。
     func resolvedColorPalette(theme: MarkdownColorTheme,
                               customPalette: MarkdownColorPalette?) -> MarkdownColorPalette {
-        guard customThemeFileName != nil, let custom = customPalette else {
-            return theme.palette
-        }
-        return theme.palette.merging(custom)
+        // 「用户指定过」这一道闸只在这儿看：叠加规则本身在下面那个方法里，只此一份
+        guard customThemeFileName != nil else { return theme.palette }
+        return palette(base: theme, merging: customPalette)
+    }
+
+    /// 给列表里的某一行画预览用：指定的内置主题 + 指定的那份自定义配色，跟「当前选了谁」无关。
+    ///
+    /// ⚠️ 不能用 `resolvedColorPalette(customPalette:)`：那一个内部要先判「用户有没有指定过自定义配色」，没指定就直接把传进来的那份扔了 —— 给「我的主题」里那几行画预览时，配色是外面传进来的（可能正是没在用的那份），不该受当前选中影响。
+    func palette(base: MarkdownColorTheme, merging custom: MarkdownColorPalette?) -> MarkdownColorPalette {
+        guard let custom else { return base.palette }
+        return base.palette.merging(custom)
     }
 
     /// 把当前配色写进编辑器主题。

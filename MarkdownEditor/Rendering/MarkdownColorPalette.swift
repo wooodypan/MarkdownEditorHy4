@@ -42,6 +42,32 @@ struct MarkdownHexColor: Codable, Equatable {
         Self.parse(hex)
     }
 
+    /// 把一个 `UIColor` 写成十六进制字符串 —— 上面 `hex` 那条路的反方向，取色器挑完色要用它存回文件。
+    ///
+    /// 不透明就写 6 位（`#42b983`），带透明度就写 8 位（`#42b983d9`）：
+    /// 底色那几色必须能把透明度存下来，否则读回来会变成实色、盖住系统的选中高亮。
+    init(color: UIColor) {
+        self.hex = Self.string(from: color)
+    }
+
+    /// 把一个颜色写成十六进制字符串（`init(color:)` 背后干活的那个，方便只想要字符串的地方直接调）
+    static func string(from color: UIColor) -> String {
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 1
+        // 少数颜色不在 RGB 空间里（系统动态色、灰度色这类），取不出分量就退回不透明的黑 —— 调用方看得出「这一色没取到」，界面不会跟着乱
+        guard color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else { return "#000000" }
+
+        let body = [red, green, blue].map { String(format: "%02x", byte($0)) }.joined()
+        // 差一点点到 1 也算「不透明」：浮点误差不该让人拿到 8 位的 #fffffffe
+        return alpha >= 0.999 ? "#\(body)" : "#\(body)\(String(format: "%02x", byte(alpha)))"
+    }
+
+    /// 把 0~1 的分量量化成 0~255 的一个字节。
+    ///
+    /// 广色域（Display P3）的颜色分量可能略超出 0~1，先夹回来再取整 —— 不然 1.001 会溢出成 0，整块颜色反过来。
+    private static func byte(_ value: CGFloat) -> UInt8 {
+        UInt8(Int(max(0, min(255, (value * 255).rounded()))))
+    }
+
     /// 解析十六进制颜色：认 `#f0a` / `#ff00aa` / `#ff00aacc` 三种写法，`#` 前缀和大小写都不挑。
     ///
     /// 8 位写法里最后两位是**透明度**（`cc` ≈ 80%）：底色这类颜色必须能带透明度，
@@ -186,42 +212,245 @@ struct MarkdownColorPalette: Codable, Equatable {
         self == MarkdownColorPalette()
     }
 
+    /// 按「颜色的名字」读写某一个色（界面上一行一个色，用的就是它）。
+    ///
+    /// ### 为什么要有这个下标
+    /// 「逐个颜色摆一行让人改」这件事需要**遍历**这张表的字段，而 Swift 的 struct 没法直接枚举自己的字段。
+    /// 于是把 28 个字段的「门牌号」（key path）集中登记在 `MarkdownPaletteColorKey` 里，这里只是一个转手 —— 好处是加一个新颜色只要加一个字段 + 一个 case，别处一行都不用改。
+    subscript(key: MarkdownPaletteColorKey) -> MarkdownHexColor? {
+        get { self[keyPath: key.palettePath] }
+        set { self[keyPath: key.palettePath] = newValue }
+    }
+
+    /// 这一套里实际给了几个色（界面上要写「已改 N 色」）
+    var definedColorCount: Int {
+        MarkdownPaletteColorKey.allCases.filter { self[$0] != nil }.count
+    }
+
     /// 把另一套配色叠在自己上面（它有值的项覆盖我，没值的项保留我的）。
     ///
     /// 叠加顺序就是「优先级」：内置预设在下、用户的 JSON 在上，
     /// 所以调用时写成 `preset.merging(userPalette)`。
     func merging(_ other: MarkdownColorPalette) -> MarkdownColorPalette {
         var result = self
-        result.editorBackground = other.editorBackground ?? editorBackground
-        result.text = other.text ?? text
-        result.marker = other.marker ?? marker
-        result.orderedListMarker = other.orderedListMarker ?? orderedListMarker
-        result.link = other.link ?? link
-        result.inlineCode = other.inlineCode ?? inlineCode
-        result.inlineCodeBacktick = other.inlineCodeBacktick ?? inlineCodeBacktick
-        result.inlineCodeBackground = other.inlineCodeBackground ?? inlineCodeBackground
-        result.codeBlockBackground = other.codeBlockBackground ?? codeBlockBackground
-        result.quoteText = other.quoteText ?? quoteText
-        result.quoteBar = other.quoteBar ?? quoteBar
-        result.bullet = other.bullet ?? bullet
-        result.separator = other.separator ?? separator
-        result.searchMatchBackground = other.searchMatchBackground ?? searchMatchBackground
-        result.searchCurrentMatchBackground =
-            other.searchCurrentMatchBackground ?? searchCurrentMatchBackground
-        result.lineNumber = other.lineNumber ?? lineNumber
-        result.collapsedPlaceholder = other.collapsedPlaceholder ?? collapsedPlaceholder
-        result.keyword = other.keyword ?? keyword
-        result.string = other.string ?? string
-        result.comment = other.comment ?? comment
-        result.number = other.number ?? number
-        result.type = other.type ?? type
-        result.tableHeaderBackground = other.tableHeaderBackground ?? tableHeaderBackground
-        result.tableBorder = other.tableBorder ?? tableBorder
-        result.tableSourceText = other.tableSourceText ?? tableSourceText
-        result.taskChecked = other.taskChecked ?? taskChecked
-        result.taskUncheckedBorder = other.taskUncheckedBorder ?? taskUncheckedBorder
-        result.taskCheckmark = other.taskCheckmark ?? taskCheckmark
+        // 走 `allCases` 而不是挨个写字段名：以后加一个色，`MarkdownPaletteColorKey` 里多一个 case 就自动跟上
+        for key in MarkdownPaletteColorKey.allCases {
+            result[key] = other[key] ?? self[key]
+        }
         return result
+    }
+
+    /// 导出成 JSON（给别人用、或者自己留一份）。
+    ///
+    /// ### 为什么导出来只有「改过的那几色」
+    /// 这张表本身就是覆盖表，没给的项就是 `nil`，而 `Codable` 对可选字段用的是 `encodeIfPresent` —— `nil` 的键**不会写进文件**。所以导出来的正好是「我动了哪些」，别人套在自己主题上不会把整套颜色全冲掉。
+    func jsonData(prettyPrinted: Bool = true) throws -> Data {
+        let encoder = JSONEncoder()
+        if prettyPrinted {
+            encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+        }
+        return try encoder.encode(self)
+    }
+}
+
+// MARK: - 颜色清单（界面上一行一个色）
+
+/// 一个色在界面上属于哪一区（只是分组显示用，不影响颜色本身）
+enum MarkdownPaletteColorGroup: String, CaseIterable {
+    /// 编辑区里看得见的那些色
+    case editor
+    /// 代码块里的语法高亮（五个语法角色）
+    case syntax
+    /// 表格和任务列表
+    case table
+
+    var displayName: String {
+        switch self {
+        case .editor: return "编辑区"
+        case .syntax: return "代码高亮"
+        case .table: return "表格与任务列表"
+        }
+    }
+}
+
+/// 配色表里**每一个颜色**的名字。
+///
+/// ### 为什么要有这么一个枚举
+/// 「让用户逐个改颜色」需要三件 struct 自己给不了的东西：遍历（一行一个色）、名字（给用户看）、以及它在两张表里的门牌号。
+/// 枚举的 `rawValue` 就是 JSON 里的键名，`palettePath` 指回 `MarkdownColorPalette` 的字段、`themeColorPath` 指到 `MarkdownTheme` 上对应的那个 `UIColor`
+/// —— 于是 `MarkdownTheme.applyColorPalette` 也能改成遍历它，不再需要把 28 个字段抄两遍（抄两遍的必然结果就是加颜色时漏一处，界面上「改了没生效」）。
+///
+/// ### 加一个新颜色要做的事
+/// 1. `MarkdownColorPalette` 加字段；2. 这里加 case（三个 switch 各写一行）；3. `MarkdownTheme` 加字段。
+/// 三处都齐了，`MarkdownColorThemeTests` 里那条「枚举个数 == 字段个数」的断言才不会红。
+enum MarkdownPaletteColorKey: String, CaseIterable, Identifiable {
+
+    // 编辑区
+    case editorBackground
+    case text
+    case marker
+    case orderedListMarker
+    case link
+    case inlineCode
+    case inlineCodeBacktick
+    case inlineCodeBackground
+    case codeBlockBackground
+    case quoteText
+    case quoteBar
+    case bullet
+    case separator
+    case searchMatchBackground
+    case searchCurrentMatchBackground
+    case lineNumber
+    case collapsedPlaceholder
+
+    // 代码高亮
+    case keyword
+    case string
+    case comment
+    case number
+    case type
+
+    // 表格与任务列表
+    case tableHeaderBackground
+    case tableBorder
+    case tableSourceText
+    case taskChecked
+    case taskUncheckedBorder
+    case taskCheckmark
+
+    /// `Identifiable` 要的身份证：就是 JSON 里的键名（比如 `inlineCodeBackground`）
+    var id: String { rawValue }
+
+    /// 界面上显示的名字
+    var displayName: String {
+        switch self {
+        case .editorBackground: return "编辑区底色"
+        case .text: return "正文文字"
+        case .marker: return "语法标记"
+        case .orderedListMarker: return "有序列表序号"
+        case .link: return "链接"
+        case .inlineCode: return "行内代码文字"
+        case .inlineCodeBacktick: return "行内代码反引号"
+        case .inlineCodeBackground: return "行内代码底色"
+        case .codeBlockBackground: return "代码块底色"
+        case .quoteText: return "引用块文字"
+        case .quoteBar: return "引用块竖条"
+        case .bullet: return "列表圆点"
+        case .separator: return "分隔线"
+        case .searchMatchBackground: return "查找命中底色"
+        case .searchCurrentMatchBackground: return "当前命中底色"
+        case .lineNumber: return "行号"
+        case .collapsedPlaceholder: return "折叠占位「⋯」"
+        case .keyword: return "关键字"
+        case .string: return "字符串"
+        case .comment: return "注释"
+        case .number: return "数字"
+        case .type: return "类型名"
+        case .tableHeaderBackground: return "表头底色"
+        case .tableBorder: return "表格线"
+        case .tableSourceText: return "表格源码文字"
+        case .taskChecked: return "复选框（已勾选）"
+        case .taskUncheckedBorder: return "复选框边框（未勾选）"
+        case .taskCheckmark: return "复选框对勾"
+        }
+    }
+
+    /// 属于哪一区
+    var group: MarkdownPaletteColorGroup {
+        switch self {
+        case .keyword, .string, .comment, .number, .type: return .syntax
+        case .tableHeaderBackground, .tableBorder, .tableSourceText,
+             .taskChecked, .taskUncheckedBorder, .taskCheckmark: return .table
+        default: return .editor
+        }
+    }
+
+    /// 行下面那一行小字：写这一色的「注意事项」，没有就 `nil`（大多数色没什么好说的）
+    var note: String? {
+        switch self {
+        case .inlineCodeBackground:
+            return "必须半透明：它是挂在文字上的底色，不透明会盖住系统画在下面的选中高亮。"
+        case .editorBackground:
+            return "深色主题主要靠它把整片背景压下来。"
+        default:
+            return nil
+        }
+    }
+
+    /// 这一色在**配色表**里的门牌号（读写 JSON 里那个键用的就是它）
+    var palettePath: WritableKeyPath<MarkdownColorPalette, MarkdownHexColor?> {
+        switch self {
+        case .editorBackground: return \.editorBackground
+        case .text: return \.text
+        case .marker: return \.marker
+        case .orderedListMarker: return \.orderedListMarker
+        case .link: return \.link
+        case .inlineCode: return \.inlineCode
+        case .inlineCodeBacktick: return \.inlineCodeBacktick
+        case .inlineCodeBackground: return \.inlineCodeBackground
+        case .codeBlockBackground: return \.codeBlockBackground
+        case .quoteText: return \.quoteText
+        case .quoteBar: return \.quoteBar
+        case .bullet: return \.bullet
+        case .separator: return \.separator
+        case .searchMatchBackground: return \.searchMatchBackground
+        case .searchCurrentMatchBackground: return \.searchCurrentMatchBackground
+        case .lineNumber: return \.lineNumber
+        case .collapsedPlaceholder: return \.collapsedPlaceholder
+        case .keyword: return \.keyword
+        case .string: return \.string
+        case .comment: return \.comment
+        case .number: return \.number
+        case .type: return \.type
+        case .tableHeaderBackground: return \.tableHeaderBackground
+        case .tableBorder: return \.tableBorder
+        case .tableSourceText: return \.tableSourceText
+        case .taskChecked: return \.taskChecked
+        case .taskUncheckedBorder: return \.taskUncheckedBorder
+        case .taskCheckmark: return \.taskCheckmark
+        }
+    }
+
+    /// 这一色**套进 `MarkdownTheme` 之后**落在哪个字段上（界面上要显示「现在实际是什么色」就得读它）
+    var themeColorPath: WritableKeyPath<MarkdownTheme, UIColor> {
+        switch self {
+        case .editorBackground: return \.editorBackground
+        case .text: return \.textColor
+        case .marker: return \.markerColor
+        case .orderedListMarker: return \.orderedListMarkerColor
+        case .link: return \.linkColor
+        case .inlineCode: return \.inlineCodeColor
+        case .inlineCodeBacktick: return \.inlineCodeBacktickColor
+        case .inlineCodeBackground: return \.inlineCodeBackground
+        case .codeBlockBackground: return \.codeBlockBackground
+        case .quoteText: return \.quoteTextColor
+        case .quoteBar: return \.quoteBarColor
+        case .bullet: return \.bulletColor
+        case .separator: return \.separatorColor
+        case .searchMatchBackground: return \.searchMatchBackground
+        case .searchCurrentMatchBackground: return \.searchCurrentMatchBackground
+        case .lineNumber: return \.lineNumberColor
+        case .collapsedPlaceholder: return \.collapsedPlaceholderColor
+        // 下面这几个是 `MarkdownTheme` 里嵌套的小结构体，key path 可以一层层穿进去
+        case .keyword: return \.syntaxColors.keyword
+        case .string: return \.syntaxColors.string
+        case .comment: return \.syntaxColors.comment
+        case .number: return \.syntaxColors.number
+        case .type: return \.syntaxColors.type
+        case .tableHeaderBackground: return \.table.headerBackground
+        case .tableBorder: return \.table.borderColor
+        case .tableSourceText: return \.table.sourceTextColor
+        case .taskChecked: return \.taskList.checkedColor
+        case .taskUncheckedBorder: return \.taskList.uncheckedBorderColor
+        case .taskCheckmark: return \.taskList.checkmarkColor
+        }
+    }
+
+    /// 某一区里有哪些色（界面按区分段用的就是这个）
+    static func keys(in group: MarkdownPaletteColorGroup) -> [MarkdownPaletteColorKey] {
+        // 按 case 的声明顺序排 —— 也就是上面写的「底色 → 文字 → 标记 → …」这个顺序，用户找起来顺手
+        allCases.filter { $0.group == group }
     }
 }
 

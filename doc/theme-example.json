@@ -1,5 +1,5 @@
 {
-  "//": "主题样例：只写想改的几色，其余继续用所选内置主题的颜色。挑文件时只认 .json，键名见 MarkdownColorPalette。",
+  "//": "主题样例：只写想改的几色，其余继续用所选内置主题的颜色。挑文件时只认 .json，键名见 MarkdownColorPalette（App 里「主题 → 逐色调整 → 导出」也能导出一份现成的对照明细）。",
   "//写法": "十六进制，#RGB / #RRGGBB / #RRGGBBAA 都行；8 位的后两位是不透明度（斜线开头的这几行是注释，会被忽略）",
 
   "editorBackground": "#ffffff",
