@@ -211,6 +211,9 @@ struct MarkdownTheme {
     /// 数学公式（`$...$` / `$$...$$`）的样式，见 `MathStyle`
     var math = MathStyle()
 
+    /// 脚注（`[^1]` 引用 / `[^1]: 说明` 定义）的样式，见 `MarkdownTheme+Footnote.swift`
+    var footnote = FootnoteStyle()
+
     // MARK: 默认样式
 
     static var `default`: MarkdownTheme {

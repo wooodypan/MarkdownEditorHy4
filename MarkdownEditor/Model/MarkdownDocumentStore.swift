@@ -104,6 +104,8 @@ final class MarkdownDocumentStore {
     func load(markdown: String, containerWidth: CGFloat) {
         renderer.containerWidth = containerWidth
         fullSource = markdown
+        // 脚注：渲染一次只看见一个块，而「这个 `[^1]` 有没有定义」要问整篇，渲染前先把答案给渲染器（见 `FootnoteIndex` 的注释）
+        renderer.footnoteDefinitionIDs = FootnoteIndex.definitionIDs(in: markdown)
         blocks = buildBlocks(region: NSRange(location: 0, length: markdown.utf16Length), of: markdown)
         // 折叠状态在加载时统一算一遍（初始全是展开，但「哪些标题配挂三角」要在这里定）
         refreshCollapseState()
@@ -138,6 +140,11 @@ final class MarkdownDocumentStore {
         // 2) 算出新的整篇源码
         let newSource = (fullSource as NSString).replacingCharacters(in: editRange, with: text)
         let replacementLength = (text as NSString).length
+
+        // 脚注定义可能刚被这次编辑加上 / 删掉，而重新渲染只覆盖受影响的那一两块 ——
+        // 所以按**新的整篇源码**把「已定义的 ID」刷一遍，正文里那些没被重画的引用颜色才不会停在旧结果上
+        // （理由见 `FootnoteIndex`：整篇里 `[^` 没几处，现扫一遍的代价可以忽略）
+        renderer.footnoteDefinitionIDs = FootnoteIndex.definitionIDs(in: newSource)
 
         // 3) 受影响的块
         let affected = affectedBlockIndices(forRenderedRange: effectiveRange, sourceEditRange: editRange)

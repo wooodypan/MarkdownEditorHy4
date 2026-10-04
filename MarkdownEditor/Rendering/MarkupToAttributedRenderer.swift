@@ -44,6 +44,13 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     /// 精确解析器，只要实现同一个协议塞进来就行，UI 层一行都不用改。
     var codeHighlighter: CodeHighlighting? = SimpleCodeHighlighter()
 
+    /// 整篇文档里「已经写了定义的脚注 ID」。
+    ///
+    /// 渲染一次只看见**当前这一个块**，而「这个 `[^1]` 有没有对应的定义」要问整篇 —— 答案由 `MarkdownDocumentStore`
+    /// 在渲染前填进来（`FootnoteIndex.definitionIDs(in:)`）。没填就是空集合：所有引用都按「悬空」画。
+    /// 没有定义时引用画成断链的红色，有定义时画成强调色，详见 `MarkdownTheme+Footnote.swift`。
+    var footnoteDefinitionIDs: Set<String> = []
+
     /// 公式渲染器（`MarkdownMathRenderer`）。给 nil 就**不渲染**公式 ——
     /// `$x^2$` 会按源码原文连 `$` 一起显示，功能降级但不会出错。
     ///
@@ -109,10 +116,20 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         }
 
         // 兜底 + 补漏：保证源码里每个字符都在渲染结果里有归宿
-        let fixed = fragment.reconciled(
+        var fixed = fragment.reconciled(
             withSource: blockSource,
             orphanAttributes: theme.orphanAttributes
         )
+
+        // 脚注定义块（`[^1]: 说明`）：整块缩进一档 + 开头的标记弱化 + 挂上 ID（正文里点引用能跳过来）。
+        //
+        // ### 为什么认在**块级**而不是 `visitParagraph` 里
+        // swift-markdown 没有脚注节点，而 cmark 会按 CommonMark 的规矩把 `[^1]: 说明` 当成
+        // **链接引用定义**吃掉（只要冒号后面那串不含空格，比如整句中文）—— 那它压根不是一个段落节点，
+        // `visitParagraph` 永远不会被调用。整块开头是不是 `[^id]:` 这件事，只有在这里看得见。
+        if let marker = FootnoteIndex.definitionMarker(in: blockSource) {
+            stylingFootnoteDefinition(&fixed, id: marker.id, markerSourceRange: marker.range, indent: 0)
+        }
         return (fixed.text, fixed.mappings)
     }
 
@@ -172,9 +189,12 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         // 只有「注入了公式渲染器」且「这段文字里有 $」才去扫 ——
         // 绝大多数正文不含 `$`，这个提前返回能省掉一个大扫描
         guard mathRenderer != nil, raw.contains("$") else {
-            return .sourceSliced(raw, sourceStart: range.location, attributes: bodyAttributes)
+            let plain = RenderedFragment.sourceSliced(raw, sourceStart: range.location, attributes: bodyAttributes)
+            // 脚注引用（`[^1]`）是**纯属性**语法：认出来之后只改字体 / 颜色 / 上标偏移，不插字符、不改长度
+            return stylingFootnoteReferences(in: plain, rawText: raw, sourceRange: range, baseFont: currentFont)
         }
-        return renderTextWithMath(raw, in: range)
+        let withMath = renderTextWithMath(raw, in: range)
+        return stylingFootnoteReferences(in: withMath, rawText: raw, sourceRange: range, baseFont: currentFont)
     }
 
     // MARK: 数学公式

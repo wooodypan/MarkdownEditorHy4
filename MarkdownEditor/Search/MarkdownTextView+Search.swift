@@ -333,7 +333,8 @@ extension MarkdownTextView: MarkdownSearchDataSource {
     ///
     /// 命中被排到好几行时会占多行，`enumerateTextSegments` 一次给一段、这里全都要：
     /// 只取第一段的话黄块就停在第一行的末尾；把它们 union 成一块的话，中间那些和命中无关的行（行首到行尾的空白区域）也会被整块涂满。
-    private func segmentFrames(forRenderedRange range: NSRange,
+    /// ⚠️ 不是 `private`：脚注跳转落地时也要「渲染范围 → 文档坐标矩形」，复用同一套换算（`MarkdownTextView+Footnote.swift`）。
+    func segmentFrames(forRenderedRange range: NSRange,
                                contentStorage: NSTextContentStorage,
                                layoutManager: NSTextLayoutManager) -> [CGRect] {
         let documentStart = contentStorage.documentRange.location

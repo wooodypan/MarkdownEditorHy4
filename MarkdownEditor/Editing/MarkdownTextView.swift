@@ -100,6 +100,13 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 读写发生在 `MarkdownTextView+Search.swift`，所以不能标 `private`。
     let searchHighlightLayer = SearchHighlightLayer()
 
+    /// 脚注跳转的运行时状态（落地高亮的矩形、回跳要去的位置）。
+    ///
+    /// ### 为什么打包成一个类而不是四个散装的存储属性
+    /// Swift 的 extension 里不能声明存储属性，而脚注逻辑整个放在 `MarkdownTextView+Footnote.swift` 里。
+    /// 这里只声明一个坑位，里面的字段见那个文件里的 `FootnoteJumpState`。
+    var footnoteJumpState = FootnoteJumpState()
+
     // MARK: 状态
 
     /// 上一次同步给模型的渲染文本。textView 的实际内容和它 diff，就能定位用户改了哪一段。
@@ -233,6 +240,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         setupCodeBlockDecorations()
         setupLineNumbers()
         setupSearchDecorations()
+        setupFootnoteDecorations()
         setupFoldDecorations()
         setMarkdown(markdown)
     }
@@ -260,6 +268,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         autocapitalizationType = .none
 
         setupImageTapGesture()
+        // 脚注：⌘ + 点正文里的 `[^1]` 跳到它的定义处（手势和处理都在 `MarkdownTextView+Footnote.swift`）
+        setupFootnoteTapGesture()
     }
 
     // MARK: 查找命中的高亮层
@@ -565,6 +575,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             self?.positionCheckboxes()
             self?.positionFoldControls()
             self?.positionSearchHighlights()
+            self?.positionFootnoteFlash()
             self?.positionLineNumbers()
             // 2) 再要一轮布局：重算必须发生在 `layoutSubviews` 里（**在 super.layoutSubviews()
             //    之后**）—— TextKit 是在那一轮里更新 viewport 的，在滚动回调里直接算拿到的是
