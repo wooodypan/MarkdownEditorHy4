@@ -125,11 +125,6 @@ final class MarkdownDocumentStore {
                    containerWidth: CGFloat) -> MarkdownEditOutcome {
         renderer.containerWidth = containerWidth
 
-        // 编辑前先给「整篇的标题列表」拍一张快照。第 9 步要拿它和编辑后的比一比，
-        // 才能发现「标题自己没动、只是被上面的编辑顶移了」这一类变化。
-        // 必须在这之前取：下面第 6 步就会把旧块换掉，之后就拍不到旧照片了
-        let headingsBefore = headingFingerprint()
-
         // 1) 渲染范围 → 源码范围。
         //    删除时先做一次「语法标记扩展」：退格删到 `- ` 里就整段删掉（见方法注释）
         let effectiveRange = text.isEmpty ? expandedSyntaxMarkerRange(renderedRange) : renderedRange
@@ -141,13 +136,20 @@ final class MarkdownDocumentStore {
         let newSource = (fullSource as NSString).replacingCharacters(in: editRange, with: text)
         let replacementLength = (text as NSString).length
 
-        // 脚注定义可能刚被这次编辑加上 / 删掉，而重新渲染只覆盖受影响的那一两块 ——
-        // 所以按**新的整篇源码**把「已定义的 ID」刷一遍，正文里那些没被重画的引用颜色才不会停在旧结果上
-        // （理由见 `FootnoteIndex`：整篇里 `[^` 没几处，现扫一遍的代价可以忽略）
+        // 脚注定义可能刚被这次编辑加上 / 删掉，而重新渲染只覆盖受影响的那一两块 ——所以按**新的整篇源码**把「已定义的 ID」刷一遍，正文里那些没被重画的引用颜色才不会停在旧结果上（理由见 `FootnoteIndex`：整篇里 `[^` 没几处，现扫一遍的代价可以忽略）
         renderer.footnoteDefinitionIDs = FootnoteIndex.definitionIDs(in: newSource)
 
         // 3) 受影响的块
         let affected = affectedBlockIndices(forRenderedRange: effectiveRange, sourceEditRange: editRange)
+
+        // 编辑前先给「受影响处之后的标题列表」拍一张快照（第 9 步要拿它和编辑后的比）。
+        //
+        // ### 为什么只拍后半段
+        // 编辑点**之前**的块源码一个字节都没动，那些标题的位置、层级、文字不可能变，拍进来只是白白多扫一遍。而「在文末连续打字」是最常见的输入场景 ——那条路径上 affected.lowerBound 就在数组末尾，指纹从 O(块数) 直接降成 O(1)。
+        //
+        // ### 为什么要放在第 3 步之后
+        // 起点要用 `affected.lowerBound`；而它必须早于第 6 步（旧块在那儿被换掉，之后就拍不到旧照片了）。
+        let headingsBefore = headingFingerprint(fromBlockIndex: affected.lowerBound)
 
         // 4) 需要重新 parse 的区域（先按旧源码取并集，再按增删量伸缩，最后保证包含编辑点）
         var reparseRange = unionSourceRange(of: affected)
@@ -168,8 +170,9 @@ final class MarkdownDocumentStore {
         fullSource = newSource
         inheritCollapseStates(from: oldBlocks, to: newBlocks)
         // 折叠相关的渲染（谁隐藏、谁画成「标题 + ⋯」、谁挂三角）统一在这里刷新。
-        // 它会顺带把块的范围重算一遍，所以不用再单独调 recomputeRanges
-        refreshCollapseState()
+        // 它会顺带把块的范围重算一遍，所以不用再单独调 recomputeRanges。
+        // ⚠️ 只重算 `affected.lowerBound` 之后的：前面的块源码一个字节没动，范围不会变
+        refreshCollapseState(rangesFrom: affected.lowerBound)
 
         // 7) 拼出要替换进去的新内容
         let newContent = NSMutableAttributedString()
@@ -192,7 +195,7 @@ final class MarkdownDocumentStore {
         //    指纹不变，仍是 false —— 长文档在最后一段里连续打字不会被目录拖慢。
         let headingsChanged = oldBlocks.contains { $0.headingLevel != nil }
             || newBlocks.contains { $0.headingLevel != nil }
-            || headingsBefore != headingFingerprint()
+            || headingsBefore != headingFingerprint(fromBlockIndex: affected.lowerBound)
 
         return MarkdownEditOutcome(replacedRange: oldRenderedRange,
                                    newContent: newContent,
@@ -246,12 +249,59 @@ final class MarkdownDocumentStore {
 
     // MARK: - 坐标换算
 
+    // MARK: - 块定位（二分）
+
+    /// 找出「渲染偏移落在哪个块里」。以前是从头扫一遍所有块，这里改成二分。
+    ///
+    /// ### 为什么能二分
+    /// `recomputeRanges` 让每一块的 `renderedRange` 严丝合缝接在前一块后面（被折叠隐藏的块长度是 0，相当于原地占位），所以「每一块的结束位置」这个序列单调不减 —— 二分能用的前提就在这儿。
+    ///
+    /// ### 为什么取「第一个结束位置 ≥ offset」的那一块
+    /// 老写法是「从头扫，取第一个范围包含 offset 的**可见**块」：块边界那个偏移同时属于前一块的末尾和后一块的开头，老写法取**前一块**（光标因此留在段落末尾，不会跳到下一段开头；改了会明显偏移一格）。
+    /// 而隐藏块长度是 0，它的结束位置正好等于前一个可见块的结束位置 —— 所以它永远排在那个可见块**后面**，「第一个结束位置 ≥ offset」天然就是可见块，和老写法同解。
+    private func blockIndex(forRenderedOffset offset: Int) -> Int? {
+        var low = 0
+        var high = blocks.count - 1
+
+        while low < high {
+            let mid = (low + high) / 2
+            if NSMaxRange(blocks[mid].renderedRange) >= offset { high = mid } else { low = mid + 1 }
+        }
+        guard low < blocks.count, NSMaxRange(blocks[low].renderedRange) >= offset else { return nil }
+        return low
+    }
+
+    /// 找出「源码偏移落在哪个块里」（二分，理由同上）。
+    ///
+    /// ### 和渲染坐标那一个的差别：这里命中后可能要往后跳
+    /// 块的**源码**范围是连着的，被折叠隐藏的块**照旧占着源码长度**（只是屏幕上不显示），所以二分命中的可能是一个隐藏块。它的源码不属于任何可见块，要往后跳过连续的隐藏块，取第一个可见块 —— 跳过之后 offset 已经落在该块的开头之前了，那就返回 nil（老写法同样当文末处理）。
+    private func blockIndex(forSourceOffset offset: Int) -> Int? {
+        var low = 0
+        var high = blocks.count - 1
+
+        while low < high {
+            let mid = (low + high) / 2
+            if NSMaxRange(blocks[mid].sourceRange) > offset { high = mid } else { low = mid + 1 }
+        }
+        guard low < blocks.count, NSMaxRange(blocks[low].sourceRange) > offset else { return nil }
+
+        var index = low
+        while index < blocks.count {
+            let block = blocks[index]
+            guard block.isHidden else {
+                let range = block.sourceRange
+                return offset >= range.location && offset < NSMaxRange(range) ? index : nil
+            }
+            index += 1
+        }
+        return nil
+    }
+
     /// 渲染偏移（光标位置）→ 源码偏移
     func sourceCaret(forRenderedOffset offset: Int) -> Int {
-        for block in blocks where !block.isHidden {
+        if let index = blockIndex(forRenderedOffset: offset) {
+            let block = blocks[index]
             let range = block.renderedRange
-            guard offset >= range.location, offset <= NSMaxRange(range) else { continue }
-
             let local = offset - range.location
 
             // 优先看当前位置这个字符的映射
@@ -259,13 +309,13 @@ final class MarkdownDocumentStore {
                 return block.sourceRange.location + mapping.sourceStart
             }
             // 当前位置是装饰字符（或者正好在块末尾），就往前找最近一个有源码映射的字符，取它的结束位置
-            var index = min(local, block.charMappings.count) - 1
-            while index >= 0 {
-                let mapping = block.charMappings[index]
+            var probe = min(local, block.charMappings.count) - 1
+            while probe >= 0 {
+                let mapping = block.charMappings[probe]
                 if !mapping.isDecoration {
                     return block.sourceRange.location + mapping.sourceStart + mapping.sourceLength
                 }
-                index -= 1
+                probe -= 1
             }
             return block.sourceRange.location
         }
@@ -275,15 +325,15 @@ final class MarkdownDocumentStore {
 
     /// 源码偏移（光标位置）→ 渲染偏移
     func renderedCaret(forSourceOffset offset: Int) -> Int {
-        for block in blocks where !block.isHidden {
+        if let index = blockIndex(forSourceOffset: offset) {
+            let block = blocks[index]
             let range = block.sourceRange
             // 注意这里是 `<` 不是 `<=`：块与块的源码首尾相接，边界那个偏移同时属于
             // 「前一块的末尾」和「后一块的开头」。用 `<=` 会命中前一块，
             // 光标就落到了前一块的最后一个字符位上（比如列表块开头那个圆点里）。
             // 用 `<` 让边界归后一块，光标才能落在后一块真正的源码文本上。
-            guard offset >= range.location, offset < NSMaxRange(range) else { continue }
-
             let local = offset - range.location
+
             // 第一遍：跳过图片、圆点这类「额外挂上去的视觉元素」，
             // 光标要落在真正的源码文本上（源码文本就在这些元素旁边）。
             // 否则光标会停进图片里，用户继续输入就成了「在图片里打字」。
@@ -546,7 +596,11 @@ final class MarkdownDocumentStore {
     /// ### 刷新是幂等的、也尽量不干活
     /// 只有当「该不该隐藏」「该不该折叠」「该不该有三角」和现在渲染出来的样子不一致时
     /// 才重新渲染，所以每敲一个字最多重画受影响的那一两个标题，不会整篇重来。
-    private func refreshCollapseState() {
+    ///
+    /// - parameter rangesFrom: 只影响末尾 `recomputeRanges` 的起点（见它的注释）。
+    ///   ⚠️ **主循环本身不跟着缩**：一个标题「管到哪儿」要看**后面**有没有同级标题，在它自己的节里插入一个新标题，会把它的节范围改短 —— 也就是说编辑点**前面** 的标题也可能要重画（比如它正折着，「⋯」代表的隐藏长度变了）。
+    ///   为了这一点去回溯「受影响的标题」容易漏，而主循环只是 n 次字段读取，很便宜，所以只把真正 O(n) 且带字符串拼接的那一步（重算范围）做成增量。
+    private func refreshCollapseState(rangesFrom: Int = 0) {
         updateHiddenStates()
 
         for index in blocks.indices {
@@ -583,7 +637,7 @@ final class MarkdownDocumentStore {
             }
         }
 
-        recomputeRanges()
+        recomputeRanges(from: rangesFrom)
     }
 
     /// 算出每个块「是不是落在某个已折叠标题底下」。
@@ -725,10 +779,25 @@ final class MarkdownDocumentStore {
     }
 
     /// 重新计算每一块的源码范围和渲染范围（块的源码首尾相接，渲染结果也是首尾相接）
-    private func recomputeRanges() {
+    ///
+    /// - parameter startIndex: 从哪一块开始重算。**它前面的块完全不动** —— 一次编辑只会让
+    ///   改动点之后的块整体平移，前面的源码和渲染长度一个字节都没变，重算是白跑。
+    ///   增量编辑传 `affected.lowerBound`，于是「在文末打字」从 O(块数) 降成 O(1)。
+    ///   整篇加载 / 折叠切换传默认值 0（那时确实每一块都要重算）。
+    private func recomputeRanges(from startIndex: Int = 0) {
+        let start = max(0, min(startIndex, blocks.count))
+
         var sourceLocation = 0
         var renderedLocation = 0
-        for block in blocks {
+        // 接着上一块的尾巴往下数：前一个块的范围已经是现成的正确值，不用从头累加
+        if start > 0 {
+            let previous = blocks[start - 1]
+            sourceLocation = NSMaxRange(previous.sourceRange)
+            renderedLocation = NSMaxRange(previous.renderedRange)
+        }
+
+        for index in start..<blocks.count {
+            let block = blocks[index]
             block.sourceRange = NSRange(location: sourceLocation, length: block.sourceText.utf16Length)
             block.renderedRange = NSRange(location: renderedLocation, length: block.renderedLength)
             sourceLocation += block.sourceText.utf16Length
@@ -754,14 +823,15 @@ final class MarkdownDocumentStore {
     ///
     /// ### 成本
     /// `O(块数)` 的纯字段读取（不做字符串比较，除非前面字段都相同）。
-    /// 标题数量远小于块数，而且块数在同一量级上的扫描 `affectedBlockIndices` 里
-    /// 本来就有一次，所以这条不会改变 `applyEdit` 的复杂度量级。
+    /// 传了 `fromBlockIndex` 就只扫后半段 —— `applyEdit` 里两张快照都从 `affected.lowerBound`
+    /// 起拍，于是「在文末连续打字」这条最常见的路径上它几乎是免费的。
     ///
     /// ### 顺序
     /// 按 `blocks` 顺序遍历，而块与块的源码首尾相接、偏移单调递增，
     /// 所以两张快照的数组顺序天然可比（不需要排序）。
-    private func headingFingerprint() -> [HeadingFingerprint] {
-        blocks.compactMap { block in
+    private func headingFingerprint(fromBlockIndex startIndex: Int = 0) -> [HeadingFingerprint] {
+        let start = max(0, min(startIndex, blocks.count))
+        return blocks[start...].compactMap { block in
             guard let level = block.headingLevel else { return nil }
             return HeadingFingerprint(sourceOffset: block.sourceRange.location,
                                       level: level,

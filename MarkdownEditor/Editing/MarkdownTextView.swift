@@ -117,6 +117,28 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private var lastSyncedString = "" {
         didSet { lineNumbersStale = true }
     }
+
+    /// 把「模型认为的渲染文本」按**模型口径**做一次局部替换。
+    ///
+    /// ### 坐标系为什么对得上
+    /// `range` 是**旧**渲染坐标系下的范围（就是 `MarkdownEditOutcome.replacedRange`），而 `lastSyncedString` 里存的正好是编辑前那一份 —— 两边同一个坐标系，替换完就是编辑后的整篇。
+    ///
+    /// ### 为什么还要夹一下范围
+    /// 折叠切换、退格删语法标记这些场合，模型算出来的范围可能越过当前字符串的尾巴，不夹的话 `replacingCharacters` 会抛 NSRangeException，整条编辑管线直接崩。
+    private func syncLastSyncedString(replacing range: NSRange, with replacement: String) {
+        let old = lastSyncedString as NSString
+        let start = min(max(0, range.location), old.length)
+        let length = min(max(0, range.length), old.length - start)
+        lastSyncedString = old.replacingCharacters(in: NSRange(location: start, length: length),
+                                                   with: replacement)
+    }
+
+    /// 只给单元测试用：增量维护出来的 `lastSyncedString` 和「模型整篇重建」的结果是否一致。
+    ///
+    /// 局部替换要是漏了某个入口，下一轮 diff 会把这点偏差当成用户输入写回源码 ——症状是「改一个字，别处冒出乱码」，很难复现，所以留这个开关让测试在连续编辑后核一遍。
+    var lastSyncedStringMatchesModel: Bool {
+        lastSyncedString == documentStore.renderedString
+    }
     /// 正在把模型改动写回 textView —— 这段时间内忽略 textViewDidChange，避免递归
     private(set) var isApplyingModelChange = false
     /// 上一次渲染时用的容器宽度，窗口尺寸变了要整篇重排
@@ -1458,11 +1480,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 公共前缀 + 公共后缀，中间那段就是真正变了的
         let prefix = MarkdownTextView.commonPrefixLength(previous, current)
         let maxSuffix = min(previous.length, current.length) - prefix
-        var suffix = 0
-        while suffix < maxSuffix,
-              previous.character(at: previous.length - 1 - suffix) == current.character(at: current.length - 1 - suffix) {
-            suffix += 1
-        }
+        let suffix = MarkdownTextView.commonSuffixLength(previous, current, maxSuffix: maxSuffix)
 
         var changedRange = NSRange(location: prefix, length: max(0, previous.length - prefix - suffix))
         let replacement = current.substring(with: NSRange(location: prefix,
@@ -1549,7 +1567,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         }
         isApplyingModelChange = false
 
-        lastSyncedString = documentStore.renderedString
+        // 同步「模型认为的渲染文本」：以前是 `documentStore.renderedString`，那要遍历**每一个块**、把每个块的 NSAttributedString 都转成纯文本再拼起来 —— 每敲一个字就把整篇誊一遍。
+        // 但这次编辑模型只动了 `[replacedRange]` 这一段，替换结果就在 `outcome.newContent` 里，就地替换同样一段即可，代价只跟改动长度有关（长文档连续打字的提速全在这一行）。
+        syncLastSyncedString(replacing: outcome.replacedRange, with: outcome.newContent.string)
         needsCodeBlockRefresh = true
 
         let caret = min(outcome.caretRenderedOffset, (text as NSString).length)
@@ -1586,12 +1606,55 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         return textStorage
     }
 
+    /// 一次从 NSString 里取多少个字符来比（见下面两条的注释）
+    private static let diffChunkSize = 1024
+
     /// 求两个字符串的公共前缀长度（按 UTF-16 单元算）
+    ///
+    /// ### 为什么要分批取，而不是 `character(at:)` 一个一个数
+    /// 在长文档**尾部**打字时，前缀要一路匹配到改动点才停 —— 一篇 10 万字符的文档在末尾敲一个字，就是 10 万次 `character(at:)`（每次都是一次 ObjC 消息派发），而每敲一个字都要付一遍。
+    /// 改成「一次取一批（1024 个 unichar）再在数组里比」，循环次数降到 1/1024，语义完全不变。
     private static func commonPrefixLength(_ a: NSString, _ b: NSString) -> Int {
         let max = min(a.length, b.length)
         var index = 0
-        while index < max, a.character(at: index) == b.character(at: index) { index += 1 }
+        var bufferA = [unichar](repeating: 0, count: diffChunkSize)
+        var bufferB = [unichar](repeating: 0, count: diffChunkSize)
+
+        while index < max {
+            let chunk = min(diffChunkSize, max - index)
+            a.getCharacters(&bufferA, range: NSRange(location: index, length: chunk))
+            b.getCharacters(&bufferB, range: NSRange(location: index, length: chunk))
+
+            var matched = 0
+            while matched < chunk, bufferA[matched] == bufferB[matched] { matched += 1 }
+            index += matched
+            // 这一批里出现了第一个不同的字符：前缀到此为止
+            if matched < chunk { break }
+        }
         return index
+    }
+
+    /// 求两个字符串的公共后缀长度（从尾部往前比，按 UTF-16 单元算），最长不超过 `maxSuffix`。
+    ///
+    /// 分批取的理由同 `commonPrefixLength`：在长文档**开头**编辑时，后缀会一路匹配到文档头。
+    private static func commonSuffixLength(_ a: NSString, _ b: NSString, maxSuffix: Int) -> Int {
+        guard maxSuffix > 0 else { return 0 }
+
+        var suffix = 0
+        var bufferA = [unichar](repeating: 0, count: diffChunkSize)
+        var bufferB = [unichar](repeating: 0, count: diffChunkSize)
+
+        while suffix < maxSuffix {
+            let chunk = min(diffChunkSize, maxSuffix - suffix)
+            a.getCharacters(&bufferA, range: NSRange(location: a.length - suffix - chunk, length: chunk))
+            b.getCharacters(&bufferB, range: NSRange(location: b.length - suffix - chunk, length: chunk))
+
+            var matched = 0
+            while matched < chunk, bufferA[chunk - 1 - matched] == bufferB[chunk - 1 - matched] { matched += 1 }
+            suffix += matched
+            if matched < chunk { break }
+        }
+        return suffix
     }
 
     // 剪贴板 / 撤销记账已挪到 `MarkdownTextView+Clipboard.swift` 与 `MarkdownTextView+UndoSupport.swift`。
