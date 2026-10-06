@@ -64,6 +64,8 @@ extension MarkdownTextView {
             codeBlockBackgroundLayer.layer.render(in: cg)
             quoteBarLayer.layer.render(in: cg)
             drawAllLayoutFragments(in: cg)
+            // 宽表格的浮层必须画：文本流里那个位置只有一张透明占位图，不画它就是一片空白
+            tableScrollLayer.layer.render(in: cg)
             checkboxLayer.layer.render(in: cg)
         }
 

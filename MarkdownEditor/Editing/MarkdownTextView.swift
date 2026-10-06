@@ -228,6 +228,19 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 已经算好的 `[x]` / `[ ]` 三个字符的矩形（**文档坐标系**，滚动时只需整体平移）
     private var checkboxFrames: [(info: CheckboxInfo, frame: CGRect)] = []
 
+    // MARK: 宽表格横向滚动（列多到最小列宽都放不下时浮一层可横滚的表格，见 MarkdownTextView+Table.swift）
+
+    /// 滚动容器所在的最上层：只有表格那几块吃点击，其余一律穿透（和 `CheckboxLayer` 同一套机制）
+    let tableScrollLayer = MarkdownTableScrollLayer()
+    /// 已经算好的「可横滚表格」矩形（**文档坐标系**，滚动时只需整体平移）
+    var tableScrollFrames: [(attachment: MarkdownTableAttachment, frame: CGRect)] = []
+    /// 复用池：按 attachment 的身份存。
+    /// ⚠️ 滚动时**不能**每次重建：一重建，用户横滑出来的位置就回到最左边了
+    var tableScrollPool: [ObjectIdentifier: MarkdownTableScrollView] = [:]
+    /// 全篇扫出来的「可横滚表格」各占哪几个字符位。
+    /// 只在内容变了才重扫（`refreshTableScrollMarks`），滚动时复用 —— 否则每滚 40pt 就要扫一遍整篇富文本
+    var tableScrollMarks: [(range: NSRange, attachment: MarkdownTableAttachment)] = []
+
     // MARK: 大纲跳转（见 MarkdownTextView+Outline.swift）
 
     /// 当前正在进行的那次「滚到某个位置」的序号。
@@ -588,6 +601,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         quoteBarLayer.isUserInteractionEnabled = false
         addSubview(codeBlockControlLayer)
         addSubview(checkboxLayer)
+        // 宽表格的横向滚动容器：必须压在文字**上面**（它是要接管触摸的，不是陪衬）
+        addSubview(tableScrollLayer)
 
         contentOffsetObservation = observe(\.contentOffset, options: []) { [weak self] _, _ in
             // 1) 先按缓存的文档坐标平移一次 —— 这一步很便宜，每帧都要做，
@@ -595,6 +610,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             self?.positionCodeBlockDecorations()
             self?.positionQuoteBars()
             self?.positionCheckboxes()
+            self?.positionTableScrollViews()
             self?.positionFoldControls()
             self?.positionSearchHighlights()
             self?.positionFootnoteFlash()
@@ -665,9 +681,13 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         codeBlockFrames = frames
         quoteBarFrames = bars
         checkboxFrames = boxes
+        // 表格的**位置**（`tableScrollMarks`）这里不重扫：滚动不改变内容，复用上一次的结果，
+        // 省掉一次全篇富文本扫描（见 refreshTableScrollMarks 的注释）
+        tableScrollFrames = computeTableScrollFrames(reusingOutside: band)
         positionCodeBlockDecorations()
         positionQuoteBars()
         positionCheckboxes()
+        positionTableScrollViews()
     }
 
     /// 每次布局时决定：是「重算矩形」还是「只平移」。
@@ -694,6 +714,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         let (frames, _) = computeCodeBlockFrames()
         let (bars, _) = computeQuoteBarFrames()
         let (boxes, _) = computeCheckboxFrames()
+        // 内容变了 → 「哪些表格要横滚」也可能变了，这里重扫一遍（滚动那趟不扫，见 refreshTableScrollMarks）
+        refreshTableScrollMarks()
 
         // ### 为什么要对比上一轮结果（TextKit 2 的坑，别删）
         // TextKit 2 是「viewport 按需排版」：刚加载、刚滚完的时候，屏幕外 fragment 的
@@ -709,9 +731,11 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         codeBlockFrames = frames
         quoteBarFrames = bars
         checkboxFrames = boxes
+        tableScrollFrames = computeTableScrollFrames()
         positionCodeBlockDecorations()
         positionQuoteBars()
         positionCheckboxes()
+        positionTableScrollViews()
 
         if !stable, codeBlockRetryCount < 30 {
             codeBlockRetryCount += 1
