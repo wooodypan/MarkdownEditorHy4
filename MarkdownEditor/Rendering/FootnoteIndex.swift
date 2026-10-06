@@ -58,39 +58,15 @@ enum FootnoteIndex {
 
     // MARK: 定义
 
-    /// 一段文本**开头**是不是脚注定义（`[^1]:`）。返回的 `range` **含**末尾那个冒号。
+    /// 一段源码里**所有**的脚注定义标记，按出现顺序排（返回的 `range` 含末尾那个冒号）。
     ///
-    /// ### 为什么只看开头
-    /// 「定义」和「引用」用的是同一串字符，区别只在位置：写在行首、后面紧跟冒号的是定义，出现在正文中间的是引用。所以这个函数只认开头那一段（前面的空行 / 缩进要跳过 ——块源码开头常常带着上一块留下的换行）。
-    static func definitionMarker(in text: String) -> FootnoteMatch? {
-        let ns = text as NSString
-
-        // 跳过开头的空白和换行，找到第一个真正的字符
-        var index = 0
-        while index < ns.length {
-            let character = ns.character(at: index)
-            if isWhitespaceOrBreak(character) { index += 1 } else { break }
-        }
-        guard index + 1 < ns.length,
-              ns.character(at: index) == 0x5B /* [ */,
-              ns.character(at: index + 1) == 0x5E /* ^ */,
-              let match = marker(in: ns, startingAt: index) else { return nil }
-
-        // 标记后面必须紧跟冒号 —— 那才是定义
-        let after = NSMaxRange(match.range)
-        guard after < ns.length, ns.character(at: after) == 0x3A /* : */ else { return nil }
-
-        return FootnoteMatch(id: match.id,
-                             range: NSRange(location: match.range.location,
-                                            length: match.range.length + 1))
-    }
-
-    /// 整篇源码里所有的脚注定义：ID → 定义块起点的**绝对偏移**（UTF-16，相对整篇开头）。
-    ///
-    /// 同一个 ID 定义了两次时以**先出现的那份**为准 —— 后一份是重复的，跳过去没意义。
-    static func definitions(in source: String) -> [String: Int] {
+    /// ### 为什么要有这个「所有」的版本
+    /// 光看「一段文本是不是以 `[^1]:` 开头」是不够的 —— cmark 会把 `[^1]: 说明` 当成 **CommonMark 的链接引用定义**吃掉，吃掉之后它不产生任何节点，于是常被并进**前一个块**的尾巴（实测：`这里有一个…[^note]。\n\n[^1]: 普通脚注。`
+    /// 整块就是一块）。只认块开头那条，这种定义就永远认不出来：既没有缩进、也没有弱化色，⌘+ 点它还跳不回正文。
+    /// 所以调用方要的是「这块源码里**每一行**有没有定义」，这就是这个函数。
+    static func definitionMarkers(in source: String) -> [FootnoteMatch] {
         let ns = source as NSString
-        var result: [String: Int] = [:]
+        var result: [FootnoteMatch] = []
         var from = 0
 
         while from + 1 < ns.length {
@@ -104,9 +80,56 @@ enum FootnoteIndex {
             let after = NSMaxRange(match.range)
             guard after < ns.length, ns.character(at: after) == 0x3A /* : */ else { continue }
 
-            if result[match.id] == nil { result[match.id] = match.range.location }
+            result.append(FootnoteMatch(id: match.id,
+                                        range: NSRange(location: match.range.location,
+                                                       length: match.range.length + 1)))
         }
         return result
+    }
+
+    /// 整篇源码里所有的脚注定义：ID → 定义块起点的**绝对偏移**（UTF-16，相对整篇开头）。
+    ///
+    /// 同一个 ID 定义了两次时以**先出现的那份**为准 —— 后一份是重复的，跳过去没意义。
+    static func definitions(in source: String) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for marker in definitionMarkers(in: source) where result[marker.id] == nil {
+            result[marker.id] = marker.range.location
+        }
+        return result
+    }
+
+    /// 从 `start`（`[^id]:` 那个 `[` 的偏移）起，这条定义一直占到最后哪儿。
+    ///
+    /// ### 判据：续行要么缩进、要么是空行
+    /// GFM 里一条脚注可以写好几段，后面的段必须**缩进**（跟列表项续行一个道理）。所以从定义那行往后，只要下一行是缩进的、或者整行是空的，都还算这条定义的续行；一旦撞上「非空、也没缩进」的行，那就是别的正文了 —— 定义到此为止。
+    ///
+    /// ⚠️ **不能拿「下一个定义的起点」当终点**：两条脚注之间常常隔着好几个小节。
+    /// 实测一份 351 行的测试文件里，第二条脚注按老算法一路吃掉了后面 **1481 个字符、二十来个章节** ——跳转落地时那层高亮会铺满半个屏幕，看着就像「跳过去然后整屏都黄了」。
+    static func definitionEnd(startingAt start: Int, in source: String) -> Int {
+        let ns = source as NSString
+        var lineStart = start
+
+        while lineStart < ns.length {
+            // 先跳到这一行的行尾
+            var index = lineStart
+            while index < ns.length {
+                let character = ns.character(at: index)
+                if character == 0x0A || character == 0x0D { break }
+                index += 1
+            }
+            // 再跳到下一行的第一个字符（中间的空行一起跳过去）
+            var next = index
+            while next < ns.length {
+                let character = ns.character(at: next)
+                if character == 0x0A || character == 0x0D { next += 1 } else { break }
+            }
+            guard next < ns.length else { return ns.length }     // 后面没有内容了，定义一直到文末
+
+            let first = ns.character(at: next)
+            if first == 0x20 || first == 0x09 { lineStart = next; continue }   // 缩进行 = 这条定义的续行
+            return next     // 非空、没缩进 → 是别的正文了
+        }
+        return ns.length
     }
 
     /// 某个 ID 的定义在哪儿（绝对偏移）；没定义过返回 `nil`。点正文里的引用跳转时用。
@@ -119,16 +142,16 @@ enum FootnoteIndex {
         Set(definitions(in: source).keys)
     }
 
-    /// 某个 ID 的定义**整块**占的源码范围：从 `[^1]:` 那个 `[` 起，到下一个定义（或文档末尾）为止，尾巴上的空行不算。
+    /// 某个 ID 的定义**整块**占的源码范围：从 `[^1]:` 那个 `[` 起，到这条定义自己结束为止，尾巴上的空行不算。
     ///
     /// 跳转落地时靠它决定「高亮哪一段」—— 只高亮 `[^1]:` 那几个字符太不起眼，整条定义亮一下才看得出「我跳到这儿了」。
+    /// 终点怎么算见 `definitionEnd(startingAt:in:)`：只看缩进续行，不看下一条定义在哪儿。
     static func definitionBlockRange(for id: String, in source: String) -> NSRange? {
         let ns = source as NSString
-        let all = definitions(in: source)
-        guard let start = all[id] else { return nil }
+        guard let marker = definitionMarkers(in: source).first(where: { $0.id == id }) else { return nil }
 
-        // 终点：下一个定义的起点；没有下一个就到文档末尾
-        var end = all.values.filter { $0 > start }.min() ?? ns.length
+        let start = marker.range.location
+        var end = min(definitionEnd(startingAt: start, in: source), ns.length)
         // 尾巴上的空行 / 空段落不属于这条脚注，去掉（但至少留一个字符，免得算出空范围）
         while end - 1 > start {
             guard isWhitespaceOrBreak(ns.character(at: end - 1)) else { break }

@@ -115,20 +115,28 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
             fragment.append(visit(child))
         }
 
-        // 兜底 + 补漏：保证源码里每个字符都在渲染结果里有归宿
-        var fixed = fragment.reconciled(
-            withSource: blockSource,
-            orphanAttributes: theme.orphanAttributes
-        )
-
-        // 脚注定义块（`[^1]: 说明`）：整块缩进一档 + 开头的标记弱化 + 挂上 ID（正文里点引用能跳过来）。
+        // 脚注定义（`[^1]: 说明`）要在补漏**之前**先认一遍，原因见下面第 2 条。
         //
         // ### 为什么认在**块级**而不是 `visitParagraph` 里
-        // swift-markdown 没有脚注节点，而 cmark 会按 CommonMark 的规矩把 `[^1]: 说明` 当成
-        // **链接引用定义**吃掉（只要冒号后面那串不含空格，比如整句中文）—— 那它压根不是一个段落节点，
-        // `visitParagraph` 永远不会被调用。整块开头是不是 `[^id]:` 这件事，只有在这里看得见。
-        if let marker = FootnoteIndex.definitionMarker(in: blockSource) {
-            stylingFootnoteDefinition(&fixed, id: marker.id, markerSourceRange: marker.range, indent: 0)
+        // swift-markdown 没有脚注节点，而 cmark 会按 CommonMark 的规矩把 `[^1]: 说明` 当成 **链接引用定义**吃掉（只要冒号后面那串不含空格，比如整句中文）—— 那它压根不是一个段落节点， `visitParagraph` 永远不会被调用。整块源码里有没有 `[^id]:`，只有在这里看得见。
+        let definitions = FootnoteIndex.definitionMarkers(in: blockSource)
+
+        // 兜底 + 补漏：保证源码里每个字符都在渲染结果里有归宿
+        //
+        // ### 为什么带定义的块要用**正文色**补漏
+        // 被 cmark 吃掉的那段源码，最后是靠补漏步骤用 `orphanAttributes`（语法标记的弱化灰）补回来的。
+        // 对普通语法标记这是对的，但**脚注定义的正文是正经内容** —— 整行刷成浅灰会让人以为这段被禁用了（实测 `[^note]: 特殊脚注，包含多行内容。` 里只有前三个字是正文色，剩下全成了浅灰）。
+        // 所以这种块补漏时改用正文色，定义开头那个 `[^note]:` 随后由 `stylingFootnoteDefinitions` 单独刷成弱化色。
+        var orphan = theme.orphanAttributes
+        if !definitions.isEmpty { orphan[.foregroundColor] = theme.textColor }
+
+        var fixed = fragment.reconciled(
+            withSource: blockSource,
+            orphanAttributes: orphan
+        )
+
+        if !definitions.isEmpty {
+            stylingFootnoteDefinitions(&fixed, in: blockSource, indent: 0)
         }
         return (fixed.text, fixed.mappings)
     }

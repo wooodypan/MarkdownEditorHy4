@@ -265,4 +265,42 @@ final class MarkdownFootnoteTests: XCTestCase {
         let color = try XCTUnwrap(attribute(.foregroundColor, of: "[^1]:", in: text) as? UIColor)
         XCTAssertGreaterThan(alpha(of: color), 0, "定义块开头的标记是锚点，不能像正文里那样藏起来")
     }
+
+    // MARK: 定义被并进前一个块（cmark 吃掉链接引用定义）
+
+    /// cmark 会把 `[^1]: 说明` 当 CommonMark 的链接引用定义吃掉，被吃掉之后它不产生节点、常被并进**前一个块**的尾巴。这种定义也必须认出来 —— 否则既没缩进、也没弱化色，⌘+ 点它还跳不回正文。
+    func testDefinitionMergedIntoPreviousBlockIsStillRecognized() throws {
+        let (text, _) = render("这里有个脚注[^note]。\n\n[^1]: 普通脚注。\n\n", definedIDs: ["1", "note"])
+
+        let id = try XCTUnwrap(attribute(.markdownFootnoteDefinition, of: "[^1]:", in: text) as? String,
+                               "被并进前一块的定义也要挂上 ID，否则点它跳不回正文")
+        XCTAssertEqual(id, "1")
+    }
+
+    /// 定义块的正文是**正经内容**，不能整块刷成语法标记的弱化灰
+    ///
+    /// 被 cmark 吃掉的那段源码是靠补漏步骤补回来的，补漏默认用「语法标记色」——于是 `[^note]: 特殊脚注…` 里只有头几个字是正文色，剩下全成了浅灰，看着像被禁用。
+    func testDefinitionContentUsesBodyColorNotMarkerColor() throws {
+        let (text, theme) = render("[^note]: 特殊脚注，包含多行内容。\n", definedIDs: ["note"])
+
+        let content = try XCTUnwrap(attribute(.foregroundColor, of: "特殊脚注", in: text) as? UIColor)
+        XCTAssertNotEqual(rgba(content), rgba(theme.markerColor), "定义内容不能是语法标记的弱化色")
+
+        let marker = try XCTUnwrap(attribute(.foregroundColor, of: "[^note]:", in: text) as? UIColor)
+        XCTAssertEqual(rgba(marker), rgba(theme.markerColor), "开头那个标记仍然是弱化色，跟正文区分开")
+    }
+
+    /// 一条定义的范围**不能越过后面的小节** —— 两条脚注之间常常隔着好几个章节。
+    ///
+    /// 老算法拿「下一个定义的起点」当终点，实测一份 351 行的文件里第二条脚注一口吃掉了后面 1481 个字符、二十来个章节，跳转落地时那层高亮会铺满半个屏幕。终点只能看「还有没有缩进续行」。
+    func testDefinitionBlockRangeStopsBeforeTheNextSection() throws {
+        let source = "## 19. Footnote\n\n这是[^note]引用。\n\n[^note]: 特殊脚注。\n\n---\n\n## 20. Link\n\n后面还有很多内容\n\n---\n\n[^release]: 最后一条\n"
+        let range = try XCTUnwrap(FootnoteIndex.definitionBlockRange(for: "note", in: source))
+
+        let noteStart = (source as NSString).range(of: "[^note]:").location
+        let separator = (source as NSString).range(of: "---").location
+        XCTAssertEqual(range.location, noteStart, "起点是定义块开头那个 `[`")
+        XCTAssertLessThanOrEqual(NSMaxRange(range), separator,
+                                 "终点不能越过后面的分隔线 —— 老算法会一路吃到下一条定义，高亮铺满半个屏幕")
+    }
 }

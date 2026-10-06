@@ -65,22 +65,37 @@ extension MarkupToAttributedRenderer {
 
     // MARK: 定义（`[^1]: …`）
 
-    /// 把一段渲染结果标成脚注**定义块**：挂上 ID、整体缩进一档，并把开头那个 `[^1]:` 抹成弱化色。
+    /// 把**块里出现的每一条**脚注定义标出来：挂上 ID、整条缩进一档，并把开头那个 `[^1]:` 抹成弱化色。
+    ///
+    /// ### 为什么是「每一条」而不是「块开头那一条」
+    /// cmark 会把 `[^1]: 说明` 当成 CommonMark 的**链接引用定义**吃掉；被吃掉之后它不产生节点，于是常常被并进**前一个块**的尾巴（实测源码 `这里有一个…[^note]。\n\n[^1]: 普通脚注。` 整个就是一块）。只认块开头那条的话，这种定义一条都认不出来 ——既没有缩进、也没有弱化色，⌘+ 点它还跳不回正文（因为它身上压根没有「我是定义」这个属性）。
     ///
     /// ### 为什么要顺手摘掉引用标记
-    /// 定义块开头的 `[^1]:` 也会被引用扫描认出来（它确实长得一样）。不摘的话，点定义自己的开头会「跳到自己身上」，而且颜色会用「有没有定义」那套逻辑算 —— 这里整段重新上色，顺便把那个属性删掉最干净。
-    func stylingFootnoteDefinition(_ fragment: inout RenderedFragment,
-                                   id: String,
-                                   markerSourceRange: NSRange,
-                                   indent: CGFloat) {
-        guard fragment.text.length > 0 else { return }
+    /// 定义开头那个 `[^1]:` 也会被引用扫描认出来（它确实长得一样）。不摘的话，点定义自己的开头会「跳到自己身上」—— 所以整段重新上色时把它删掉最干净。
+    func stylingFootnoteDefinitions(_ fragment: inout RenderedFragment,
+                                    in blockSource: String,
+                                    indent: CGFloat) {
+        let markers = FootnoteIndex.definitionMarkers(in: blockSource)
+        guard !markers.isEmpty, fragment.text.length > 0 else { return }
 
-        fragment.setAttributes([.markdownFootnoteDefinition: id])
-        fragment.setAttributes([.paragraphStyle: theme.footnoteDefinitionParagraphStyle(indent: indent)])
+        let ns = blockSource as NSString
+        let style = theme.footnoteDefinitionParagraphStyle(indent: indent)
 
-        guard let marker = renderedRange(in: fragment, forSourceRange: markerSourceRange) else { return }
-        fragment.text.removeAttribute(.markdownFootnoteReference, range: marker)
-        fragment.text.addAttributes(theme.footnoteDefinitionMarkerAttributes, range: marker)
+        for marker in markers {
+            let start = marker.range.location
+            let end = min(FootnoteIndex.definitionEnd(startingAt: start, in: blockSource), ns.length)
+            guard let body = renderedRange(in: fragment,
+                                           forSourceRange: NSRange(location: start, length: max(1, end - start))) else {
+                continue
+            }
+
+            fragment.text.addAttribute(.markdownFootnoteDefinition, value: marker.id, range: body)
+            fragment.text.addAttribute(.paragraphStyle, value: style, range: body)
+
+            guard let head = renderedRange(in: fragment, forSourceRange: marker.range) else { continue }
+            fragment.text.removeAttribute(.markdownFootnoteReference, range: head)
+            fragment.text.addAttributes(theme.footnoteDefinitionMarkerAttributes, range: head)
+        }
     }
 
     // MARK: 内部

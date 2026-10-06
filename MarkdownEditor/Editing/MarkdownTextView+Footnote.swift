@@ -223,7 +223,12 @@ extension MarkdownTextView {
                 // ⚠️ 只放宽**判定**，不放大任何被画出来的东西（这点和折叠三角那条规矩一致）
                 if rect.insetBy(dx: -3, dy: -4).contains(target) { found = (id, marked) }
             }
-            return false
+            // 命中了就收工；没命中**继续往后找**，别在这儿停。
+            //
+            // ### 为什么不能「第一个 frame 盖住点击点的 fragment 就是答案」
+            // TextKit 2 是按视口惰性排版的：屏幕外（以及含图片、表格那类「字符少但很高」的块）的 fragment 拿到的 frame 是**估算值**，它可能碰巧也盖住这个点 —— 而它身上根本没有脚注属性。
+            // 以前在这里直接收工，长文档里点击就被这种「幽灵 fragment」吃掉：看起来点了没反应。
+            return found == nil
         }
         return found
     }
