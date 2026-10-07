@@ -128,6 +128,12 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 没有也照样能用 —— 编辑器组件本身不认识任何公式引擎，
         // 没注入的时候公式就按源码原文显示（这是给将来开源出去留的默认降级）
         editor.renderer.mathRenderer = SwiftMathRenderer.shared
+        // 装上「剪贴板富文本 → markdown」的转换器：有这一行，从网页复制内容再粘贴，粘进来的才是 markdown 源码（标题、列表、表格…），而不是一堆 HTML 标签。
+        // 转不转由设置页那个开关说了算 —— 关掉时转换器返回 nil，粘贴就退回原来的纯文本。
+        // 组件本身不认识 App 的转换器，只留了 `richTextConverter` 这么一个口子。
+        editor.pasteboardController.richTextConverter = { pasteboard in
+            ClipboardHTMLMarkdown.markdown(from: pasteboard)
+        }
         view.addSubview(editor)
 
         bottomConstraint = editor.bottomAnchor.constraint(equalTo: view.bottomAnchor)
@@ -162,7 +168,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
         NSLayoutConstraint.activate([
             findBar.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 2),
-            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+//            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            findBar.widthAnchor.constraint(equalToConstant: 350),
             findBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -60)
         ])
 

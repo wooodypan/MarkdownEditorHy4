@@ -16,6 +16,16 @@ final class MarkdownPasteboardController {
 
     weak var textView: MarkdownTextView?
 
+    /// App 层注入的「剪贴板富文本 → markdown 源码」转换器。默认 `nil`（= 不转换）。
+    ///
+    /// ### 为什么是一个回调，而不是直接调 App 里的转换器
+    /// `MarkdownEditor/` 这一层将来要单独开源：它不该认识 App 的任何类型（设置页、SwiftSoup、剪贴板策略），也不该为了「转 HTML」去依赖一个 HTML 解析库。
+    /// 所以这里只留一个口子 —— 由 App 在装配编辑器时把「怎么转」塞进来（见 `MarkdownDocumentViewController.setupEditor`），组件自己只管在粘贴时问一句。
+    ///
+    /// - parameter pasteboard: 要读的那个剪贴板
+    /// - returns: 转出来的源码；`nil` = 这一步不接管，粘贴继续走纯文本那条路
+    var richTextConverter: ((UIPasteboard) -> String?)?
+
     /// ### 为什么这里要显式写 `nonisolated deinit`（很重要，别删）
     /// 原因和 `MarkdownBlock` 里那段注释完全一样：app target 开了
     /// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`，本类的隐式 deinit 也是
@@ -87,6 +97,20 @@ final class MarkdownPasteboardController {
         // 和源码长度差得更远，交给系统记撤销会残留一串字符
         textView.insertMarkdownSourceUndoably("![粘贴的图片](attachments/\(fileName))")
         return true
+    }
+
+    /// 剪贴板里的**富文本**转成的 markdown 源码（没注入转换器、或者转不出来时返回 `nil`）。
+    ///
+    /// 它的优先级在图片之后、纯文本之前：
+    /// 网页复制来的东西既有纯文本又有 HTML，HTML 那边带着标题、列表、表格这些结构，转换结果比纯文本那一份（里面混着菜单、页脚噪音）干净得多。
+    func markdownFromRichText() -> String? {
+        guard let converter = richTextConverter else { return nil }
+        let markdown = converter(UIPasteboard.general)
+        // 空串等于没转出来，别把「粘贴」变成「粘了个空」
+        guard let markdown, !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return markdown
     }
 
     /// 剪贴板里的纯文本（没有、或者只有空白时返回 nil）。

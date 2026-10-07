@@ -109,6 +109,11 @@ final class MarkdownEditorSettings {
         /// 「记住目录大纲滚动位置」默认打开
         static let remembersScrollPosition = true
 
+        /// 「粘贴网页内容时转成 Markdown」默认打开：
+        /// 复制网页的人本来就是冲着「把内容搬进来」来的，默认转出来的才是他想要的；
+        /// 想要原样 HTML 的人可以来关掉
+        static let pastesHTMLAsMarkdown = true
+
         /// 「显示行号」默认**关闭**：对读代码 / 校对长文的人来说它有用，
         /// 但默认打开会白占正文左边一条带子 —— 纯读文档的人不需要它
         static let showsLineNumbers = false
@@ -237,6 +242,8 @@ final class MarkdownEditorSettings {
     /// 不会因为「缺字段」整份解析失败、把所有设置一起丢回默认。
     private struct Payload: Codable {
         var remembersScrollPosition: Bool?
+        /// 粘贴网页复制来的富文本时，要不要先转成 markdown 源码
+        var pastesHTMLAsMarkdown: Bool?
         /// 正文左边要不要显示行号
         var showsLineNumbers: Bool?
         /// 大纲宽度那一组。模式同样存字符串，理由见下面 `outlineHeightMode` 的注释
@@ -280,6 +287,18 @@ final class MarkdownEditorSettings {
     ///
     /// 关掉时以上三件事都不做 —— 大纲面板只在你手动滚它的时候才动，列表刷新后回到顶部。
     private(set) var remembersScrollPosition: Bool
+
+    /// 粘贴网页里复制来的富文本时，先把它转成 **markdown 源码** 再插进来。默认 `true`（开）。
+    ///
+    /// 打开时：从浏览器、Word、备忘录复制内容再粘贴，粘进来的是 `# 标题` / `- 列表` / `[链接](地址)` 这样的源码，而不是一堆 `<div>`。
+    ///
+    /// 关掉时：剪贴板里有什么就原样插什么。复制的是纯文本时这一项没有区别；
+    /// 只有剪贴板里带 HTML（从网页、Word 那边复制的）才看得出开关的效果。
+    ///
+    /// ### 为什么做成开关
+    /// 转换是「尽力而为」的 —— 结果不保证和原页面一模一样。
+    /// 想保留原始 HTML（比如要粘一段现成的网页代码）的人得有办法关掉它。
+    private(set) var pastesHTMLAsMarkdown: Bool
 
     /// 正文左边要不要显示行号。默认 `false`（关）。
     ///
@@ -421,6 +440,16 @@ final class MarkdownEditorSettings {
     func setRemembersScrollPosition(_ value: Bool) {
         guard value != remembersScrollPosition else { return }
         remembersScrollPosition = value
+        save()
+        postChange()
+    }
+
+    /// 改「粘贴网页内容时转成 Markdown」。
+    ///
+    /// 不用重新渲染：这一项只影响**下一次粘贴**走哪条路，已经粘进来的内容不受影响
+    func setPastesHTMLAsMarkdown(_ value: Bool) {
+        guard value != pastesHTMLAsMarkdown else { return }
+        pastesHTMLAsMarkdown = value
         save()
         postChange()
     }
@@ -643,6 +672,7 @@ final class MarkdownEditorSettings {
         self.fileURL = fileURL
         // 先给一套默认值，再用盘上的内容覆盖 —— 这样「读文件失败」也能得到一份可用的配置
         self.remembersScrollPosition = Default.remembersScrollPosition
+        self.pastesHTMLAsMarkdown = Default.pastesHTMLAsMarkdown
         self.showsLineNumbers = Default.showsLineNumbers
         self.outlineWidthMode = Default.outlineWidthMode
         self.outlineWidthRatio = Default.outlineWidthRatio
@@ -679,6 +709,7 @@ final class MarkdownEditorSettings {
         guard let data = try? Data(contentsOf: fileURL) else { return }
         guard let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return }
         if let value = payload.remembersScrollPosition { remembersScrollPosition = value }
+        if let value = payload.pastesHTMLAsMarkdown { pastesHTMLAsMarkdown = value }
         if let value = payload.showsLineNumbers { showsLineNumbers = value }
         // 宽度那一组：模式和高度一样存字符串，认不出来就只让这一项退回默认
         if let raw = payload.outlineWidthMode, let value = OutlineWidthMode(rawValue: raw) {
@@ -750,6 +781,7 @@ final class MarkdownEditorSettings {
 
     private func save() {
         let payload = Payload(remembersScrollPosition: remembersScrollPosition,
+                              pastesHTMLAsMarkdown: pastesHTMLAsMarkdown,
                               showsLineNumbers: showsLineNumbers,
                               outlineWidthMode: outlineWidthMode.rawValue,
                               outlineWidthRatio: outlineWidthRatio,

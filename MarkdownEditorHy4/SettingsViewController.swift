@@ -42,6 +42,8 @@ final class SettingsViewController: UIViewController {
         case tableLayout
         /// 图片画多大
         case imageSize
+        /// 粘贴剪贴板内容时的处理
+        case clipboard
 
         var title: String {
             switch self {
@@ -50,6 +52,7 @@ final class SettingsViewController: UIViewController {
             case .outlineSize: return "大纲面板"
             case .tableLayout: return "表格列宽"
             case .imageSize: return "图片尺寸"
+            case .clipboard: return "剪贴板"
             }
         }
 
@@ -75,6 +78,8 @@ final class SettingsViewController: UIViewController {
                 // 顺序就是界面上从上到下的顺序：先选「宽度怎么算」，再调两个数值，
                 // 最后是「最多占多高」
                 return [.imageWidthMode, .imageWidthRatio, .imageWidthPoints, .imageMaxHeight]
+            case .clipboard:
+                return [.pastesHTMLAsMarkdown]
             }
         }
     }
@@ -125,6 +130,8 @@ final class SettingsViewController: UIViewController {
         case imageWidthPoints
         /// 图片最大高度（点）
         case imageMaxHeight
+        /// 粘贴网页复制来的富文本时，要不要先转成 markdown 源码
+        case pastesHTMLAsMarkdown
 
         /// 主标题
         var title: String {
@@ -169,6 +176,8 @@ final class SettingsViewController: UIViewController {
                 return "固定宽度"
             case .imageMaxHeight:
                 return "最大高度"
+            case .pastesHTMLAsMarkdown:
+                return "粘贴网页内容时转成 Markdown"
             }
         }
 
@@ -266,6 +275,11 @@ final class SettingsViewController: UIViewController {
             case .imageMaxHeight:
                 return "图片最高能画多少点，防止一张长图撑爆屏幕。"
                     + "这是个固定值，跟窗口多高没关系；比它矮的图按原尺寸显示，不会被拉高。"
+            case .pastesHTMLAsMarkdown:
+                return "打开：从网页、Word、备忘录复制内容再粘贴，粘进来的是 markdown 源码 ——"
+                    + "标题、列表、表格、链接、图片都转成对应的 markdown 写法，而不是一堆标签。"
+                    + "关掉：剪贴板里有什么就原样插什么。"
+                    + "复制的是纯文本时这一项没有区别，只有带格式的富文本才看得出开关。"
             }
         }
 
@@ -325,6 +339,7 @@ final class SettingsViewController: UIViewController {
             switch self {
             case .showsLineNumbers: return settings.showsLineNumbers
             case .remembersScrollPosition: return settings.remembersScrollPosition
+            case .pastesHTMLAsMarkdown: return settings.pastesHTMLAsMarkdown
             default: return false
             }
         }
@@ -459,6 +474,8 @@ final class SettingsViewController: UIViewController {
             settings.setShowsLineNumbers(sender.isOn)
         case .remembersScrollPosition:
             settings.setRemembersScrollPosition(sender.isOn)
+        case .pastesHTMLAsMarkdown:
+            settings.setPastesHTMLAsMarkdown(sender.isOn)
         default:
             break
         }
@@ -527,7 +544,7 @@ final class SettingsViewController: UIViewController {
             settings.setImageWidthPoints(stepped)
         case .imageMaxHeight:
             settings.setImageMaxHeight(stepped)
-        case .showsLineNumbers, .remembersScrollPosition,
+        case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
              .outlineWidthMode, .outlineHeightMode, .imageWidthMode:
             // 这几行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
             // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
@@ -697,7 +714,7 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
         guard let row = row(at: indexPath) else { return UITableViewCell() }
 
         switch row {
-        case .showsLineNumbers, .remembersScrollPosition:
+        case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown:
             return makeToggleCell(for: row)
         case .outlineWidthMode:
             return makeOutlineWidthModeCell()

@@ -41,7 +41,13 @@ extension MarkdownTextView {
     override func paste(_ sender: Any?) {
         // 1) 剪贴板里是图片：存成临时文件，插入 ![](路径) 源码
         if pasteboardController.handlePasteImage() { return }
-        // 2) 纯文本：走下面那个「可撤销插入」。
+        // 2) 网页复制来的富文本（剪贴板里带 HTML）：转成 markdown 源码再插进来。
+        //    这一步由 App 注入的转换器决定要不要接管（见 `MarkdownPasteboardController.richTextConverter`）
+        if let markdown = pasteboardController.markdownFromRichText() {
+            insertMarkdownSourceUndoably(markdown)
+            return
+        }
+        // 3) 纯文本：走下面那个「可撤销插入」。
         //    ⚠️ 千万别退回 `super.paste(sender)` —— 系统的撤销记录按**源码长度**记账，而这段文本会被渲染成另一个长度，撤销就会残留尾巴（详见下面方法的注释）
         if let text = pasteboardController.pasteboardText() {
             insertMarkdownSourceUndoably(text)
