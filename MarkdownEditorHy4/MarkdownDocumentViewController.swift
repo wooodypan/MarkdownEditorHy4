@@ -56,6 +56,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     private let menuButton = UIButton(type: .system)
     /// 悬浮目录面板（纯 UI 层，不认识编辑器）
     private let outlineView = MarkdownOutlineView()
+    /// 悬浮在正文上的编辑按钮（半透明小圆点，点开是标题 / 待办 / 列表 / 加粗 / 斜体 / 更多）
+    private let floatingEditButton = FloatingEditButton()
     /// 大纲协调者：把编辑器和目录面板连起来
     private let outlineCoordinator = OutlineCoordinator()
     /// 顶部的查找 / 替换横条（纯 UI 层，不认识编辑器）
@@ -104,6 +106,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         setupOutline()
         // 查找条放在最后：它是浮层，后加的视图画在上面，这样它才盖得住正文和大纲面板
         setupFindBar()
+        // 悬浮编辑按钮再晚一步：它得盖在查找条上面（圆点要能被拖到屏幕最上面那条）
+        setupFloatingEditButton()
         observeKeyboard()
         observeEditorChanges()
         observeSettingsChanges()
@@ -115,6 +119,14 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         super.viewDidAppear(animated)
         // 窗口（windowScene）要等 view 挂上去才有，标题在这里补一次
         updateWindowTitle()
+    }
+
+    /// 窗口尺寸变了（拉窗口、转屏）之后把悬浮圆点拉回可见范围。
+    ///
+    /// 圆点是**绝对坐标**摆着的（它要能被拖动，用约束反而绕），窗口一变矮原来的 y 就跑到窗口外面去了。
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        floatingEditButton.clampCenterIntoSuperview()
     }
 
     // MARK: 界面搭建
@@ -181,6 +193,16 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
         // 「把自己藏起来」是容器的事（查找条自己不认识容器），所以出口交回这里
         findBar.onDismiss = { [weak self] in self?.hideFindBar() }
+    }
+
+    /// 悬浮编辑按钮：一个能被拖着走的半透明小圆点，点开是常用的那几个排版动作。
+    ///
+    /// ### 为什么接两根线就够了
+    /// 按钮本身不认识编辑器内部，也不认识 markdown 语法：
+    /// 「哪个按钮对应哪几个字符」写在 `MarkdownQuickAction` 里，这里只告诉它「动作施加到 `editor` 上」。
+    private func setupFloatingEditButton() {
+        floatingEditButton.textView = editor
+        view.addSubview(floatingEditButton)
     }
 
     /// 显示查找条（⌘F / 菜单里的「查找」都走到这里）

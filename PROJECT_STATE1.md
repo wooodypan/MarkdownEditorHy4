@@ -86,6 +86,8 @@ NSTextStorage（backingStorage.replaceCharacters，包在 performEditingTransact
 
 ⚠️ **为什么不在 `shouldChangeTextIn` 里拦截**：那样会绕过系统的输入法 marked text 机制，中文拼音输入直接坏掉。所以是「先让系统改，改完 diff 回写」。
 
+⚠️ **唯一的例外是回车**（列表续写）：`MarkdownEditController` 里对 `text == "\n"` 单独拦截，交给 `MarkdownTextView+ListContinuation.swift` 一步插入 `\n- `。安全的前提是组合输入期间不接管（`markedTextRange == nil` 那道闸）；必须抢在字符插进去之前，是因为「先插换行再补标记」会变成两步编辑，撤销栈记两条，按一次 ⌘Z 只退掉标记。
+
 ---
 
 ## 3. 模型层：MarkdownDocumentStore
@@ -153,11 +155,11 @@ NSTextStorage（backingStorage.replaceCharacters，包在 performEditingTransact
 | `updateHiddenStates()`             | 栈算法：`collapsedLevels` 存「当前生效的折叠层级」。非标题块 `isHidden = !栈空`；标题块**先判自己的可见性再压栈**（顺序反了会把标题自己也藏掉） |
 | `hasSectionContent(_:)`            | 这一节有没有非空白内容。只有空行的节**不给三角**                                                                                                |
 | `refreshCollapseState()`           | 总入口。隐藏/显示 + 标题折叠态 + 打三角锚点，三段各自幂等（状态没变就不重渲染）                                                                 |
-| `rerenderCollapsed(_:at:)`         | 生成「标题文字 + ⋯ 占位符」                                                                                                                     |
+| `rerenderCollapsed(_:at:)`         | 生成「标题文字 + 「⋯」的座位」                                                                                                                   |
 | `inheritCollapseStates(from:to:)`  | 编辑后块被重建，`isCollapsed` 会丢 —— 按「源码起点相同」或「源码文本相同且 ≥4 字符」把状态继承过来                                              |
 | `toggleCollapse(blockAt:)`         | 折叠 / 展开都用「同一范围换一段新内容」表达，调用方不用区分方向                                                                                 |
 
-**最终版的关键性质**：折叠只收起标题**下面那一节**，标题自己照常显示（能点进去改）；被收起的内容变成一个「⋯」占位符，**映射那一整节的源码** → 折叠状态下「全选复制 === 源文件」照样成立。
+**最终版的关键性质**：折叠只收起标题**下面那一节**，标题自己照常显示（能点进去改）；被收起的内容变成一个「⋯」的**座位**（占位不画，画面上那个圆角按钮由浮层摆上去），**映射那一整节的源码** → 折叠状态下「全选复制 === 源文件」照样成立。
 
 ---
 
@@ -220,7 +222,7 @@ NSTextStorage（backingStorage.replaceCharacters，包在 performEditingTransact
 | `.markdownCodeBlock`                          | `CodeBlockInfo(code, language)`        | `visitCodeBlock`（**含**首尾 ``` 行）                      | 灰底矩形 + 复制按钮                         |
 | `.markdownQuoteChain`                         | `QuoteChain(ids: [Int])`（外→内）      | `visitBlockQuote`（add-if-absent，内层长链不被外层覆盖）   | 竖条（每层一条）                            |
 | `.markdownFoldAnchor`                         | `FoldAnchorInfo(blockID, isCollapsed)` | `markFoldAnchor`：打在第一个非空白字符，**不插入任何字符** | 折叠三角                                    |
-| `.markdownCollapsedPlaceholder`               | `CollapsedSectionInfo(blockID)`        | 打在「⋯」那个字符位                                        | 「⋯」点击热区                               |
+| `.markdownCollapsedPlaceholder`               | `CollapsedSectionInfo(blockID)`        | 打在「⋯」的**座位**上（占位不画）                          | 「⋯」圆角按钮                               |
 | `.markdownCheckbox` / `.markdownCheckboxSeat` | `CheckboxInfo(sourceStart, isChecked)` | 字面量三字符 / 座位                                        | 复选框按钮（**优先认座位**）                |
 | `.markdownSyntaxMarker`                       | `Bool`                                 | `sourceHint(isSyntaxMarker:)`                              | 退格时整段删（`expandedSyntaxMarkerRange`） |
 
@@ -309,7 +311,9 @@ super.layoutSubviews()
 - **三角浮在正文左边的装订线里**（`theme.foldGutterWidth` 加进 `textContainerInset.left`），**不占字符位** —— 早期版本把三角当 attachment 插进文本流，会把首行往右推，多行左边缘对不齐。
 - 定位 `positionFoldControls`：扫 `.markdownFoldAnchor` → `textLayoutFragment(for:)` → ⚠️ **`guard fragment.state == .layoutAvailable`**（没排到的 fragment 用估算坐标画必然错位，被跳过的都在屏幕外）→ 取 `textLineFragments.first?.typographicBounds`（对齐**首行**，不是整段居中）。
 - 图标：折叠 ▶ `chevron.right`、展开 ▼ `chevron.down`。
-- 「⋯」占位符（`CollapsedBlockAttachment`）上面盖一个透明按钮当热区，`insetBy(dx: -8, dy: -8)` 撑开。点它展开。
+- 「⋯」是浮层上的 `CollapsedSectionButton`：**固定高度**（`theme.collapsedButtonHeight`，默认 20）+ 圆角矩形 + 描边，那三个点由按钮自己画。文本流里只剩一个**什么也不画的座位**（`CollapsedBlockAttachment`：宽度 = `theme.collapsedPlaceholderWidth`，高度 = `font.lineHeight`）。
+  ⚠️ 「什么也不画」在实现上是**给一张全透明的图**（照抄 `CheckboxSeatAttachment` 的 `transparentImage`），**不能留 `image = nil`** —— 那样 TextKit 会认为附件没内容、自己补画一张缺省白纸图标，屏幕上凭空多出一张纸（2026-09-23 用户报过）。
+  ⚠️ 热区靠 `point(inside:)` 向外撑（上 / 下 / 右各 10 点、**左边只 4 点**，别把「点标题最后一个字放光标」抢走），**不能靠放大 frame** —— frame 就是画出来的那个框；父层 `FoldControlLayer.hitTest` 因此不能先按 `frame.contains` 过滤。点它展开。
 - **折叠后清空撤销栈**（`undoManager?.removeAllActions()`）：栈里更早的记录是针对折叠前的渲染文本的，撤销它们会把文本改到和模型对不上的状态。⚠️ 这里不能用 `disable/enableUndoRegistration` 包住替换（`_UITextUndoManager` 会抛 invalid state，实测崩）。
 
 ### 6.2 引用块竖条
@@ -367,8 +371,12 @@ super.layoutSubviews()
 
 - `copy` / `cut` 被接管：放进剪贴板的是**源码文本**。
 - **键盘输入**：系统已记过撤销，`applyEdit` 里用 `disable/enableUndoRegistration` 包住（不包会记两遍）。
-- **命令类编辑**（粘贴 / 剪切 / 插入图片 / 查找替换）：走 `performUndoableModelEdit` + `registerRestore(toSource:)`，按**整篇源码快照**登记撤销。
-  - 为什么必须自己接管：系统撤销按「插入时的长度」记账，而源码 19 个 UTF-16 会被渲染成 21 个（每行行首多一个圆点占位符）→ Cmd+Z 从 21 个里删 19 个，末尾剩下「完成」两个字。
+- **命令类编辑**（粘贴 / 剪切 / 插入图片 / 查找替换）：走 `performUndoableModelEdit`，按**「源码里改了哪一段」**（`SourceEditUndo`）登记撤销 —— 撤销时做一次局部替换，让编辑管线照常跑一遍。
+  - 为什么必须自己接管：程序发起的编辑系统不记账（实测撤销栈里根本没有它），不补一笔 ⌘Z 就会去弹更早的一条、而那条的范围早就对不上了。
+  - ⚠️ **不能记成「整篇源码快照」**（撤销 = `setMarkdown` 整篇重建）：撤销栈是两套账混着用的，系统那套账的前提是「文本一步步变过来」，中间插一次整篇重建就再也接不上 —— 表现为「第一次 ⌘Z 正常，之后怎么按都回不到最初」。
+  - ⚠️ 也不能记成「渲染串的那一段」：渲染串里的圆点占位符 `￼` 在源码里不存在，回放时会原样写进源码（源码里凭空冒出 `￼- 1`）。
+  - 跨块的改动（比如粘进来两行列表项）局部替换可能只改掉一部分，所以替换完会比对整篇源码，对不上就整篇恢复 —— **正确性优先于「撤销链不断」**。
+- ⚠️ **渲染长度必须稳定**：空列表项也要画圆点（见 `scannedMarkerRange`）。否则 `- ` 里打第一个字时圆点凭空出现，渲染串比用户敲进去的字符多长 1 个，系统按字符数记的撤销账当场对不上。
 - ⚠️ 程序自己发起的编辑（`isProgrammaticEdit`）**连 disable/enable 都不能碰**，否则 `_UITextUndoManager` 抛 invalid state。
 
 ### 6.9 导出长图

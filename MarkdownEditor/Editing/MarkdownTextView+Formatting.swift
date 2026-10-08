@@ -216,6 +216,59 @@ extension MarkdownTextView {
         placeCaret(atSource: lines.range.location + (text as NSString).length)
     }
 
+    /// 给光标（或选区）所在的那几行套上 `marker` 这个行首标记（`- [ ] ` / `- ` / `1. ` 都归它管）；已经套着就脱掉。
+    ///
+    /// ### 为什么要做成「传标记进来」而不是一个命令一个方法
+    /// 列表、待办事项这些命令长得一模一样，区别只是行首那几个字符。
+    /// 由调用方把标记传进来，这套「哪几个字符」的知识就留在调用方那一层，编辑器只管「套上去 / 脱下来」这件事本身。
+    ///
+    /// ### 换标记时旧标记怎么处理
+    /// 每一行都**先脱掉**原有的行首标记（标题 `#`、引用 `>`、有序 `1. `、无序 `- `、待办 `- [ ] ` 都认），再套上新的。
+    /// 不然在有序列表上点「待办」会得到 `- 1. 内容` 这种两个标记叠一起的结果。
+    ///
+    /// - parameter numbered: 为真时给多行依次编号（`1. ` `2. ` `3. `……），有序列表用这个。
+    func setLineMarker(_ marker: String, actionName: String, numbered: Bool = false) {
+        guard markedTextRange == nil else { return }
+        guard let lines = sourceLinesRange() else { return }
+        let pieces = lines.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+        // 每一行现在带着什么标记（没带就是 nil）
+        let existing = pieces.map { Self.lineMarker(of: $0) }
+        // 「已经套着」的判据：每个非空行都带着**同一类**标记。
+        // 有序列表按「是不是数字编号」算同一类 —— 第 2 行是 `2. `，它跟 `1. ` 是同一类而不是「没套着」
+        let isSameKind: (String?) -> Bool = numbered
+            ? { $0.map(Self.isOrderedMarker) ?? false }
+            : { $0 == marker }
+        // 空行不算「没套标记」：列表中间的空行本来就允许不带标记，别因为它把整段判定带偏
+        let alreadyOn = zip(pieces, existing).allSatisfy { line, found in
+            line.trimmingCharacters(in: .whitespaces).isEmpty || isSameKind(found)
+        }
+
+        var counter = 1
+        var newPieces: [String] = []
+        for (index, line) in pieces.enumerated() {
+            // 脱掉旧标记之后剩下的正文
+            let body = existing[index].map { String(line.dropFirst($0.count)) } ?? line
+            let isBlank = body.trimmingCharacters(in: .whitespaces).isEmpty
+            if alreadyOn || isBlank {
+                // 脱标记；空行原样留着（给它硬套一个 `- ` 会多出一个空列表项）
+                newPieces.append(body)
+            } else if numbered {
+                newPieces.append("\(counter). " + body)
+                counter += 1
+            } else {
+                newPieces.append(marker + body)
+            }
+        }
+
+        let newText = newPieces.joined(separator: "\n")
+        guard newText != lines.text else { return }
+        performUndoableModelEdit(actionName: alreadyOn ? "取消\(actionName)" : actionName) {
+            replaceSourceRange(lines.range, with: newText)
+        }
+        placeCaret(atSource: lines.range.location + (newText as NSString).length)
+    }
+
     /// ⌥⌘Q：引用块。给光标（或选区）所在的那几行加上 `> `；再按一次去掉。
     func toggleQuoteMarkdown() {
         guard markedTextRange == nil else { return }
@@ -250,7 +303,10 @@ extension MarkdownTextView {
     /// ### 没选中文字时怎么办
     /// 插入一对**空标记**，光标停在两个标记中间 —— 用户接着打字就落在 `**|**` 里，
     /// 不用先打标记再回头把光标挪进去。
-    private func toggleInlineMarkup(open: String, close: String, actionName: String) {
+    ///
+    /// ⚠️ 是 internal 而不是 private：上层那些工具栏（比如悬浮编辑按钮）要给「行内代码 `」和「删除线 ~~」
+    /// 复用这套逻辑，它们自己拿不到源码范围，只能告诉我们「开是什么、闭是什么」。
+    func toggleInlineMarkup(open: String, close: String, actionName: String) {
         guard markedTextRange == nil else { return }
         let source = sourceText
         let target = selectedSourceRange
@@ -388,6 +444,69 @@ extension MarkdownTextView {
         // 吃掉 `#` 后面多余的空格（`#   标题` 也该正常降级）
         while index < line.endIndex, line[index] == " " { index = line.index(after: index) }
         return String(line[index...])
+    }
+
+    /// 一行开头那几个字符是不是 markdown 的行首标记；是就把标记本身（**含**它后面的那个空格）返回。
+    ///
+    /// 认这五类：标题 `## `、引用 `> `、待办 `- [ ] `、有序 `1. `、无序 `- `。
+    /// 返回 nil 表示「这行没有行首标记」，是普通正文。
+    ///
+    /// ### 判定顺序不能随便换
+    /// 待办必须排在无序列表**前面**：`- [ ] ` 和 `- ` 的开头两个字符一模一样，先判无序列表会把 `- [ ] ` 认成 `- `。
+    private static func lineMarker(of line: String) -> String? {
+        let characters = Array(line)
+
+        // ① 待办事项：`- [ ] ` / `* [x] `（`[` 里是空格或 x/X；列表符号三种都认）
+        if characters.count >= 6,
+           Self.bulletCharacters.contains(characters[0]),
+           characters[1] == " ", characters[2] == "[",
+           Self.checkboxCharacters.contains(characters[3]),
+           characters[4] == "]", characters[5] == " " {
+            return String(characters.prefix(6))
+        }
+
+        // ② 标题：`#` 后面必须有空格才是标题（`#话题` 只是普通文字），行尾光秃秃一个 `#` 也算
+        var sharps = 0
+        while sharps < characters.count, characters[sharps] == "#" { sharps += 1 }
+        if (1...6).contains(sharps) {
+            guard sharps == characters.count || characters[sharps] == " " else { return nil }
+            return String(characters.prefix(min(sharps + 1, characters.count)))
+        }
+
+        // ③ 引用 `> `
+        if characters.count >= 2, characters[0] == ">", characters[1] == " " { return "> " }
+
+        // ④ 有序列表 `1. ` / `2) `（数字几位数都行）
+        var digits = 0
+        while digits < characters.count, characters[digits].isNumber { digits += 1 }
+        if digits > 0, digits + 1 < characters.count,
+           (characters[digits] == "." || characters[digits] == ")"),
+           characters[digits + 1] == " " {
+            return String(characters.prefix(digits + 2))
+        }
+
+        // ⑤ 无序列表 `- ` / `* ` / `+ `
+        if characters.count >= 2,
+           Self.bulletCharacters.contains(characters[0]), characters[1] == " " {
+            return String(characters.prefix(2))
+        }
+        return nil
+    }
+
+    /// 无序列表能用的三个符号。⚠️ 是 `Character` 集合：上面那几处都是拿单个字符去比
+    private static let bulletCharacters: Set<Character> = ["-", "*", "+"]
+
+    /// 复选框里能出现的三个字符：空格（未完成）、`x` / `X`（已完成）
+    private static let checkboxCharacters: Set<Character> = [" ", "x", "X"]
+
+    /// `text` 是不是一个有序列表的编号（形如 `12. ` 或 `3) `）—— 判定「这些行已经是**同一类**标记」时用。
+    private static func isOrderedMarker(_ text: String) -> Bool {
+        let characters = Array(text)
+        guard characters.count >= 3, characters.last == " " else { return false }
+        let separator = characters[characters.count - 2]
+        guard separator == "." || separator == ")" else { return false }
+        let digits = characters.dropLast(2)
+        return !digits.isEmpty && digits.allSatisfy { $0.isNumber }
     }
 
     /// 把光标放到源码的 `offset` 处（内部会换算成渲染坐标）。
