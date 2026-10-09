@@ -82,8 +82,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     private var isDirty: Bool { editor.markdownSource != savedSource }
     /// 临时提示（比如「已保存」）显示完要恢复成常规状态栏
     private var statusResetWork: DispatchWorkItem?
-    /// 当前弹出的文件选择器是不是「导出成图片」用途（Mac）
-    private var isExportingImage = false
+    /// 当前弹出的文件选择器是不是「导出」用途（导出图片 / 导出 HTML），而不是「打开」（Mac）。
+    ///
+    /// 导出流程都走同一个 `UIDocumentPickerViewController(forExporting:)`，而代理只有一个回调，只能靠这个标记区分「用户刚选了个导出位置」和「用户要打开一份文件」。
+    private var isExportingFile = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -439,6 +441,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             UIAction(title: "导出成图片", image: UIImage(systemName: "photo.on.rectangle")) { [weak self] _ in
                 // 把编辑器整篇内容渲染成一张长图，弹系统分享面板
                 self?.exportEditorAsImage()
+            },
+            UIAction(title: "导出成 HTML", image: UIImage(systemName: "doc.richtext")) { [weak self] _ in
+                // 先问配色和图片怎么处理，再把整篇 markdown 转成一个独立的 .html 文件
+                self?.showHTMLExportOptions()
             },
             UIAction(title: "主题", image: UIImage(systemName: "paintpalette")) { [weak self] _ in
                 // 单独一页挑配色（内置几套 + 可选的 JSON 文件）
@@ -1064,6 +1070,59 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         #endif
     }
 
+    /// 「导出成 HTML」：先问两个选项，再落到文件系统。
+    ///
+    /// ### 为什么要中间插一页
+    /// 配色（跟主题 / 固定内置）和图片（保留路径 / base64 内联）都得用户自己拿主意 ——默认值给不出「对所有人最优」，所以把选择权交给用户，顺便记住上次的选择。
+    private func showHTMLExportOptions() {
+        let controller = HTMLExportOptionsController()
+        controller.onExport = { [weak self] choice in
+            self?.exportDocumentAsHTML(choice: choice)
+        }
+        let navigation = UINavigationController(rootViewController: controller)
+        navigation.modalPresentationStyle = .formSheet
+        present(navigation, animated: true)
+    }
+
+    /// 生成 HTML 并导出（Mac 落到用户选的文件夹，iOS 走分享面板）。
+    private func exportDocumentAsHTML(choice: HTMLExportChoice) {
+        let source = editor.markdownSource
+        guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            showAlert(title: "导出失败", message: "当前文档是空的，没有可导出的内容。")
+            return
+        }
+
+        let options = MarkdownHTMLExporter.Options(
+            style: choice.usesThemeColors ? .currentTheme(editor.renderer.theme) : .builtIn,
+            inlinesLocalImages: choice.inlinesLocalImages,
+            // 相对路径的图片相对文档所在目录解析；不知道文档在哪（还没保存过）就只留路径
+            baseDirectory: openedFileURL?.deletingLastPathComponent()
+        )
+        let html = MarkdownHTMLExporter.export(markdown: source,
+                                               title: documentDisplayName,
+                                               options: options)
+        #if targetEnvironment(macCatalyst)
+        saveHTMLToFolder(html)
+        #else
+        presentShareSheet(forHTML: html)
+        #endif
+    }
+
+    /// 把导出内容先写成一份临时文件，两边都用得上。
+    ///
+    /// Mac 那边的导出面板（`UIDocumentPickerViewController(forExporting:)`）**只认文件 URL**，不认内存里的数据；
+    /// iOS 那边的分享面板同理 —— 给字符串只能得到「纯文本」那几个选项。
+    private func writeTemporary(data: Data, named suggestedName: String) -> URL? {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedName)
+        do {
+            try data.write(to: tempURL)
+        } catch {
+            showAlert(title: "导出失败", message: error.localizedDescription)
+            return nil
+        }
+        return tempURL
+    }
+
     #if targetEnvironment(macCatalyst)
     /// Mac 专属：把长图存成 PNG，落到用户选的本地文件夹。
     ///
@@ -1077,20 +1136,28 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             return
         }
         flashStatus("已生成图片 \(Int(image.size.width))×\(Int(image.size.height))，请选择存储位置")
-
-        // 导出面板要求给一个真实文件：先写进临时目录，面板再把副本复制到用户选的位置。
         // 默认文件名跟文档同名：notes.md → notes.png
         let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".png"
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedName)
-        do {
-            try pngData.write(to: tempURL)
-        } catch {
-            showAlert(title: "导出失败", message: error.localizedDescription)
+        guard let tempURL = writeTemporary(data: pngData, named: suggestedName) else { return }
+        presentExportPicker(for: tempURL)
+    }
+
+    /// Mac 专属：把 HTML 字符串落到用户选的本地文件夹（notes.md → notes.html）。
+    private func saveHTMLToFolder(_ html: String) {
+        guard let data = html.data(using: .utf8) else {
+            showAlert(title: "导出失败", message: "HTML 编码成 UTF-8 失败。")
             return
         }
+        flashStatus("已生成 HTML（\(data.count / 1024) KB），请选择存储位置")
+        // 默认文件名跟文档同名：notes.md → notes.html
+        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".html"
+        guard let tempURL = writeTemporary(data: data, named: suggestedName) else { return }
+        presentExportPicker(for: tempURL)
+    }
 
-        // 面板回调里要靠这个标记区分「图片导出」和「另存为 markdown」（见 delegate）
-        isExportingImage = true
+    /// 弹导出面板。回调里靠 `isExportingFile` 区分「导出」和「打开」（见 delegate）
+    private func presentExportPicker(for tempURL: URL) {
+        isExportingFile = true
         let picker = UIDocumentPickerViewController(forExporting: [tempURL], asCopy: true)
         picker.delegate = self
         present(picker, animated: true)
@@ -1101,6 +1168,22 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         flashStatus("已生成图片 \(Int(image.size.width))×\(Int(image.size.height))，正在打开分享面板")
         let activity = UIActivityViewController(activityItems: [image], applicationActivities: nil)
         // iPad 上分享面板必须以 popover 形式出现，得给个锚点；iPhone 用不上这条，留着不碍事
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = menuButton
+            popover.sourceRect = menuButton.bounds
+        }
+        present(activity, animated: true)
+    }
+
+    /// iOS：分享 HTML。同样「先落成临时文件，再分享那个 URL」。
+    ///
+    /// ### 为什么不直接把 HTML 字符串丢进分享面板
+    /// 字符串在系统眼里只是**一段文字**：AirDrop 过去对方收到的是纯文本，「存储到文件」也只会存成 `.txt`。给一个 `.html` 的文件 URL 才会被当成文件 —— 能用 Safari 打开、能存成网页。
+    private func presentShareSheet(forHTML html: String) {
+        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".html"
+        guard let tempURL = writeTemporary(data: Data(html.utf8), named: suggestedName) else { return }
+        flashStatus("已生成 HTML（\(html.utf8.count / 1024) KB），正在打开分享面板")
+        let activity = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
         if let popover = activity.popoverPresentationController {
             popover.sourceView = menuButton
             popover.sourceRect = menuButton.bounds
@@ -1168,14 +1251,14 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
 extension MarkdownDocumentViewController: UIDocumentPickerDelegate {
 
-    /// 用户挑完了（挑中的是文件，还是图片的保存位置，靠 isExportingImage 区分）
+    /// 用户挑完了（挑中的是要打开的文件，还是导出存过去的位置，靠 isExportingFile 区分）
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
 
-        if isExportingImage {
-            // 「导出成图片」：系统已经把 PNG 副本复制到这个位置了，提示一下就完事
-            isExportingImage = false
-            flashStatus("图片已存储到 \(url.deletingLastPathComponent().path)")
+        if isExportingFile {
+            // 「导出」（图片 / HTML）：系统已经把副本复制到这个位置了，提示一下就完事
+            isExportingFile = false
+            flashStatus("已存储到 \(url.deletingLastPathComponent().path)")
         } else {
             // 「打开」：把 URL 交给统一的入口。
             // 走 MarkdownDocumentOpener 而不是自己去读，是为了顺带申请一次安全作用域
@@ -1188,7 +1271,7 @@ extension MarkdownDocumentViewController: UIDocumentPickerDelegate {
 
     /// 用户点了取消：什么都不改，保持原样，顺手把导出标记清掉
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        isExportingImage = false
+        isExportingFile = false
     }
 }
 
