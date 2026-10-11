@@ -96,6 +96,9 @@ extension MarkdownTextView {
     /// 每次滚动都要重摆一次；要是每次都新建一个 `MarkdownTableScrollView`，用户横滑到表格中间再竖着滚一点，回来就**跳回最左边**了 —— 等于根本没法看。
     /// 所以同一份表格（同一个 attachment 对象）一直用同一个滚动视图，位置自己记着。
     func positionTableScrollViews() {
+        // 关掉隐式动画：见 beginDecorationPositioning 的注释（键盘弹出那一下表格容器会滑一段）
+        beginDecorationPositioning()
+        defer { endDecorationPositioning() }
         tableScrollLayer.frame = bounds
         // 可见范围，上下各留 200pt 余量，滚快一点也不会闪出空白
         let visible = CGRect(x: 0, y: -200, width: bounds.width, height: bounds.height + 400)

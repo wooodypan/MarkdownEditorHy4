@@ -975,8 +975,32 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         return [lines[0], lines[lines.count - 1]]
     }
 
+    /// 摆位前先调它，再配一句 `defer { endDecorationPositioning() }`：这一轮摆位就整个落进一个**不自动补间**的事务里。
+    ///
+    /// ### 为什么摆位必须关掉隐式动画（iPhone 上「键盘弹出 / 收起时按钮从左上角飞过来」就是这个）
+    /// 复制按钮 / 折叠三角 / 复选框这些装饰**每一轮布局都整批重建**：新 view 的 `frame` 先是左上角 `(0,0)`，
+    /// 紧接着才被赋成真正的位置。平时这一下没有动画 —— UIKit 只在**动画事务里**才给属性变化配补间。
+    /// 但键盘弹出 / 收起时 UIKit 是在一个动画事务里改 textView 高度的（`keyboardWillChangeFrame`
+    /// 那个通知就发在事务里，App 层的 `layoutIfNeeded()` 于是也跑在事务里），那一下赋值就成了一次真的属性动画：
+    /// 实测这几个按钮会被挂上 `position` / `bounds.size` 动画，从 `(0,0)`「嗖」地飞到目标位置。
+    /// 摆位是跟着滚动 / 布局走的定位，本来就该瞬时对齐，不该有补间。
+    ///
+    /// 关的是 **CATransaction 的隐式动作**（`UIView.performWithoutAnimation` 内部就是这么实现的），
+    /// 所以既挡住 UIKit 的属性动画，也挡住直接改 layer 属性带出来的隐式动画。
+    func beginDecorationPositioning() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+    }
+
+    /// 配 `beginDecorationPositioning()` 用，理由见那里的注释
+    func endDecorationPositioning() {
+        CATransaction.commit()
+    }
+
     /// 把文档坐标的矩形搬到屏幕上，铺背景 view 和复制按钮
     private func positionCodeBlockDecorations() {
+        beginDecorationPositioning()
+        defer { endDecorationPositioning() }
         codeBlockBackgroundLayer.frame = bounds
         codeBlockControlLayer.frame = bounds
 
@@ -1139,6 +1163,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     /// 把文档坐标的竖条搬到屏幕上（和 positionCodeBlockDecorations 同一套平移逻辑）
     private func positionQuoteBars() {
+        // 关掉隐式动画：见 beginDecorationPositioning 的注释（键盘弹出那一下竖条会淡入）
+        beginDecorationPositioning()
+        defer { endDecorationPositioning() }
         quoteBarLayer.frame = bounds
         // 竖条数量很少，每次重建比维护复用池省心
         quoteBarLayer.subviews.forEach { $0.removeFromSuperview() }
@@ -1238,6 +1265,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     /// 把复选框摆到屏幕上（和 `positionQuoteBars` 同一套平移逻辑）
     private func positionCheckboxes() {
+        // 关掉隐式动画：见 beginDecorationPositioning 的注释（键盘弹出那一下复选框会从左上角飞过来）
+        beginDecorationPositioning()
+        defer { endDecorationPositioning() }
         checkboxLayer.frame = bounds
         // 复选框数量不多，每次重建比维护复用池省心
         checkboxLayer.subviews.forEach { $0.removeFromSuperview() }
@@ -1382,6 +1412,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 3. **层和子 view 的坐标系要统一**。控件层的 `frame = bounds`（跟着 viewport 走），
     ///    所以子 view 用 viewport 坐标 = 文档坐标 − contentOffset，和代码块复制按钮一致。
     private func positionFoldControls() {
+        // 关掉隐式动画：见 beginDecorationPositioning 的注释（键盘弹出那一下三角会从左上角飞过来）
+        beginDecorationPositioning()
+        defer { endDecorationPositioning() }
         guard let layoutManager = textLayoutManager,
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
               bounds.width > 1 else {
