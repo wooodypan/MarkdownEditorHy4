@@ -22,10 +22,13 @@ import MultiTabController
 ///
 /// 所以「随手看看」用单击，「这份我要一直开着」用双击。
 ///
-/// ### 删除
-/// **Mac 上对着某一行点右键**（iPad 上是长按）→ 菜单里选「删除」；
-/// iPhone 上没有右键，改成**往左滑**那一行。两条路都会先弹一次确认框，
-/// 删掉的文件在 Mac 上会进系统废纸篓（还能捞回来），手机上就是真删了。
+/// ### 重命名 / 导出 / 删除
+/// **Mac 上对着某一行点右键**（iPad 上是长按）→ 菜单里选：
+/// - **重命名**：弹个输入框改文件名（内容不动，就地改个名字）；
+/// - **导出**：展开是图片 / HTML / PDF 三选一，和编辑页「⋯」菜单里那个「导出」是同一份实现；
+/// - **删除**：先弹一次确认框，删掉的文件在 Mac 上会进系统废纸篓（还能捞回来），手机上就是真删了。
+///
+/// iPhone 上没有右键，删除改成**往左滑**那一行（重命名 / 导出走长按，系统会把长按翻译成同一个菜单）。
 ///
 /// ### 一行里显示什么
 /// 文件名 + 浅灰的**预览**（文档首行文字，一行放不下从尾巴省略）+ 文件的**修改日期**。
@@ -52,6 +55,18 @@ final class DocumentListViewController: UIViewController {
     /// 免得跑一次测试就往用户的废纸篓里丢一个文件（`DocumentsWorkspace.delete`
     /// 的注释里有同样的警告）。
     var deleteFile: (URL) throws -> Void = { try DocumentsWorkspace.delete($0) }
+
+    /// 导出这条链路（图片 / HTML / PDF）。
+    ///
+    /// 和编辑页用的是**同一个** `DocumentExporter` —— 同一个子菜单、同一套选项面板、同一条落盘 / 分享流程，所以「右键导出」和「编辑页导出」出来的东西长得一样。
+    ///
+    /// 主题给的是「按当前设置现拼的一套」：这份文档没在编辑器里开着，没有编辑器的主题可借。
+    /// 进度提示（`onStatus`）不传 —— 左栏没有状态栏可写，系统的存储 / 分享面板本身就是反馈。
+    private lazy var exporter = DocumentExporter(
+        presenter: self,
+        anchorView: tableView,
+        theme: { MarkdownEditorSettings.shared.currentTheme }
+    )
 
     // MARK: - 生命周期
 
@@ -282,20 +297,145 @@ final class DocumentListViewController: UIViewController {
         return files[indexPath.row]
     }
 
-    // MARK: - 删除
+    // MARK: - 重命名 / 导出 / 删除
 
-    /// 「删除」那一项菜单。抽成单独的方法是为了能单测 ——
-    /// 不然测试得先伪造一次右键事件才能看到菜单长什么样。
-    func deleteMenu(for url: URL) -> UIMenu {
-        let delete = UIAction(title: "删除",
-                              image: UIImage(systemName: "trash"),
-                              // destructive：菜单里显示成红色，先给用户一个「这一步不可逆」的暗示
-                              attributes: .destructive) { [weak self] _ in
+    /// 右键（iPad 上是长按）弹出来的那一组菜单项：重命名 / 导出 / 删除。
+    ///
+    /// 抽成单独的方法是为了能单测 —— 不然测试得先伪造一次右键事件才能看到菜单长什么样。
+    /// 菜单顶上的小标题用文件名：右键的时候正好再确认一眼点的是哪一份。
+    func contextMenu(for url: URL) -> UIMenu {
+        UIMenu(title: DocumentsWorkspace.displayName(for: url),
+               children: [
+                   renameAction(for: url),
+                   // 「导出」是个子菜单（图片 / HTML / PDF），整块由 `DocumentExporter` 生成 ——编辑页那个菜单用的是同一个方法，所以两处的选项永远一致
+                   exporter.exportMenu { [weak self] in self?.exportSource(for: url) },
+                   deleteAction(for: url)
+               ])
+    }
+
+    /// 「重命名」那一项
+    private func renameAction(for url: URL) -> UIAction {
+        UIAction(title: "重命名", image: UIImage(systemName: "pencil")) { [weak self] _ in
+            self?.promptForRename(url)
+        }
+    }
+
+    /// 「删除」那一项
+    private func deleteAction(for url: URL) -> UIAction {
+        UIAction(title: "删除",
+                 image: UIImage(systemName: "trash"),
+                 // destructive：菜单里显示成红色，先给用户一个「这一步不可逆」的暗示
+                 attributes: .destructive) { [weak self] _ in
             self?.confirmDelete(url)
         }
-        // 菜单顶上的小标题用文件名：右键的时候正好再确认一眼点的是哪一份
-        return UIMenu(title: DocumentsWorkspace.displayName(for: url), children: [delete])
     }
+
+    // MARK: - 重命名
+
+    /// 弹「给文档改个名字」的输入框。
+    ///
+    /// ### 为什么在 App 里改，而不是让用户去 Finder / 「文件」里改
+    /// 在 App 里改完名，那些按路径存的记录能顺手一起收拾（「上次读到哪儿」「最近打开」，还有正开着这份文档的编辑页 —— 见 `performRename`）。在 App 外面改，App 这边只会看到「那份文件不见了、又多出一份新的」，两边的账就对不上了。
+    ///
+    /// - Parameter suggested: 预填进输入框的名字。用户因为重名被打回来重弹时填他上一次输的，改一个字就能接着来
+    private func promptForRename(_ url: URL, suggested: String? = nil) {
+        let defaultName = suggested ?? DocumentsWorkspace.displayName(for: url)
+
+        let alert = UIAlertController(title: "重命名",
+                                      message: "给「\(DocumentsWorkspace.displayName(for: url))」换个名字，内容不会动。",
+                                      preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = defaultName
+            field.placeholder = "文件名"
+            field.clearButtonMode = .whileEditing
+            field.returnKeyType = .done
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        // `weak alert`：UIAlertController 持有 action、action 持有这个闭包，闭包里再强引用 alert 就绕成一个圈，弹框关了也放不掉
+        alert.addAction(UIAlertAction(title: "好", style: .default) { [weak self, weak alert] _ in
+            guard let self else { return }
+            self.commitRename(url, toBaseName: alert?.textFields?.first?.text ?? "")
+        })
+
+        // 预填的名字整条选中：用户直接打字就等于「改掉它」，不用先自己全选删一遍。
+        // 放在 present 的 completion 里做：弹框还没上屏时输入框不是第一响应者，那会儿设选中会被系统清掉
+        present(alert, animated: true) {
+            alert.textFields?.first?.selectAll(nil)
+        }
+    }
+
+    /// 用户在命名框里点了「好」之后真正要做的事：改名；不成就提示 + 给一条重新起名的路。
+    ///
+    /// 弹框 / 提示这一半单独留着，改名那一半见下面 `rename(_:toBaseName:)` —— 那边不弹框，好单测。
+    private func commitRename(_ url: URL, toBaseName rawName: String) {
+        do {
+            try rename(url, toBaseName: rawName)
+        } catch {
+            showRenameFailureAlert(error, for: url, triedName: rawName)
+        }
+    }
+
+    /// 真正动手改名：把文件挪到新名字下，再把跟着路径走的那些记录一起收拾干净。
+    ///
+    /// ### 为什么单独一个方法、而且**不弹框**
+    /// 弹框那一步在单测里走不起来，而「改名 + 清记录 + 通知界面」才是真会出错的地方，所以把它拆出来，失败时直接抛出去，由界面决定怎么跟用户说。
+    ///
+    /// - Returns: 改名后的新地址
+    /// - Throws: 名字是空的（`WorkspaceError.emptyName`）、撞上重名（`WorkspaceError.nameTaken`）、或者文件系统本身报错
+    @discardableResult
+    func rename(_ url: URL, toBaseName rawName: String) throws -> URL {
+        let newURL = try DocumentsWorkspace.rename(url, toBaseName: rawName)
+
+        // 「这份文档上次读到哪儿」是按路径存的，旧路径那条没人用了。
+        // 文件名以后可能被重新用上，那时不该莫名跳到文档中间 —— 主动忘掉（和删除时做的是同一件事）
+        DocumentScrollMemory.shared.forget(key: url.path)
+        // 「最近打开」里那一行也别再指着旧路径：那份记录会被判成「文件已经不在」，白占一行
+        RecentDocumentsStore.shared.remove(url)
+        // 说一声，列表自己会重新扫一遍目录（照旧走通知这条路，别在这儿直接刷）。
+        // ⚠️ 正开着这份文档的编辑页**不用**在这儿通知：`DocumentsWorkspace.rename` 自己会发 `didRenameNotification`（带上新旧路径），它靠那条把路径换过去
+        NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
+        return newURL
+    }
+
+    /// 名字用不了（空的 / 重名）时的提示，带一个「重新起名」的入口。
+    ///
+    /// 单独写一个而不是复用 `showAlert`：只丢一句「改不了名」的话，用户得自己再右键一次才能重新输名字，白多两步。
+    private func showRenameFailureAlert(_ error: Error, for url: URL, triedName: String) {
+        let alert = UIAlertController(title: "这个名字用不了",
+                                      message: error.localizedDescription,
+                                      preferredStyle: .alert)
+        // 预填的是用户上一次输入的那个名字，改一个字就能接着来
+        alert.addAction(UIAlertAction(title: "重新起名", style: .default) { [weak self] _ in
+            self?.promptForRename(url, suggested: triedName)
+        })
+        alert.addAction(UIAlertAction(title: "好", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    // MARK: - 导出
+
+    /// 点「导出」时交给 `DocumentExporter` 的那份内容 —— 从磁盘上读。
+    ///
+    /// ### 和编辑页那条路的差别
+    /// 只有「内容从哪儿来」不一样：编辑页给的是编辑器内存里的当前内容（可能还没存盘），这里给的是文件里躺着的那一份（一份没打开的文档，也就只有这一份可用）。
+    private func exportSource(for url: URL) -> DocumentExportSource? {
+        guard let text = DocumentsWorkspace.read(url) else {
+            showAlert(title: "导出失败",
+                      message: "「\(url.lastPathComponent)」读不出来，可能被删掉或者没有访问权限。")
+            return nil
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            showAlert(title: "导出失败",
+                      message: "「\(DocumentsWorkspace.displayName(for: url))」是空的，没有可导出的内容。")
+            return nil
+        }
+        // 不传 imageRenderer：这份文档没在编辑器里开着，交给导出器临时造一台编辑器去画（见 DocumentExporter.renderImage）
+        return DocumentExportSource(markdown: text,
+                                    displayName: DocumentsWorkspace.displayName(for: url),
+                                    fileURL: url)
+    }
+
+    // MARK: - 删除
 
     /// 删之前先问一句。这是**不可逆**的操作（Mac 上还能从废纸篓捞，手机上就是没了）。
     ///
@@ -413,9 +553,9 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
         tableView.deselectRow(at: indexPath, animated: true)
     }
 
-    // MARK: - 删除
+    // MARK: - 右键菜单
 
-    /// Mac 上**右键**、iPad 上**长按**弹出的菜单，就是走这里。
+    /// Mac 上**右键**、iPad / iPhone 上**长按**弹出的菜单，就是走这里。
     ///
     /// （Catalyst 把「次要点击」翻译成 UIKit 的上下文菜单，所以同一个方法在两处都生效。）
     func tableView(_ tableView: UITableView,
@@ -427,7 +567,7 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
         // 右键列表就想要一个干脆的菜单
         return UIContextMenuConfiguration(identifier: url.path as NSString,
                                           previewProvider: nil) { [weak self] _ in
-            self?.deleteMenu(for: url)
+            self?.contextMenu(for: url)
         }
     }
 

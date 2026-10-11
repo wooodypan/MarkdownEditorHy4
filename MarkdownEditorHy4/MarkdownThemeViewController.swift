@@ -586,7 +586,7 @@ extension MarkdownThemeViewController: UIDocumentPickerDelegate {
 
     /// 挑一份别人的主题 JSON。
     ///
-    /// Mac 上这个面板呈现出来就是原生的「选取文件」对话框（选文件夹 + 改文件名），也就是用户说的「在 Finder 里挑」—— Catalyst 里 `NSOpenPanel` / `NSSavePanel` 被标成 unavailable，这一块是唯一能用的等效物（`MarkdownDocumentViewController.saveImageToFolder` 导出图片也是走它）。
+    /// Mac 上这个面板呈现出来就是原生的「选取文件」对话框（选文件夹 + 改文件名），也就是用户说的「在 Finder 里挑」—— Catalyst 里 `NSOpenPanel` / `NSSavePanel` 被标成 unavailable，这一块是唯一能用的等效物（`DocumentExporter.saveImageToFolder` 导出图片也是走它）。
     ///
     /// ⚠️ `asCopy: true`：我们要的是**拷进来一份副本**，不是原地打开 —— 主题文件只是配色，没必要（也不该）让 App 反过来去写用户那份原文件。
     @objc private func chooseFile() {
@@ -657,7 +657,7 @@ extension MarkdownThemeViewController {
 
     /// 把自己改过的那几色存成一份 JSON 送出去。
     ///
-    /// 写法照 `MarkdownDocumentViewController.saveImageToFolder`（导出长图那一条）：
+    /// 写法照 `DocumentExporter.saveImageToFolder`（导出长图那一条）：
     /// 系统这块面板只认「一个真实存在的文件」，所以先按当前内容写一份到临时目录，再由面板把**副本**复制到用户选的位置 —— Mac 上用户看到的就是原生存储对话框。
     ///
     /// ### 文件名带上当前主题名

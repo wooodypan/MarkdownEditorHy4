@@ -168,8 +168,14 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     private var needsCodeBlockRefresh = false
     /// 上次重算时的「签名」，用来判断内容或宽度有没有变
     private var lastCodeBlockSignature = ""
-    /// 首帧 TextKit 还没排出 fragment，允许重试几次
+    /// 「等排版收敛」最多重试几轮（只对整篇重算那条路生效，见 refreshCodeBlockDecorations）
+    private static let maxDecorationRetries = 30
+    /// 已经排了几轮重试
     private var codeBlockRetryCount = 0
+    /// 挂起着的重试任务。新一轮重算开始前一定先取消它 —— 不取消的话快速打字会叠出好几条重试链并行跑，每条都在整篇重算（见 scheduleDecorationRetry）
+    private var decorationRetryWork: DispatchWorkItem?
+    /// 打字停下来之后补的那一次整篇重算（见 scheduleDecorationSettle）
+    private var decorationSettleWork: DispatchWorkItem?
     /// 上一次「重算视野附近的装饰」时的滚动位置，用来节流（见 refreshDecorationsNearViewport）
     private var lastNearViewportRefreshOffset: CGFloat = -.greatestFiniteMagnitude
     /// 滚动触发的那一轮布局有没有已经排上（一帧最多一次，见 scheduleScrollLayout）
@@ -665,8 +671,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// ### 不这么做会怎样（这就是「停下滑才跳到位」的根因）
     /// 打开长文档时，屏幕外的代码块只能用 TextKit 的**估算坐标**算矩形（实测差 84pt 甚至更多），
     /// 这个值被缓存下来；滚动时只做平移，用的还是错的缓存 —— 于是灰底停在错误的位置，
-    /// 比如压在 ```swift 那一行上（文字和背景重合）。等滚动停下、0.15s 后那次全量重算
-    /// 才把真值算出来，灰底「啪」地跳到代码背后 —— 用户看到的就是这个跳。
+    /// 比如压在 ```swift 那一行上（文字和背景重合）。等滚过 40pt（或滚动停下）触发一次
+    /// 视野附近的重算，才把真值算出来 —— 用户看到的就是这个跳。
     ///
     /// ### 为什么不能滚动时整篇重算
     /// 重算要 `enumerateTextLayoutFragments(options: [.ensuresLayout])`，等于强制 TextKit 排版
@@ -677,34 +683,65 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 每帧重算要扫一遍 textStorage 的属性，没必要。这里每滚过 40pt 才重算一次：
     /// 块进视野前 1 屏（800pt）就已经落在 band 里被算过了，40pt 的粒度足够早，
     /// 用户根本看不到「还没纠正」的中间状态。慢速滚动时几乎不触发，掉帧风险最小。
-    /// 剩下的误差由滚动结束后的 `scheduleFoldRedraw`（整篇重算）兜底。
+    /// 剩下的误差由滚动结束后的 `scheduleFoldRedraw`（再强制算一次视野附近）兜底。
     ///
     /// - parameter force: true = 不管滚了多少都要算（滚动停下后的兜底用）
     private func refreshDecorationsNearViewport(force: Bool = false) {
         guard force || abs(contentOffset.y - lastNearViewportRefreshOffset) > 40 else { return }
         lastNearViewportRefreshOffset = contentOffset.y
+        // 滚动不改变内容 → 表格那趟全篇扫描可以省掉
+        _ = recomputeDecorations(within: nearViewportBand, rescanTableMarks: false)
+    }
 
-        let band = nearViewportBand
-        let (frames, _) = computeCodeBlockFrames(reusingOutside: band)
-        let (bars, _) = computeQuoteBarFrames(reusingOutside: band)
+    /// 重算四类装饰（代码块背景 / 引用竖条 / 复选框 / 表格横滚）并摆到屏幕上。
+    ///
+    /// - parameter band: 传「视野附近」的文档坐标矩形 = **只重算落在里面的**，外面的沿用上一轮结果；
+    ///            传 nil = 整篇重算。
+    /// - parameter rescanTableMarks: 要不要重扫「哪些表格要横滚」。只有内容变了才需要（那是一次 O(n) 的全篇属性扫描），纯滚动一律 false。
+    /// - returns: `pending` = 还有区间连一个 fragment 都没排出来（首帧常见），调用方据此决定要不要再等一个布局周期；
+    ///            `stable` = 这一轮算出来的和上一轮正画着的是不是一致（整篇重算用它判断排版收敛了没）
+    @discardableResult
+    private func recomputeDecorations(within band: CGRect?, rescanTableMarks: Bool) -> (pending: Bool, stable: Bool) {
+        let (frames, codePending) = computeCodeBlockFrames(reusingOutside: band)
+        let (bars, barPending) = computeQuoteBarFrames(reusingOutside: band)
         let (boxes, _) = computeCheckboxFrames(reusingOutside: band)
+        if rescanTableMarks {
+            // 内容变了 → 「哪些表格要横滚」也可能变了，这里重扫一遍（滚动那趟不扫，见 refreshTableScrollMarks）
+            refreshTableScrollMarks()
+        }
+
+        // 比对必须在写回**之前**做：比的是「这一轮算出来的」和「上一轮正画着的」
+        let barsStable = bars.count == quoteBarFrames.count
+            && zip(bars, quoteBarFrames).allSatisfy { $0.id == $1.id && $0.level == $1.level && nearlyEqual($0.frame, $1.frame) }
+        let stable = sameFrames(frames, codeBlockFrames) && barsStable && sameFrames(boxes, checkboxFrames)
 
         codeBlockFrames = frames
         quoteBarFrames = bars
         checkboxFrames = boxes
-        // 表格的**位置**（`tableScrollMarks`）这里不重扫：滚动不改变内容，复用上一次的结果，
-        // 省掉一次全篇富文本扫描（见 refreshTableScrollMarks 的注释）
         tableScrollFrames = computeTableScrollFrames(reusingOutside: band)
         positionCodeBlockDecorations()
         positionQuoteBars()
         positionCheckboxes()
         positionTableScrollViews()
+        return (codePending || barPending, stable)
+    }
+
+    /// 两轮算出来的矩形是不是「一回事」。`info` 按**对象身份**比（块被重建时身份就变了，必须算不一样）。
+    private func sameFrames<Info: AnyObject>(_ lhs: [(info: Info, frame: CGRect)],
+                                             _ rhs: [(info: Info, frame: CGRect)]) -> Bool {
+        lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { $0.info === $1.info && nearlyEqual($0.frame, $1.frame) }
+    }
+
+    /// 差在 0.5pt 以内就算相等：TextKit 的坐标是浮点，差 0.001 不该把整轮判成「还没稳定」（那会白白多跑一轮整篇重算）
+    private func nearlyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) <= 0.5 && abs(lhs.minY - rhs.minY) <= 0.5
+            && abs(lhs.width - rhs.width) <= 0.5 && abs(lhs.height - rhs.height) <= 0.5
     }
 
     /// 每次布局时决定：是「重算矩形」还是「只平移」。
     /// 只有文本内容或宽度变了才需要重算，纯滚动走平移分支。
     /// （代码块背景和引用竖条共用同一套判断，两者都靠 fragment 矩形吃饭）
-    private func updateCodeBlockDecorationsIfNeeded() {
+    private func updateCodeBlockDecorationsIfNeeded(nearViewportOnly: Bool = false) {
         let signature = "\(textStorage.length)/\(Int(bounds.width))"
         guard needsCodeBlockRefresh || signature != lastCodeBlockSignature else {
             positionCodeBlockDecorations()
@@ -717,47 +754,91 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         }
         lastCodeBlockSignature = signature
         needsCodeBlockRefresh = false
-        refreshCodeBlockDecorations()
+        refreshCodeBlockDecorations(recomputingAll: !nearViewportOnly)
     }
 
+    /// 重算装饰矩形。
+    ///
+    /// - parameter recomputingAll: false = 只算视野附近那一条带（`nearViewportBand`），屏幕外的沿用上一轮缓存。
+    ///
+    ///   ### 这才是这次优化的关键（打字那条路径每敲一个字都要付的代价，以前付的是整篇）
+    ///   整篇重算会对**每一个**代码块调 `enumerateTextLayoutFragments(options: [.ensuresLayout])`，
+    ///   等于逼 TextKit 把屏幕外那些本来不用排的区域也排一遍 —— 成本随整篇长度线性上涨，而且是白干的：
+    ///   屏幕外的 fragment 算出来只是估算值，等它滚进视野再算才是准的（见 `refreshDecorationsNearViewport` 的注释）。
+    ///   一次编辑只改了改动点那一小段，屏幕外的块位置没变，沿用缓存就够了。
+    ///
+    ///   true = 整篇重算，留给「内容整体换掉」那几条路：首屏加载、换主题、改窗口宽度、导出长图。
+    ///
     /// 不开 `private`：导出长图把视口撑到全文后要同步刷一轮（见 `MarkdownTextView+Export.swift`）。
-    func refreshCodeBlockDecorations() {
-        let (frames, _) = computeCodeBlockFrames()
-        let (bars, _) = computeQuoteBarFrames()
-        let (boxes, _) = computeCheckboxFrames()
-        // 内容变了 → 「哪些表格要横滚」也可能变了，这里重扫一遍（滚动那趟不扫，见 refreshTableScrollMarks）
-        refreshTableScrollMarks()
+    func refreshCodeBlockDecorations(recomputingAll: Bool = true) {
+        // 新一轮开始先把上一轮挂着没跑的重试撤掉：快速打字时每一字都会触发一次重算，
+        // 不撤的话会叠出好几条重试链并行跑（每条都是整篇重算，而且共享同一个重试计数，乱成一团）
+        if let pending = decorationRetryWork {
+            pending.cancel()
+            decorationRetryWork = nil
+            // 链作废了，重试额度从头算 —— 不然连打几十个字就把 30 次一次耗光
+            codeBlockRetryCount = 0
+        }
 
-        // ### 为什么要对比上一轮结果（TextKit 2 的坑，别删）
-        // TextKit 2 是「viewport 按需排版」：刚加载、刚滚完的时候，屏幕外 fragment 的
-        // frame 还是**估算值**（实测差几十上百 pt，越靠下越歪）。直接拿去画背景必然错位。
-        // 这里每 60ms 重算一次并和上一轮比对：结果还在变就说明排版没稳定，继续重试；
-        // 连续两轮一致才收手。滚动停下后 scheduleFoldRedraw 也会再触发一轮校正。
-        let stable = frames.count == codeBlockFrames.count &&
-            zip(frames, codeBlockFrames).allSatisfy { $0.info === $1.info && $0.frame == $1.frame } &&
-            bars.count == quoteBarFrames.count &&
-            zip(bars, quoteBarFrames).allSatisfy { $0.id == $1.id && $0.level == $1.level && $0.frame == $1.frame } &&
-            boxes.count == checkboxFrames.count &&
-            zip(boxes, checkboxFrames).allSatisfy { $0.info === $1.info && $0.frame == $1.frame }
-        codeBlockFrames = frames
-        quoteBarFrames = bars
-        checkboxFrames = boxes
-        tableScrollFrames = computeTableScrollFrames()
-        positionCodeBlockDecorations()
-        positionQuoteBars()
-        positionCheckboxes()
-        positionTableScrollViews()
+        let (pending, stable) = recomputeDecorations(within: recomputingAll ? nil : nearViewportBand,
+                                                    rescanTableMarks: true)
 
-        if !stable, codeBlockRetryCount < 30 {
-            codeBlockRetryCount += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
-                // view 已经从窗口摘掉（比如切换文档）就别再刷了
-                guard let self, self.window != nil else { return }
-                self.refreshCodeBlockDecorations()
-            }
+        guard recomputingAll else {
+            // 只算视野附近时，band 内的坐标是 `.ensuresLayout` 当场逼出来的真值，不会自己漂移，
+            // 所以不需要「轮询到收敛」那一套。唯一要等的是「这段还没排出 fragment」（pending）。
+            if pending { scheduleDecorationRetry(recomputingAll: false) }
+            return
+        }
+
+        // ### 整篇重算才需要「每 60ms 重算到收敛」（TextKit 2 的坑，别删）
+        // 屏幕外 fragment 的 frame 还是**估算值**（实测差几十上百 pt，越靠下越歪），
+        // 直接拿去画必然错位。所以重算一次并和上一轮比对：结果还在变就说明排版没稳定，继续重试；
+        // 连续两轮一致才收手。屏幕外的误差由滚动停下后的 scheduleFoldRedraw 兜底。
+        if !stable || pending {
+            scheduleDecorationRetry(recomputingAll: true)
         } else {
             codeBlockRetryCount = 0
         }
+    }
+
+    /// 排一次重试（这一轮判定「还不算数」时用）。
+    ///
+    /// ### 为什么要存成 DispatchWorkItem 而不是直接 asyncAfter
+    /// 存下来才能在下一轮重算开始时 `cancel()` 掉。以前那种「只管 dispatch 出去」的写法，
+    /// 快速打字时会同时挂着好几条链，每条都在整篇重算 —— 打字越久越卡。
+    private func scheduleDecorationRetry(recomputingAll: Bool) {
+        guard codeBlockRetryCount < Self.maxDecorationRetries else {
+            // 到顶就收手：再等下去也不会更准，屏幕外的留给滚动停下那次重算
+            codeBlockRetryCount = 0
+            return
+        }
+        codeBlockRetryCount += 1
+        let work = DispatchWorkItem { [weak self] in
+            // view 已经从窗口摘掉（比如切换文档）就别再刷了
+            guard let self, self.window != nil else { return }
+            self.decorationRetryWork = nil
+            self.refreshCodeBlockDecorations(recomputingAll: recomputingAll)
+        }
+        decorationRetryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
+    }
+
+    /// 打字停下来之后补一次**整篇**重算。
+    ///
+    /// ### 为什么打字那一下只算视野附近，之后还要整篇补一次
+    /// 视野附近的坐标是当场排出来的，屏幕上看到的必然是对的；但屏幕外那些块只是沿用了上一轮的缓存 ——
+    /// 一次大改动（删掉一整段）会把它们整体平移一大截，缓存的 y 就不再可信。
+    /// 所以等打字停下来补一次整篇重算把它们全部校正掉。快速连续打字时每一次都会把上一个任务取消，
+    /// 真正停下来之后才跑一次（和 scheduleFoldRedraw 一个套路）。
+    private func scheduleDecorationSettle() {
+        decorationSettleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.window != nil else { return }
+            self.decorationSettleWork = nil
+            self.refreshCodeBlockDecorations(recomputingAll: true)
+        }
+        decorationSettleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     /// 算出每个代码块在**文档坐标系**下占的矩形。
@@ -1278,8 +1359,11 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             self.positionFoldControls()
             self.positionCheckboxes()
             // 滚动停下后 fragment 才排实（滚动中屏幕外的还是估算值），
-            // 代码块背景矩形要重算一遍，不然一直拿着首帧的错坐标画
-            self.refreshCodeBlockDecorations()
+            // 视野附近的装饰矩形要重算一遍，不然一直拿着首帧的错坐标画。
+            // ⚠️ 这里刻意**不做整篇重算**：屏幕外的块算出来也只是估算值，而整篇重算要逼 TextKit
+            // 把全文都排一遍（每个代码块一次 ensuresLayout），长文档上滚一下停一下就会顿一下。
+            // 屏幕外的等它滚进视野附近再算，那时才是准的。
+            self.refreshDecorationsNearViewport(force: true)
         }
         foldRedrawWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
@@ -1629,7 +1713,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         //
         // 为什么不能只靠 `needsCodeBlockRefresh = true`：装饰层平时只挂在 `layoutSubviews` 里刷新，而我们用的是 TextKit 2 的 `performEditingTransaction` 改文本 —— 它会让 TextKit 的排版失效，但**不保证**系统会给 textView 排一次布局。实测：删掉文档里最后一个任务项后，渲染文本里座位已经没了，屏幕上那个复选框按钮却一直留在原地，要等下一次滚动（那时才走 layout）才消失。
         setNeedsLayout()
-        updateCodeBlockDecorationsIfNeeded()
+        // 只重算视野附近那一圈：一次编辑改动的是改动点附近，屏幕外的块位置没变、沿用缓存即可。
+        // 以前这里走的是整篇重算（还带最多 30 轮 60ms 重试），长文档上每敲一个字都要把全文重排一遍。
+        updateCodeBlockDecorationsIfNeeded(nearViewportOnly: true)
+        // 屏幕外那些块只是沿用了缓存，一次大改动（删掉一整段）会把它们平移一大截 ——
+        // 等打字停下来补一次整篇重算校正掉
+        scheduleDecorationSettle()
     }
 
     /// 真正用来改内容的 NSTextStorage

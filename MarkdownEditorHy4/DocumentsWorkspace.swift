@@ -193,6 +193,12 @@ enum DocumentsWorkspace {
         }
 
         try FileManager.default.moveItem(at: url, to: destination)
+
+        // ⚠️ 改名这件事必须报出去：右侧要是正开着这份文档，它手里记的还是**旧路径**，那一按 ⌘S 就会把旧名字的文件又写回来 —— 磁盘上凭空多出一份重复的。
+        // 报出去之后由编辑页把路径换成新的（见 `MarkdownDocumentViewController.documentDidRename`）。
+        NotificationCenter.default.post(name: didRenameNotification,
+                                        object: nil,
+                                        userInfo: [renameFromURLKey: url, renameToURLKey: destination])
         return destination
     }
 
@@ -302,6 +308,17 @@ enum DocumentsWorkspace {
 
     /// 有人请求「新建一份文档」（object 无）→ 由左侧栏建文件、开新 Tab
     static let newDocumentRequestedNotification = Notification.Name("MarkdownNewDocumentRequested")
+
+    /// 有人把一份文档**改了名**（在 `rename` 里发）。
+    ///
+    /// 为什么要专门发一条：改名换的是文件路径，而正开着这份文档的编辑页把路径记在自己身上（那是它 ⌘S 要写回的地方）。不通知的话它会继续往旧路径写，等于把文件「改回去 + 留一份重复」。
+    static let didRenameNotification = Notification.Name("MarkdownDocumentDidRename")
+
+    /// `didRenameNotification` 里旧路径用的键（`userInfo` 里是个 `URL`）
+    static let renameFromURLKey = "fromURL"
+
+    /// `didRenameNotification` 里新路径用的键（同上）
+    static let renameToURLKey = "toURL"
 }
 
 /// 文档工作区里能出的那几种错。

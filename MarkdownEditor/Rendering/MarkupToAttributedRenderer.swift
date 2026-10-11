@@ -65,6 +65,13 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     /// 公式是在「AST → 富文本」这一步变成图的，而这一步就是这里做的。）
     var mathRenderer: MarkdownMathRenderer?
 
+    /// cmark 解析缓存：源码没变就把上次那棵 AST 直接还回来（换主题、改宽度这些重排路径全靠它省掉解析）。
+    ///
+    /// ### 为什么挂在这里
+    /// 解析发生在两处：`MarkdownDocumentStore.buildBlocks` 按「区域」解析一次用来切块，这里再按「单个块」解析一次用来渲染。
+    /// 两份代码都从**同一个**缓存取，才能一次命中到底（各挂一个的话，整篇重排时两边各自命中一半，另一半仍然白解析一遍）。
+    let parseCache = MarkdownParseCache()
+
     // MARK: 当前块的上下文（只在 render(blockSource:) 执行期间有效）
 
     private var source: String = ""
@@ -108,7 +115,8 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         self.blockOrigin = blockOrigin
         defer { endBlock() }
 
-        let document = Document(parsing: blockSource)
+        // 走缓存：换主题、改窗口宽度这些重排里，块的源码一个字符都没变，没必要再让 cmark 跑一遍
+        let document = parseCache.document(for: blockSource)
 
         var fragment = RenderedFragment.empty
         for child in document.children {

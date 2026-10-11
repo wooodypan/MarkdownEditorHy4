@@ -70,6 +70,17 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     private let settings = MarkdownEditorSettings.shared
     /// 每份文档「上次读到哪儿」的记忆
     private let scrollMemory = DocumentScrollMemory.shared
+    /// 导出这条链路（图片 / HTML / PDF）。
+    ///
+    /// 实现整个在 `DocumentExporter` 里 —— 左栏右键导出走的也是它那一份，两处导出来的东西才一样。
+    /// 这里只交代三件事：谁弹面板（本页）、popover 从哪儿长出来（右上角那个「⋯」）、进度往哪儿写（底部状态栏）。
+    private lazy var exporter = DocumentExporter(
+        presenter: self,
+        anchorView: menuButton,
+        // 主题用闭包取「点导出那一刻」的：用户可能刚换过配色，建菜单时定下来的话导出的是旧配色
+        theme: { [weak self] in self?.editor.renderer.theme ?? .default },
+        onStatus: { [weak self] in self?.flashStatus($0) }
+    )
     private var bottomConstraint: NSLayoutConstraint?
 
     /// 当前这一页对应磁盘上的哪个文件 —— 也就是 ⌘S 要写回哪里。
@@ -84,10 +95,6 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     private var isDirty: Bool { editor.markdownSource != savedSource }
     /// 临时提示（比如「已保存」）显示完要恢复成常规状态栏
     private var statusResetWork: DispatchWorkItem?
-    /// 当前弹出的文件选择器是不是「导出」用途（导出图片 / 导出 HTML），而不是「打开」（Mac）。
-    ///
-    /// 导出流程都走同一个 `UIDocumentPickerViewController(forExporting:)`，而代理只有一个回调，只能靠这个标记区分「用户刚选了个导出位置」和「用户要打开一份文件」。
-    private var isExportingFile = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -119,6 +126,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         observeKeyboard()
         observeEditorChanges()
         observeSettingsChanges()
+        observeWorkspaceChanges()
         // 离开前台时把「读到哪儿」记一笔（用户常常是随手切走、再也没回来）
         observeAppLifecycle()
     }
@@ -497,25 +505,16 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     #endif
 
     /// 组装弹出菜单里的条目。
-    /// 每个 UIAction 就是一行：标题 + 图标 + 点击后要执行的代码
+    /// 每一项就是一行：标题 + 图标 + 点击后要执行的代码（`UIAction`），或者一个带下级菜单的入口（`UIMenu`，「导出」就是这种）。
     private func makeActionMenu() -> UIMenu {
-        let actions: [UIAction] = [
+        let actions: [UIMenuElement] = [
             UIAction(title: "查找", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
                 // 顶部滑出查找 / 替换横条
                 self?.showFindBar()
             },
-            UIAction(title: "导出成图片", image: UIImage(systemName: "photo.on.rectangle")) { [weak self] _ in
-                // 把编辑器整篇内容渲染成一张长图，弹系统分享面板
-                self?.exportEditorAsImage()
-            },
-            UIAction(title: "导出成 HTML", image: UIImage(systemName: "doc.richtext")) { [weak self] _ in
-                // 先问配色和图片怎么处理，再把整篇 markdown 转成一个独立的 .html 文件
-                self?.showHTMLExportOptions()
-            },
-            UIAction(title: "导出成 PDF", image: UIImage(systemName: "doc.text")) { [weak self] _ in
-                // 同样先问配色，然后按 A4 排成多页 PDF（图片一定内联：PDF 里留原路径等于丢图）
-                self?.showPDFExportOptions()
-            },
+            // 导出（图片 / HTML / PDF）收成**一项子菜单**：展开才选格式。
+            // 这一组菜单项由 `DocumentExporter` 生成 —— 左栏右键那个「导出」是同一份，两处永远一致
+            exporter.exportMenu { [weak self] in self?.exportSource() },
             UIAction(title: "主题", image: UIImage(systemName: "paintpalette")) { [weak self] _ in
                 // 单独一页挑配色（内置几套 + 可选的 JSON 文件）
                 self?.showThemePicker()
@@ -697,6 +696,40 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
     @objc private func appWillLeaveForeground() {
         rememberCurrentScrollPosition()
+    }
+
+    /// 目录里的文件被改名了 → 我要是正开着那一份，得把「我对应哪个文件」换过来
+    private func observeWorkspaceChanges() {
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(documentDidRename(_:)),
+                                               name: DocumentsWorkspace.didRenameNotification,
+                                               object: nil)
+    }
+
+    /// 左栏右键「重命名」改的是**磁盘上的路径**，而我这边把路径记在 `openedFileURL` 里当「⌘S 写回哪儿」用。
+    ///
+    /// ### 不跟着换会出什么事
+    /// 文件已经叫新名字了，我这边还记着旧名字 —— 用户回到正文按一次 ⌘S，内容就被写进**旧路径**：磁盘上凭空多出一份重复文件，而新名字那份反而是旧的。
+    /// 所以改完名必须把路径、图片基准目录、阅读位置的钥匙、标题一起换过来。
+    @objc private func documentDidRename(_ notification: Notification) {
+        guard let from = notification.userInfo?[DocumentsWorkspace.renameFromURLKey] as? URL,
+              let to = notification.userInfo?[DocumentsWorkspace.renameToURLKey] as? URL,
+              // 改的不是我这份（或者我根本没有文件）→ 跟我没关系
+              openedFileURL == from else { return }
+
+        openedFileURL = to
+        // 旧路径那条「读到哪儿」没人用了。文件名以后可能被重新用上，那时不该莫名跳到文档中间 —— 所以要主动忘掉（和删除那份文档时做的是同一件事）
+        scrollMemory.forget(key: from.path)
+
+        // 界面还没建好（Tab 先建、后显示）时只改路径就够了，剩下的等 viewDidLoad 走正常流程
+        guard isViewLoaded else { return }
+        // 相对路径的图片基准目录也跟着换（文件挪了名字，同目录一般没变，但别依赖「一般」）
+        editor.imageBaseURL = to.deletingLastPathComponent()
+        // 位置先在**新钥匙**下记一笔，免得刚改完名就被忘掉
+        rememberCurrentScrollPosition()
+        updateWindowTitle()
+        refreshStatus()
+        flashStatus("已改名为 \(DocumentsWorkspace.displayName(for: to))")
     }
 
     // MARK: - PPContentDisplaying（宿主 → 内容页）
@@ -1153,235 +1186,28 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         dismiss(animated: true)
     }
 
-    /// 「导出成图片」：编辑器整篇内容 → 一张长图。
-    /// 渲染细节（撑大视口、逐段画文字那些）都封装在 MarkdownTextView 里，这里只管「导出到哪」：
-    ///   - Mac Catalyst：弹系统「存储」面板，直接落到用户选的本地文件夹
-    ///   - iOS：弹系统分享面板（存相册 / AirDrop / 存到「文件」都行）
-    private func exportEditorAsImage() {
-        guard let image = editor.renderFullContentImage() else {
-            showAlert(title: "导出失败", message: "没有可导出的内容。")
-            return
-        }
-        #if targetEnvironment(macCatalyst)
-        saveImageToFolder(image)
-        #else
-        presentShareSheet(for: image)
-        #endif
-    }
+    // MARK: 导出
 
-    /// 「导出成 HTML」：先问两个选项，再落到文件系统。
+    /// 点「导出」时交给 `DocumentExporter` 的那份内容。
     ///
-    /// ### 为什么要中间插一页
-    /// 配色（跟主题 / 固定内置）和图片（保留路径 / base64 内联）都得用户自己拿主意 ——默认值给不出「对所有人最优」，所以把选择权交给用户，顺便记住上次的选择。
-    private func showHTMLExportOptions() {
-        let controller = HTMLExportOptionsController(kind: .html)
-        controller.onExport = { [weak self] choice in
-            self?.exportDocumentAsHTML(choice: choice)
-        }
-        presentExportOptions(controller)
-    }
-
-    /// 「导出成 PDF」的选项页：和 HTML 那一页是同一个面板，只是 PDF 不提供「图片保留原路径」这个选项。
-    private func showPDFExportOptions() {
-        let controller = HTMLExportOptionsController(kind: .pdf)
-        controller.onExport = { [weak self] choice in
-            self?.exportDocumentAsPDF(choice: choice)
-        }
-        presentExportOptions(controller)
-    }
-
-    private func presentExportOptions(_ controller: HTMLExportOptionsController) {
-        let navigation = UINavigationController(rootViewController: controller)
-        navigation.modalPresentationStyle = .formSheet
-        present(navigation, animated: true)
-    }
-
-    /// 导出用的那套选项（配色按用户选的，图片基准目录按文档所在目录）。
+    /// ### 为什么是「点的时候现取」而不是建菜单时取
+    /// 菜单是装配时建好的一个实例，一直用着它。内容若在建菜单那一刻就定下来，用户改了半天的稿再点导出，导出的还是打开菜单之前那一版。
     ///
-    /// `inlinesLocalImages` 由调用方定：HTML 跟着用户的选择，PDF 恒为 true（PDF 是自包含的，留原路径等于丢图）。
-    private func exportOptions(choice: HTMLExportChoice, inlinesLocalImages: Bool) -> MarkdownHTMLExporter.Options {
-        MarkdownHTMLExporter.Options(
-            style: choice.usesThemeColors ? .currentTheme(editor.renderer.theme) : .builtIn,
-            inlinesLocalImages: inlinesLocalImages,
-            // 相对路径的图片相对文档所在目录解析；不知道文档在哪（还没保存过）就退到 App 的 Documents
-            baseDirectory: openedFileURL?.deletingLastPathComponent()
-        )
-    }
-
-    /// 图片内联这一趟的结果怎么说给用户听。
-    ///
-    /// 内联这事儿是**静默**的：成功了没人注意，失败了也只是在 HTML 里留下一行 `src="./a.png"`。
-    /// 读不到图（沙盒里很常见）时一声不吭，用户只会觉得「这个开关是坏的」——所以把张数和读不到的那几个名字报出来。
-    private func imageInlineSummary(_ result: MarkdownHTMLExporter.Result) -> String {
-        guard result.inlinedImages > 0 || !result.missedImages.isEmpty else { return "" }
-        var text = "，内联 \(result.inlinedImages) 张图"
-        guard !result.missedImages.isEmpty else { return text }
-        let names = result.missedImages.prefix(3).joined(separator: "、")
-        let more = result.missedImages.count > 3 ? " 等 \(result.missedImages.count) 张" : ""
-        return text + "（读不到：\(names)\(more)，已保留原路径）"
-    }
-
-    /// 当前能拿去导出的源码；空文档直接拦下并提示
-    private func exportableSource() -> String? {
+    /// 空文档在这里就拦下（`DocumentExporter` 那边还会再兜一次底）：一份空白文档导出来没有任何意义。
+    private func exportSource() -> DocumentExportSource? {
         let source = editor.markdownSource
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             showAlert(title: "导出失败", message: "当前文档是空的，没有可导出的内容。")
             return nil
         }
-        return source
-    }
-
-    /// 生成 HTML 并导出（Mac 落到用户选的文件夹，iOS 走分享面板）。
-    private func exportDocumentAsHTML(choice: HTMLExportChoice) {
-        guard let source = exportableSource() else { return }
-
-        let result = MarkdownHTMLExporter.exportDocument(
+        return DocumentExportSource(
             markdown: source,
-            title: documentDisplayName,
-            options: exportOptions(choice: choice, inlinesLocalImages: choice.inlinesLocalImages)
+            displayName: documentDisplayName,
+            fileURL: openedFileURL,
+            // 正开着这份文档，图片就让编辑器自己画 —— 画出来就是屏幕上看到的那个样子
+            imageRenderer: { [weak self] in self?.editor.renderFullContentImage() }
         )
-        let summary = imageInlineSummary(result)
-        #if targetEnvironment(macCatalyst)
-        saveHTMLToFolder(result.html, summary: summary)
-        #else
-        presentShareSheet(forHTML: result.html, summary: summary)
-        #endif
     }
-
-    /// 生成 PDF 并导出。
-    ///
-    /// 走的是 HTML 那条管线：同样先转成一份完整的 HTML（配色、脚注、转义全都复用），再交给 WebKit 按 A4 重新排版 —— 这样 PDF 和 HTML 两个产物长得一致，也不用再写一遍「markdown → 版式」。
-    private func exportDocumentAsPDF(choice: HTMLExportChoice) {
-        guard let source = exportableSource() else { return }
-
-        let result = MarkdownHTMLExporter.exportDocument(
-            markdown: source,
-            title: documentDisplayName,
-            options: exportOptions(choice: choice, inlinesLocalImages: true)
-        )
-        flashStatus("正在排版 PDF…")
-        MarkdownPDFExporter.makePDF(html: result.html, title: documentDisplayName) { [weak self] pdf in
-            guard let self else { return }
-            guard let pdf else {
-                self.showAlert(title: "导出失败", message: "PDF 排版失败，请重试。")
-                return
-            }
-            let summary = self.imageInlineSummary(result)
-            let pages = "（\(pdf.pageCount) 页）"
-            #if targetEnvironment(macCatalyst)
-            self.savePDFToFolder(pdf.data, pages: pages, summary: summary)
-            #else
-            self.presentShareSheet(forPDF: pdf.data, pages: pages, summary: summary)
-            #endif
-        }
-    }
-
-    /// 把导出内容先写成一份临时文件，两边都用得上。
-    ///
-    /// Mac 那边的导出面板（`UIDocumentPickerViewController(forExporting:)`）**只认文件 URL**，不认内存里的数据；
-    /// iOS 那边的分享面板同理 —— 给字符串只能得到「纯文本」那几个选项。
-    private func writeTemporary(data: Data, named suggestedName: String) -> URL? {
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedName)
-        do {
-            try data.write(to: tempURL)
-        } catch {
-            showAlert(title: "导出失败", message: error.localizedDescription)
-            return nil
-        }
-        return tempURL
-    }
-
-    #if targetEnvironment(macCatalyst)
-    /// Mac 专属：把长图存成 PNG，落到用户选的本地文件夹。
-    ///
-    /// ### 为什么不用 NSSavePanel
-    /// Catalyst 把它标记成 unavailable（Swift 编译器直接拦）。等效替代是
-    /// `UIDocumentPickerViewController(forExporting:asCopy:)` —— 项目里「另存为」
-    /// 用的同一块面板，在 Mac 上呈现的就是原生风格的存储对话框（选文件夹 + 改文件名）。
-    private func saveImageToFolder(_ image: UIImage) {
-        guard let pngData = image.pngData() else {
-            showAlert(title: "导出失败", message: "图片编码成 PNG 失败。")
-            return
-        }
-        flashStatus("已生成图片 \(Int(image.size.width))×\(Int(image.size.height))，请选择存储位置")
-        // 默认文件名跟文档同名：notes.md → notes.png
-        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".png"
-        guard let tempURL = writeTemporary(data: pngData, named: suggestedName) else { return }
-        presentExportPicker(for: tempURL)
-    }
-
-    /// Mac 专属：把 HTML 字符串落到用户选的本地文件夹（notes.md → notes.html）。
-    private func saveHTMLToFolder(_ html: String, summary: String) {
-        guard let data = html.data(using: .utf8) else {
-            showAlert(title: "导出失败", message: "HTML 编码成 UTF-8 失败。")
-            return
-        }
-        flashStatus("已生成 HTML（\(data.count / 1024) KB）\(summary)，请选择存储位置")
-        // 默认文件名跟文档同名：notes.md → notes.html
-        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".html"
-        guard let tempURL = writeTemporary(data: data, named: suggestedName) else { return }
-        presentExportPicker(for: tempURL)
-    }
-
-    /// Mac 专属：把 PDF 落到用户选的本地文件夹（notes.md → notes.pdf）。
-    private func savePDFToFolder(_ data: Data, pages: String, summary: String) {
-        flashStatus("已生成 PDF\(pages)（\(data.count / 1024) KB）\(summary)，请选择存储位置")
-        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".pdf"
-        guard let tempURL = writeTemporary(data: data, named: suggestedName) else { return }
-        presentExportPicker(for: tempURL)
-    }
-
-    /// 弹导出面板。回调里靠 `isExportingFile` 区分「导出」和「打开」（见 delegate）
-    private func presentExportPicker(for tempURL: URL) {
-        isExportingFile = true
-        let picker = UIDocumentPickerViewController(forExporting: [tempURL], asCopy: true)
-        picker.delegate = self
-        present(picker, animated: true)
-    }
-    #else
-    /// iOS：系统分享面板，存相册 / AirDrop / 存到「文件」都走这里
-    private func presentShareSheet(for image: UIImage) {
-        flashStatus("已生成图片 \(Int(image.size.width))×\(Int(image.size.height))，正在打开分享面板")
-        let activity = UIActivityViewController(activityItems: [image], applicationActivities: nil)
-        // iPad 上分享面板必须以 popover 形式出现，得给个锚点；iPhone 用不上这条，留着不碍事
-        if let popover = activity.popoverPresentationController {
-            popover.sourceView = menuButton
-            popover.sourceRect = menuButton.bounds
-        }
-        present(activity, animated: true)
-    }
-
-    /// iOS：分享 HTML。同样「先落成临时文件，再分享那个 URL」。
-    ///
-    /// ### 为什么不直接把 HTML 字符串丢进分享面板
-    /// 字符串在系统眼里只是**一段文字**：AirDrop 过去对方收到的是纯文本，「存储到文件」也只会存成 `.txt`。给一个 `.html` 的文件 URL 才会被当成文件 —— 能用 Safari 打开、能存成网页。
-    private func presentShareSheet(forHTML html: String, summary: String) {
-        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".html"
-        guard let tempURL = writeTemporary(data: Data(html.utf8), named: suggestedName) else { return }
-        flashStatus("已生成 HTML（\(html.utf8.count / 1024) KB）\(summary)，正在打开分享面板")
-        presentShareSheet(forFile: tempURL)
-    }
-
-    /// iOS：分享 PDF。同样是「先落成临时文件，再分享那个 URL」
-    private func presentShareSheet(forPDF data: Data, pages: String, summary: String) {
-        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".pdf"
-        guard let tempURL = writeTemporary(data: data, named: suggestedName) else { return }
-        flashStatus("已生成 PDF\(pages)（\(data.count / 1024) KB）\(summary)，正在打开分享面板")
-        presentShareSheet(forFile: tempURL)
-    }
-
-    /// 分享一个已经落在临时目录里的文件 URL。
-    ///
-    /// iPad 上分享面板必须以 popover 形式出现，得给个锚点；iPhone 用不上这条，留着不碍事。
-    private func presentShareSheet(forFile tempURL: URL) {
-        let activity = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
-        if let popover = activity.popoverPresentationController {
-            popover.sourceView = menuButton
-            popover.sourceRect = menuButton.bounds
-        }
-        present(activity, animated: true)
-    }
-    #endif
 
     // MARK: 键盘避让
 
@@ -1437,34 +1263,17 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
 // MARK: 文件选择器回调
 //
-// 这个代理现在只服务两种面板：
-//   - 「打开」（⌘O）→ 挑一份文件，交给左侧栏在新 Tab 里打开；
-//   - 「导出成图片」→ 挑个位置存 PNG。
-// 以前还有「另存为」，现在没了 —— 新文档是左侧栏先在磁盘上建好的，不需要它。
+// 这个代理现在只剩「打开」（⌘O）这一条路：挑一份文件，交给左侧栏在新 Tab 里打开。
+// 导出那半边（挑个位置存文件）已经搬进 `DocumentExporter` —— 它自己当那个面板的代理，于是这里不用再靠一个「这次是打开还是导出」的标记去猜（原来的 `isExportingFile` 就是干这个的）。
 
 extension MarkdownDocumentViewController: UIDocumentPickerDelegate {
 
-    /// 用户挑完了（挑中的是要打开的文件，还是导出存过去的位置，靠 isExportingFile 区分）
+    /// 用户挑完了要打开哪份文件
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
 
-        if isExportingFile {
-            // 「导出」（图片 / HTML）：系统已经把副本复制到这个位置了，提示一下就完事
-            isExportingFile = false
-            flashStatus("已存储到 \(url.deletingLastPathComponent().path)")
-        } else {
-            // 「打开」：把 URL 交给统一的入口。
-            // 走 MarkdownDocumentOpener 而不是自己去读，是为了顺带申请一次安全作用域
-            // （文件在工作目录之外时，不申请就写不回去），
-            // 它会把通知发出去、由左侧栏在**新 Tab** 里打开这份文件 ——
-            // 当前这一页不动
-            MarkdownDocumentOpener.shared.handle(url: url)
-        }
-    }
-
-    /// 用户点了取消：什么都不改，保持原样，顺手把导出标记清掉
-    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        isExportingFile = false
+        // 走 MarkdownDocumentOpener 而不是自己去读，是为了顺带申请一次安全作用域（文件在工作目录之外时，不申请就写不回去），它会把通知发出去、由左侧栏在**新 Tab** 里打开这份文件 —— 当前这一页不动
+        MarkdownDocumentOpener.shared.handle(url: url)
     }
 }
 

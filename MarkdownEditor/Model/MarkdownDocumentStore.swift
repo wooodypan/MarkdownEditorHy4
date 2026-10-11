@@ -468,7 +468,8 @@ final class MarkdownDocumentStore {
     /// 这样所有块的源码首尾相接正好等于整篇源码。
     private func buildBlocks(region: NSRange, of source: String) -> [MarkdownBlock] {
         let regionText = source.substring(utf16Offset: region.location, length: region.length)
-        let document = Document(parsing: regionText)
+        // 走缓存：整篇重排（换主题、改宽度）时这块源码一字未变，不用再解析一遍
+        let document = renderer.parseCache.document(for: regionText)
         let table = SourceLocationTable(source: regionText)
 
         // 收集顶层块在 regionText 里的起点

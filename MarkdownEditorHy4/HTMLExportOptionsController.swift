@@ -106,7 +106,7 @@ final class HTMLExportOptionsController: UIViewController {
 
     @objc private func exportTapped() {
         // PDF 那边没有图片那个控件：这一项**原样沿用上次存的值**，别把「导出 HTML 默认不内联」悄悄改成内联
-        // （PDF 自己那条路恒为 true，见 `exportDocumentAsPDF`）
+        // （PDF 自己那条路恒为 true，见 `DocumentExporter.exportPDF`）
         let inlines = kind == .pdf ? HTMLExportChoice.stored.inlinesLocalImages
                                    : imageSegmented.selectedSegmentIndex == 1
         let choice = HTMLExportChoice(usesThemeColors: styleSegmented.selectedSegmentIndex == 0,

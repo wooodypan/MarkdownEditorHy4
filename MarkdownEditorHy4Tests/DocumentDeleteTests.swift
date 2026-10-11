@@ -3,7 +3,7 @@
 //  MarkdownEditorHy4Tests
 //
 //  左栏「删除文档」这条链路的验收测试：文件真被删掉了、删不存在的文件会报错、
-//  只删点中的那一份、右键菜单里确实有「删除」那一项。
+//  只删点中的那一份、右键菜单里确实有「删除」那一项（还有「重命名」和「导出」）。
 //
 //  ⚠️ 全部用**临时目录**里的假文件，绝不碰 App 沙盒里的 Documents 目录 ——
 //  那儿躺着用户自己的文档和那份示例。
@@ -79,7 +79,7 @@ final class DocumentDeleteTests: XCTestCase {
     /// 写死数量会误伤。只数 **destructive 的那一项** —— 那个才是「删除」的身份特征。
     func testDeleteMenuHasOneDestructiveAction() {
         let controller = DocumentListViewController()
-        let menu = controller.deleteMenu(for: URL(fileURLWithPath: "/tmp/示例文档.md"))
+        let menu = controller.contextMenu(for: URL(fileURLWithPath: "/tmp/示例文档.md"))
 
         let destructiveActions = menu.children
             .compactMap { $0 as? UIAction }
@@ -89,6 +89,21 @@ final class DocumentDeleteTests: XCTestCase {
         XCTAssertEqual(destructiveActions.first?.title, "删除")
         XCTAssertEqual(menu.title, "示例文档",
                        "菜单标题该用文件名（去掉 .md），好让用户确认右键点的是哪一份")
+    }
+
+    /// 右键菜单里除了「删除」，还得有「重命名」和「导出」（导出是个三选一的子菜单）
+    func testContextMenuHasRenameAndExport() throws {
+        let controller = DocumentListViewController()
+        let menu = controller.contextMenu(for: URL(fileURLWithPath: "/tmp/示例文档.md"))
+
+        let actionTitles = menu.children.compactMap { ($0 as? UIAction)?.title }
+        XCTAssertTrue(actionTitles.contains("重命名"), "右键菜单里缺「重命名」，实际是 \(actionTitles)")
+
+        // 「导出」是个子菜单，展开才是图片 / HTML / PDF —— 和编辑页那个菜单共用同一份定义
+        let exportMenu = try XCTUnwrap(menu.children.compactMap { $0 as? UIMenu }.first { $0.title == "导出" },
+                                       "右键菜单里缺「导出」子菜单")
+        let exportTitles = exportMenu.children.compactMap { ($0 as? UIAction)?.title }
+        XCTAssertEqual(exportTitles, ["图片", "HTML", "PDF"], "导出子菜单该是三选一")
     }
 
     // MARK: - 确认框里点了「删除」之后

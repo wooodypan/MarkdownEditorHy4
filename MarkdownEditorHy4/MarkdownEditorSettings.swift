@@ -985,4 +985,20 @@ extension MarkdownEditorSettings {
     func applyColors(to theme: inout MarkdownTheme, customPalette: MarkdownColorPalette?) {
         theme.applyColorPalette(resolvedColorPalette(customPalette: customPalette))
     }
+
+    /// 按当前设置**现拼**一套主题出来。
+    ///
+    /// ### 什么时候用得上
+    /// 编辑页是**就地**把这四组配置写进编辑器主题的（见 `MarkdownDocumentViewController.applyStyleToTheme`）——那边有编辑器可以改。但「左栏右键导出某份文件」时编辑器根本不存在（那份文档没打开），所以这里现拼一套，用的是同一份换算，导出的配色 / 字号才和编辑页一致。
+    var currentTheme: MarkdownTheme {
+        // 从默认主题起步：那上面已经带着渲染层默认的颜色和排版
+        var theme = MarkdownTheme.default
+        // 顺序和编辑页那四行一致 —— 配色只改颜色，后面三组再按用户拖过的滑块覆盖自己那几个值，两者不冲突
+        applyColors(to: &theme,
+                    customPalette: MarkdownCustomThemeStore.shared.loadPalette(named: customThemeFileName))
+        applyTypography(to: &theme)
+        applyTableColumnWidths(to: &theme)
+        applyImageSize(to: &theme)
+        return theme
+    }
 }
