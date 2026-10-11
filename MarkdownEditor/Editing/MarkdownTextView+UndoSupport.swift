@@ -109,6 +109,26 @@ extension MarkdownTextView {
         undoManager?.removeAllActions()
     }
 
+    // MARK: 走一步撤销 / 重做（界面上的按钮、菜单都从这儿进）
+
+    /// 现在有没有可以撤销的一步 —— 界面上的「撤销」按钮亮不亮看它
+    var canUndoEdit: Bool { undoManager?.canUndo ?? false }
+
+    /// 现在有没有可以重做的一步
+    var canRedoEdit: Bool { undoManager?.canRedo ?? false }
+
+    /// 撤销一步。
+    ///
+    /// ⚠️ 走的必须是系统的 `undoManager`：键盘输入那套账也记在它身上，我们另记一份「上一步是什么」的话，两种来源的撤销会各退各的、互相打架（撤销链断裂的老根因，见 `SourceEditUndo`）。
+    func undoEdit() {
+        undoManager?.undo()
+    }
+
+    /// 重做一步（同样交给系统的 `undoManager`，撤销 / 重做本来就共用同一条栈，只是方向不同）
+    func redoEdit() {
+        undoManager?.redo()
+    }
+
     // MARK: 撤销登记（源码坐标的局部替换）
 
     /// 跑一次「会改到文档内容」的命令类编辑，并登记一条整篇快照式的撤销。

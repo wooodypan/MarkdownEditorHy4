@@ -237,6 +237,68 @@ final class MarkdownHTMLExporterTests: XCTestCase {
         XCTAssertTrue(html.contains("src=\"https://example.com/a.png\""), "网络图不该被内联")
     }
 
+    /// `./pic.png` 这种带 `./` 的写法要能内联 —— 之前 `.` 段留着，去 App 包里按名字找那一步就对不上号。
+    func testDotSlashReferenceIsInlined() throws {
+        let directory = try makeScratchDirectory()
+        try writePNG(name: "pic.png", into: directory)
+
+        let options = MarkdownHTMLExporter.Options(style: .builtIn,
+                                                   inlinesLocalImages: true,
+                                                   baseDirectory: directory)
+        let html = render("![](./pic.png)", options: options)
+        XCTAssertTrue(html.contains("src=\"data:image/png;base64,"), "`./` 前缀是相对路径最常见的写法之一")
+    }
+
+    /// App 是开了沙盒的：用「打开」挑进来的 md 只有自己那张通行证，**同目录的 png 往往读不到**。
+    /// 而编辑器里那张图是能显示的（它走 `ImageLoader` 那条兜底链），所以导出也得认同一张 —— 否则用户看到的就是「图在，内联却没生效」。
+    func testImageFallsBackToTheAppBundleLikeTheEditorDoes() throws {
+        guard Bundle.main.url(forResource: "sample", withExtension: "png") != nil else {
+            throw XCTSkip("App 包里没有 sample.png，这条兜底测不了")
+        }
+        // 基准目录给一个空目录：文档目录里没有这张图，只能靠包里那份
+        let empty = try makeScratchDirectory()
+        let options = MarkdownHTMLExporter.Options(style: .builtIn,
+                                                   inlinesLocalImages: true,
+                                                   baseDirectory: empty)
+        let html = render("![](./sample.png)", options: options)
+        XCTAssertTrue(html.contains("src=\"data:image/png;base64,"), "编辑器显示得出来，导出就该内联得出来")
+    }
+
+    /// 内联失败不能再是静默的：得在结果里报出来，界面才能告诉用户「哪几张读不到」。
+    func testUnreachableImageIsReportedInsteadOfSilentlyKept() {
+        let options = MarkdownHTMLExporter.Options(style: .builtIn,
+                                                   inlinesLocalImages: true,
+                                                   baseDirectory: FileManager.default.temporaryDirectory)
+        let result = MarkdownHTMLExporter.exportDocument(markdown: "![](./找不到.png)",
+                                                         title: "标题",
+                                                         options: options)
+        XCTAssertEqual(result.inlinedImages, 0)
+        XCTAssertEqual(result.missedImages, ["./找不到.png"], "读不到的图要点名，用户才知道去哪儿补")
+        XCTAssertTrue(result.html.contains("src=\"./找不到.png\""), "读不到就保留原路径")
+    }
+
+    func testInlinedImagesAreCounted() throws {
+        let directory = try makeScratchDirectory()
+        try writePNG(name: "one.png", into: directory)
+        try writePNG(name: "two.png", into: directory)
+
+        let options = MarkdownHTMLExporter.Options(style: .builtIn,
+                                                   inlinesLocalImages: true,
+                                                   baseDirectory: directory)
+        let result = MarkdownHTMLExporter.exportDocument(markdown: "![](one.png)\n\n![](two.png)",
+                                                         title: "标题",
+                                                         options: options)
+        XCTAssertEqual(result.inlinedImages, 2, "两张都内联成功，状态栏才报得出「内联 2 张图」")
+        XCTAssertTrue(result.missedImages.isEmpty)
+    }
+
+    /// 纸面上没有滚动条：宽表格在屏幕上是「自己横滑」的，打印时必须还原成真表格，否则多出来的列被裁掉。
+    func testPrintStyleSheetUnwrapsScrollingTables() {
+        let html = render("| a | b |\n| --- | --- |\n| 1 | 2 |")
+        XCTAssertTrue(html.contains("@media print"), "导出 PDF 用的是同一份 CSS，得有打印那一套")
+        XCTAssertTrue(html.contains("overflow-x: auto"), "屏幕上还是要能横滑")
+    }
+
     /// ⚠️ 别用双引号当例子：cmark 默认开了「聪明引号」，成对的 `"` 会被换成印刷引号，测不到转义。
     func testImageAltTextIsEscaped() {
         let content = mainContent(render("![价格 < 100](a.png)"))

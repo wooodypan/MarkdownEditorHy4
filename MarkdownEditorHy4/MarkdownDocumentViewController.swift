@@ -62,6 +62,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     private let outlineCoordinator = OutlineCoordinator()
     /// 顶部的查找 / 替换横条（纯 UI 层，不认识编辑器）
     private let findBar = MarkdownFindBarView()
+    /// 键盘上方那条工具条（挂在编辑器的 `inputAccessoryView` 上，最右边是「收起键盘」）
+    private let keyboardBar = MarkdownKeyboardBarView()
     /// 查找协调者：把编辑器和查找横条连起来
     private let searchCoordinator = SearchCoordinator()
     /// 用户配置（「记住目录大纲滚动位置」等）。改完会发通知，下面挂了监听同步给大纲面板
@@ -91,7 +93,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
 
-        // 顺序有讲究：菜单按钮先建好（正文、大纲、查找条都挂在它下面）
+        // 顺序有讲究：菜单按钮先建好（正文、大纲、查找条的上边界都拿它当参照，参照物本身见 `contentTopAnchor`）
         setupMenuButton()
         setupEditor()
         setupStatusLabel()
@@ -153,7 +155,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         bottomConstraint = editor.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         NSLayoutConstraint.activate([
             // 上边直接钉在菜单栏下面 —— 跟查找条无关，查找条出现 / 消失正文都不会动
-            editor.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 2),
+            // （iPhone 上按钮在导航栏里，`contentTopAnchor` 给的是安全区上边）
+            editor.topAnchor.constraint(equalTo: contentTopAnchor, constant: 2),
             editor.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             editor.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bottomConstraint!
@@ -164,6 +167,37 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         editor.onImageTapped = { [weak self] attachment in
             self?.previewImage(attachment)
         }
+
+        // 键盘上方挂一条工具条：左边撤销 / 重做，右边「收起键盘」（手机上键盘挡住半屏，得留个出口）。
+        // 工具条本身不认识编辑器，所以三个动作都在这里接上。
+        // 只有软键盘弹出来时它才看得见 —— Mac 上接着实体键盘打字的话，这一条不会出现。
+        keyboardBar.onDismissKeyboard = { [weak self] in
+            self?.editor.resignFirstResponder()
+        }
+        keyboardBar.onUndo = { [weak self] in
+            guard let self else { return }
+            // 撤销 / 重做走编辑器自己的门面（它内部用的是系统的 undoManager，键盘输入那套账也在同一个栈上）
+            self.editor.undoEdit()
+            // 撤完这一格，能不能继续撤 / 能不能重做都变了，立刻把两粒按钮的亮灭刷一次
+            self.refreshKeyboardBarButtons()
+        }
+        keyboardBar.onRedo = { [weak self] in
+            guard let self else { return }
+            self.editor.redoEdit()
+            self.refreshKeyboardBarButtons()
+        }
+        editor.inputAccessoryView = keyboardBar
+        refreshKeyboardBarButtons()
+    }
+
+    // MARK: 键盘工具条
+
+    /// 把「撤销 / 重做」两粒按钮的亮灭跟撤销栈对齐：栈是空的就按灰显示，点了也不会有反应。
+    ///
+    /// 为什么不止在装配时刷一次：撤销栈随时在变，而按钮自己不知道 —— 这几个时机各刷一次就够用了：
+    /// ① 正文一变（打字、从悬浮按钮改格式）；② 键盘动了（条马上要出现，状态可能是上一次留下的）；③ 刚按过撤销 / 重做。
+    private func refreshKeyboardBarButtons() {
+        keyboardBar.setUndoEnabled(editor.canUndoEdit, redoEnabled: editor.canRedoEdit)
     }
 
     // MARK: 查找 / 替换
@@ -181,7 +215,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         view.addSubview(findBar)
 
         NSLayoutConstraint.activate([
-            findBar.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 2),
+            findBar.topAnchor.constraint(equalTo: contentTopAnchor, constant: 2),
 //            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             findBar.widthAnchor.constraint(equalToConstant: 350),
             findBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -60)
@@ -317,7 +351,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
         NSLayoutConstraint.activate([
             // 贴在右上角「⋯」按钮下面，右边距和按钮对齐
-            outlineView.topAnchor.constraint(equalTo: menuButton.bottomAnchor, constant: 6),
+            // （iPhone 上按钮在导航栏里，这条自动变成「贴着安全区上边」）
+            outlineView.topAnchor.constraint(equalTo: contentTopAnchor, constant: 6),
             outlineView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             // 兜底：窄屏上也要给左边留出位置。
             // 面板自己的宽度算法（effectiveWidth）保证这条永远不会被顶爆
@@ -342,9 +377,25 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         outlineCoordinator.reloadFromEditor()
     }
 
+    /// 「⋯」按钮是不是挂到导航栏上（iPhone 那套布局）。
+    private var usesNavigationBarMenuButton: Bool {
+        DeviceHelper.currentLayout == .iPhone
+    }
+
+    /// 正文的「上边界」，正文、查找条、悬浮目录都拿它当参照物。
+    ///
+    /// - **iPhone**：「⋯」按钮搬进了导航栏（见 `setupMenuButton`），页面里没这个按钮了，正文直接顶着安全区上边开始 —— 安全区上边界本来就已经在导航栏下面了；
+    /// - **iPad / Mac**：按钮仍然浮在右上角，正文得从它下边开始，免得第一行被盖住。
+    ///
+    /// ⚠️ 这两条**不能**合成一条：iPhone 上 `menuButton` 挂在导航栏里，和 `view` 不在同一棵视图树上，拿它当参照去激活约束会直接抛异常。
+    private var contentTopAnchor: NSLayoutYAxisAnchor {
+        usesNavigationBarMenuButton ? view.safeAreaLayoutGuide.topAnchor : menuButton.bottomAnchor
+    }
+
     /// 页面右上角的「⋯」按钮。
-    /// 原来这里是贴着状态栏的一排四个按钮（校验 / 源码 / 分块 / 重载），
-    /// 现在全部收进弹出菜单，只留一个按钮，编辑区域更清爽
+    /// ### iPhone 上它进导航栏，iPad / Mac 上它浮在正文右上角
+    /// iPhone 屏幕窄，正文本来就紧张，顶部再浮一个按钮更挤 —— 而导航栏右上角正好空着，挂上去既不占正文宽度，也符合 iPhone 上「更多」在右上角的习惯。
+    /// iPad / Mac 那一侧，本页是多 Tab 宿主里的子控制器、**不在导航栈里**（`navigationItem` 没地方显示），所以维持原样：按钮浮在正文右上角。
     private func setupMenuButton() {
         var config = UIButton.Configuration.plain()
         config.image = UIImage(systemName: "ellipsis.circle")
@@ -354,11 +405,19 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
 
         menuButton.configuration = config
-        menuButton.translatesAutoresizingMaskIntoConstraints = false
         // 关键的一行：设为 true 后，单击就弹菜单，不需要长按等右键那一套
         menuButton.showsMenuAsPrimaryAction = true
         menuButton.menu = makeActionMenu()
         menuButton.accessibilityLabel = "更多操作"
+
+        // iPhone：整颗按钮交给导航栏当 rightBarButtonItem
+        if usesNavigationBarMenuButton {
+            menuButton.frame = CGRect(x: 0, y: 0, width: 40, height: 40)
+            navigationItem.rightBarButtonItem = UIBarButtonItem(customView: menuButton)
+            return
+        }
+        // iPad / Mac ...按钮留在 self.view 里，靠约束定位
+        menuButton.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(menuButton)
 
         NSLayoutConstraint.activate([
@@ -418,6 +477,30 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// 每个 UIAction 就是一行：标题 + 图标 + 点击后要执行的代码
     private func makeActionMenu() -> UIMenu {
         let actions: [UIAction] = [
+            UIAction(title: "查找", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
+                // 顶部滑出查找 / 替换横条
+                self?.showFindBar()
+            },
+            UIAction(title: "导出成图片", image: UIImage(systemName: "photo.on.rectangle")) { [weak self] _ in
+                // 把编辑器整篇内容渲染成一张长图，弹系统分享面板
+                self?.exportEditorAsImage()
+            },
+            UIAction(title: "导出成 HTML", image: UIImage(systemName: "doc.richtext")) { [weak self] _ in
+                // 先问配色和图片怎么处理，再把整篇 markdown 转成一个独立的 .html 文件
+                self?.showHTMLExportOptions()
+            },
+            UIAction(title: "导出成 PDF", image: UIImage(systemName: "doc.text")) { [weak self] _ in
+                // 同样先问配色，然后按 A4 排成多页 PDF（图片一定内联：PDF 里留原路径等于丢图）
+                self?.showPDFExportOptions()
+            },
+            UIAction(title: "主题", image: UIImage(systemName: "paintpalette")) { [weak self] _ in
+                // 单独一页挑配色（内置几套 + 可选的 JSON 文件）
+                self?.showThemePicker()
+            },
+            UIAction(title: "设置", image: UIImage(systemName: "gearshape")) { [weak self] _ in
+                // 弹出设置页（正文排版、大纲、表格列宽都在那儿）
+                self?.showSettings()
+            },
             UIAction(title: "重载", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
                 // 丢掉未保存的改动，从磁盘把这份文件重新读一遍
                 self?.reloadFromDisk()
@@ -430,29 +513,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
                 // 新开一页展示当前 markdown 源码
                 self?.showSource()
             },
-            UIAction(title: "查找", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
-                // 顶部滑出查找 / 替换横条
-                self?.showFindBar()
-            },
             UIAction(title: "校验", image: UIImage(systemName: "checkmark.seal")) { [weak self] _ in
                 // 全选复制，比对复制出来的文本和源码是否逐字符一致
                 self?.verifyRoundTrip()
-            },
-            UIAction(title: "导出成图片", image: UIImage(systemName: "photo.on.rectangle")) { [weak self] _ in
-                // 把编辑器整篇内容渲染成一张长图，弹系统分享面板
-                self?.exportEditorAsImage()
-            },
-            UIAction(title: "导出成 HTML", image: UIImage(systemName: "doc.richtext")) { [weak self] _ in
-                // 先问配色和图片怎么处理，再把整篇 markdown 转成一个独立的 .html 文件
-                self?.showHTMLExportOptions()
-            },
-            UIAction(title: "主题", image: UIImage(systemName: "paintpalette")) { [weak self] _ in
-                // 单独一页挑配色（内置几套 + 可选的 JSON 文件）
-                self?.showThemePicker()
-            },
-            UIAction(title: "设置", image: UIImage(systemName: "gearshape")) { [weak self] _ in
-                // 弹出设置页（正文排版、大纲、表格列宽都在那儿）
-                self?.showSettings()
             }
         ]
 
@@ -934,6 +997,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     @objc private func editorContentChanged() {
         updateWindowTitle()
         reportEditedStateIfNeeded()
+        // 刚敲进去的字也是一笔可以撤销的账，键盘条上那两粒按钮跟着变
+        refreshKeyboardBarButtons()
     }
 
     /// 「我改过了」这件事只上报一次，让宿主把这一页从「预览 Tab」固定成正式 Tab。
@@ -1075,37 +1140,106 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// ### 为什么要中间插一页
     /// 配色（跟主题 / 固定内置）和图片（保留路径 / base64 内联）都得用户自己拿主意 ——默认值给不出「对所有人最优」，所以把选择权交给用户，顺便记住上次的选择。
     private func showHTMLExportOptions() {
-        let controller = HTMLExportOptionsController()
+        let controller = HTMLExportOptionsController(kind: .html)
         controller.onExport = { [weak self] choice in
             self?.exportDocumentAsHTML(choice: choice)
         }
+        presentExportOptions(controller)
+    }
+
+    /// 「导出成 PDF」的选项页：和 HTML 那一页是同一个面板，只是 PDF 不提供「图片保留原路径」这个选项。
+    private func showPDFExportOptions() {
+        let controller = HTMLExportOptionsController(kind: .pdf)
+        controller.onExport = { [weak self] choice in
+            self?.exportDocumentAsPDF(choice: choice)
+        }
+        presentExportOptions(controller)
+    }
+
+    private func presentExportOptions(_ controller: HTMLExportOptionsController) {
         let navigation = UINavigationController(rootViewController: controller)
         navigation.modalPresentationStyle = .formSheet
         present(navigation, animated: true)
     }
 
-    /// 生成 HTML 并导出（Mac 落到用户选的文件夹，iOS 走分享面板）。
-    private func exportDocumentAsHTML(choice: HTMLExportChoice) {
+    /// 导出用的那套选项（配色按用户选的，图片基准目录按文档所在目录）。
+    ///
+    /// `inlinesLocalImages` 由调用方定：HTML 跟着用户的选择，PDF 恒为 true（PDF 是自包含的，留原路径等于丢图）。
+    private func exportOptions(choice: HTMLExportChoice, inlinesLocalImages: Bool) -> MarkdownHTMLExporter.Options {
+        MarkdownHTMLExporter.Options(
+            style: choice.usesThemeColors ? .currentTheme(editor.renderer.theme) : .builtIn,
+            inlinesLocalImages: inlinesLocalImages,
+            // 相对路径的图片相对文档所在目录解析；不知道文档在哪（还没保存过）就退到 App 的 Documents
+            baseDirectory: openedFileURL?.deletingLastPathComponent()
+        )
+    }
+
+    /// 图片内联这一趟的结果怎么说给用户听。
+    ///
+    /// 内联这事儿是**静默**的：成功了没人注意，失败了也只是在 HTML 里留下一行 `src="./a.png"`。
+    /// 读不到图（沙盒里很常见）时一声不吭，用户只会觉得「这个开关是坏的」——所以把张数和读不到的那几个名字报出来。
+    private func imageInlineSummary(_ result: MarkdownHTMLExporter.Result) -> String {
+        guard result.inlinedImages > 0 || !result.missedImages.isEmpty else { return "" }
+        var text = "，内联 \(result.inlinedImages) 张图"
+        guard !result.missedImages.isEmpty else { return text }
+        let names = result.missedImages.prefix(3).joined(separator: "、")
+        let more = result.missedImages.count > 3 ? " 等 \(result.missedImages.count) 张" : ""
+        return text + "（读不到：\(names)\(more)，已保留原路径）"
+    }
+
+    /// 当前能拿去导出的源码；空文档直接拦下并提示
+    private func exportableSource() -> String? {
         let source = editor.markdownSource
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             showAlert(title: "导出失败", message: "当前文档是空的，没有可导出的内容。")
-            return
+            return nil
         }
+        return source
+    }
 
-        let options = MarkdownHTMLExporter.Options(
-            style: choice.usesThemeColors ? .currentTheme(editor.renderer.theme) : .builtIn,
-            inlinesLocalImages: choice.inlinesLocalImages,
-            // 相对路径的图片相对文档所在目录解析；不知道文档在哪（还没保存过）就只留路径
-            baseDirectory: openedFileURL?.deletingLastPathComponent()
+    /// 生成 HTML 并导出（Mac 落到用户选的文件夹，iOS 走分享面板）。
+    private func exportDocumentAsHTML(choice: HTMLExportChoice) {
+        guard let source = exportableSource() else { return }
+
+        let result = MarkdownHTMLExporter.exportDocument(
+            markdown: source,
+            title: documentDisplayName,
+            options: exportOptions(choice: choice, inlinesLocalImages: choice.inlinesLocalImages)
         )
-        let html = MarkdownHTMLExporter.export(markdown: source,
-                                               title: documentDisplayName,
-                                               options: options)
+        let summary = imageInlineSummary(result)
         #if targetEnvironment(macCatalyst)
-        saveHTMLToFolder(html)
+        saveHTMLToFolder(result.html, summary: summary)
         #else
-        presentShareSheet(forHTML: html)
+        presentShareSheet(forHTML: result.html, summary: summary)
         #endif
+    }
+
+    /// 生成 PDF 并导出。
+    ///
+    /// 走的是 HTML 那条管线：同样先转成一份完整的 HTML（配色、脚注、转义全都复用），再交给 WebKit 按 A4 重新排版 —— 这样 PDF 和 HTML 两个产物长得一致，也不用再写一遍「markdown → 版式」。
+    private func exportDocumentAsPDF(choice: HTMLExportChoice) {
+        guard let source = exportableSource() else { return }
+
+        let result = MarkdownHTMLExporter.exportDocument(
+            markdown: source,
+            title: documentDisplayName,
+            options: exportOptions(choice: choice, inlinesLocalImages: true)
+        )
+        flashStatus("正在排版 PDF…")
+        MarkdownPDFExporter.makePDF(html: result.html, title: documentDisplayName) { [weak self] pdf in
+            guard let self else { return }
+            guard let pdf else {
+                self.showAlert(title: "导出失败", message: "PDF 排版失败，请重试。")
+                return
+            }
+            let summary = self.imageInlineSummary(result)
+            let pages = "（\(pdf.pageCount) 页）"
+            #if targetEnvironment(macCatalyst)
+            self.savePDFToFolder(pdf.data, pages: pages, summary: summary)
+            #else
+            self.presentShareSheet(forPDF: pdf.data, pages: pages, summary: summary)
+            #endif
+        }
     }
 
     /// 把导出内容先写成一份临时文件，两边都用得上。
@@ -1143,14 +1277,22 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     }
 
     /// Mac 专属：把 HTML 字符串落到用户选的本地文件夹（notes.md → notes.html）。
-    private func saveHTMLToFolder(_ html: String) {
+    private func saveHTMLToFolder(_ html: String, summary: String) {
         guard let data = html.data(using: .utf8) else {
             showAlert(title: "导出失败", message: "HTML 编码成 UTF-8 失败。")
             return
         }
-        flashStatus("已生成 HTML（\(data.count / 1024) KB），请选择存储位置")
+        flashStatus("已生成 HTML（\(data.count / 1024) KB）\(summary)，请选择存储位置")
         // 默认文件名跟文档同名：notes.md → notes.html
         let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".html"
+        guard let tempURL = writeTemporary(data: data, named: suggestedName) else { return }
+        presentExportPicker(for: tempURL)
+    }
+
+    /// Mac 专属：把 PDF 落到用户选的本地文件夹（notes.md → notes.pdf）。
+    private func savePDFToFolder(_ data: Data, pages: String, summary: String) {
+        flashStatus("已生成 PDF\(pages)（\(data.count / 1024) KB）\(summary)，请选择存储位置")
+        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".pdf"
         guard let tempURL = writeTemporary(data: data, named: suggestedName) else { return }
         presentExportPicker(for: tempURL)
     }
@@ -1179,10 +1321,25 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     ///
     /// ### 为什么不直接把 HTML 字符串丢进分享面板
     /// 字符串在系统眼里只是**一段文字**：AirDrop 过去对方收到的是纯文本，「存储到文件」也只会存成 `.txt`。给一个 `.html` 的文件 URL 才会被当成文件 —— 能用 Safari 打开、能存成网页。
-    private func presentShareSheet(forHTML html: String) {
+    private func presentShareSheet(forHTML html: String, summary: String) {
         let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".html"
         guard let tempURL = writeTemporary(data: Data(html.utf8), named: suggestedName) else { return }
-        flashStatus("已生成 HTML（\(html.utf8.count / 1024) KB），正在打开分享面板")
+        flashStatus("已生成 HTML（\(html.utf8.count / 1024) KB）\(summary)，正在打开分享面板")
+        presentShareSheet(forFile: tempURL)
+    }
+
+    /// iOS：分享 PDF。同样是「先落成临时文件，再分享那个 URL」
+    private func presentShareSheet(forPDF data: Data, pages: String, summary: String) {
+        let suggestedName = (documentDisplayName as NSString).deletingPathExtension + ".pdf"
+        guard let tempURL = writeTemporary(data: data, named: suggestedName) else { return }
+        flashStatus("已生成 PDF\(pages)（\(data.count / 1024) KB）\(summary)，正在打开分享面板")
+        presentShareSheet(forFile: tempURL)
+    }
+
+    /// 分享一个已经落在临时目录里的文件 URL。
+    ///
+    /// iPad 上分享面板必须以 popover 形式出现，得给个锚点；iPhone 用不上这条，留着不碍事。
+    private func presentShareSheet(forFile tempURL: URL) {
         let activity = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
         if let popover = activity.popoverPresentationController {
             popover.sourceView = menuButton
@@ -1209,6 +1366,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         let overlap = max(0, view.bounds.height - frame.origin.y)
         bottomConstraint?.constant = -overlap
         view.layoutIfNeeded()
+        // 键盘一动，上面那条工具条马上要出现 / 消失 —— 顺手把撤销 / 重做的亮灭跟当前撤销栈对齐
+        refreshKeyboardBarButtons()
     }
 
     // MARK: 小工具

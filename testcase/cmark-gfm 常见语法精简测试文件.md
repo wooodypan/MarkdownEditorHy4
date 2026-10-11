@@ -69,9 +69,9 @@
 
 ## 8. Image
 
-![示例图片](https://example.com/image.png)
+![示例图片](./sample.png)
 
-![带标题的图片](https://example.com/image.png "Example image")
+![带标题的图片](https://p0.qhimg.com/t11508c75c8dbf808d445e62617.jpg "Example image")
 
 ---
 

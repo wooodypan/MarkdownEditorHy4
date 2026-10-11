@@ -35,7 +35,7 @@ enum MarkdownHTMLExporter {
         var style: StyleSource
         /// 要不要把能读到的本地图片编成 base64 塞进 HTML
         var inlinesLocalImages: Bool
-        /// 相对路径的图片相对谁解析（一般传文档所在目录）
+        /// 相对路径的图片相对谁解析（一般传文档所在目录；不知道文档在哪时传 nil，会退到 App 的 Documents 目录）
         var baseDirectory: URL?
 
         init(style: StyleSource,
@@ -47,23 +47,52 @@ enum MarkdownHTMLExporter {
         }
     }
 
+    /// 导出的产物，外加一份「图片内联得怎么样」的账。
+    ///
+    /// 为什么要带这份账：内联失败时 HTML 里仍然是 `src="./a.png"`，用户看到的是「我明明勾了内联」——之前这一路是**静默**退回原路径的（沙盒里读不到图是常态），不报出来就永远查不到原因。
+    struct Result {
+        var html: String
+        /// 成功编成 base64 的图片张数
+        var inlinedImages: Int
+        /// 想内联但没读到的图片地址（原文照抄，给用户看是哪个）
+        var missedImages: [String]
+    }
+
     // MARK: 导出
 
     static func export(markdown source: String, title: String, options: Options) -> String {
+        exportDocument(markdown: source, title: title, options: options).html
+    }
+
+    /// 完整的一次导出（比 `export` 多返回一份图片内联的账）。
+    static func exportDocument(markdown source: String, title: String, options: Options) -> Result {
         let notes = footnoteDefinitions(in: source)
         let bodySource = removing(notes, from: source)
+
+        // 计数放在闭包外面攒：渲染器是「遇到一张图问我一次」，它自己不知道总共几张
+        var inlinedCount = 0
+        var missed: [String] = []
 
         var renderer = MarkdownHTMLRenderer()
         renderer.footnoteIDs = Set(notes.map(\.id))
         renderer.footnoteNumbers = Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0.index) })
         renderer.imageSourceResolver = options.inlinesLocalImages
-            ? { imageSource(for: $0, baseDirectory: options.baseDirectory) }
+            ? { reference in
+                if let inlined = inlinedImageSource(for: reference, baseDirectory: options.baseDirectory) {
+                    inlinedCount += 1
+                    return inlined
+                }
+                missed.append(reference)
+                return reference
+            }
             : nil
 
         let body = renderer.visit(Document(parsing: bodySource))
         let footnotes = footnoteSection(notes, renderer: &renderer)
 
-        return page(body: body, footnotes: footnotes, title: title, tokens: options.style.tokens)
+        return Result(html: page(body: body, footnotes: footnotes, title: title, tokens: options.style.tokens),
+                      inlinedImages: inlinedCount,
+                      missedImages: missed)
     }
 
     /// 拼外壳：`<!DOCTYPE html>` + meta + CSS + 正文。
@@ -191,17 +220,107 @@ enum MarkdownHTMLExporter {
     /// 一张图最多内联多大。**超过 2 MB 就保留原路径**：内联之后 HTML 会比图本身还难分享，得不偿失。
     private static let maxInlineImageBytes = 2 * 1024 * 1024
 
-    /// 图片地址最终怎么写进 `src`。内联不了的情况（网络图、读不到、太大、不认识的格式）一律原样返回。
-    private static func imageSource(for reference: String, baseDirectory: URL?) -> String {
-        guard looksLikeRelativePath(reference),
-              let url = fileURL(for: reference, baseDirectory: baseDirectory),
-              FileManager.default.isReadableFile(atPath: url.path),
-              let data = try? Data(contentsOf: url),
-              !data.isEmpty,
-              data.count <= maxInlineImageBytes,
-              let mime = mimeType(forExtension: url.pathExtension) else { return reference }
+    /// 把一张本地图片编成 `data:` 形式的地址。
+    ///
+    /// ### 为什么不只拼「文档目录 + 原路径」就完事
+    /// 老写法只试这一个地址，试不到就**静默**留原路径 —— 实测最常见的失败正是这一处：
+    /// App 是开了沙盒的，用「打开」面板挑进来的那份 md 只给自己发了通行证，**同目录的 png 读不到**；
+    /// 而编辑器里那张图却是能显示的，因为它走的是 `ImageLoader` 那条「文档目录 → App 包 → 绝对路径」的兜底链。
+    /// 于是用户看到的是「图明明在，导出却没内联」。所以这里把候选地址铺开，跟编辑器认同一张图。
+    ///
+    /// - Returns: 内联后的 `data:` 地址；不是本地图 / 一个候选都读不到时返回 nil（调用方保留原路径）
+    static func inlinedImageSource(for reference: String, baseDirectory: URL?) -> String? {
+        guard let path = localPath(forImageReference: reference) else { return nil }
 
-        return "data:\(mime);base64,\(data.base64EncodedString())"
+        for url in candidateURLs(forImagePath: path, baseDirectory: baseDirectory) {
+            // ⚠️ 不再先用 `isReadableFile` 问一遍：沙盒下它给的答案是不可信的（会把能读的说成读不到），直接读一次才是真的。读失败（没权限 / 不是文件）自然走到下一个候选。
+            guard let data = try? Data(contentsOf: url),
+                  !data.isEmpty,
+                  data.count <= maxInlineImageBytes,
+                  let mime = mimeType(for: url, data: data) else { continue }
+
+            return "data:\(mime);base64,\(data.base64EncodedString())"
+        }
+        return nil
+    }
+
+    /// 把 markdown 里的图片地址洗成一个干净的文件路径；不是本地文件（网络图、`data:`）返回 nil。
+    ///
+    /// 要处理的几种写法：`![](./a.png)`、`![](<my image.png>)`、`![](a.png "标题")`、`![](a%20b.png)`。
+    private static func localPath(forImageReference reference: String) -> String? {
+        var raw = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+
+        // `<…>` 包裹（地址里有空格时的标准写法）
+        if raw.hasPrefix("<"), raw.hasSuffix(">") { raw = String(raw.dropFirst().dropLast()) }
+        // 标题：`![a](b.png "标题")`。只在**看得出有标题**（带引号）时才切 —— 不然 `my image.png` 这种带空格的文件名会被切成 `my`。
+        // 带协议头的（网络地址里可能有空格）也不按这个切
+        if (raw.contains("\"") || raw.contains("'")),
+           let space = raw.firstIndex(of: " "),
+           raw[raw.startIndex..<space].range(of: "://") == nil {
+            raw = String(raw[raw.startIndex..<space])
+        }
+        guard !raw.isEmpty else { return nil }
+        // 网络图 / `data:` 开头的直接排除：它们本来就不该去磁盘上找
+        guard raw.hasPrefix("/") || looksLikeRelativePath(raw) else { return nil }
+
+        // `![](my%20photo.png)` 是有可能的，先把百分号编码还原成真的文件名
+        let decoded = raw.removingPercentEncoding ?? raw
+        return normalizingDotSegments(decoded)
+    }
+
+    /// 候选地址，按「最可能是作者指的那张」往后排。
+    ///
+    /// 顺序和编辑器那条链一致（见 `ImageLoader.resolve`）：文档目录 → 绝对路径 → App 包资源。
+    /// 排在后面的都是兜底，只有前面的真不存在才会用到 —— 保证「编辑器里显示的是哪张，导出就是哪张」。
+    static func candidateURLs(forImagePath path: String, baseDirectory: URL?) -> [URL] {
+        var urls: [URL] = []
+        let append = { (url: URL?) in
+            guard let url, !urls.contains(url) else { return }
+            urls.append(url)
+        }
+
+        // ① 相对文档所在目录（绝大多数情况）
+        if let baseDirectory { append(baseDirectory.appendingPathComponent(path)) }
+        // 找不到文档在哪时（还没保存过）退到 App 的 Documents —— 粘贴进来的图片都存那儿
+        if baseDirectory == nil { append(DocumentsWorkspace.folderURL.appendingPathComponent(path)) }
+        // ② 源码里写的就是绝对路径
+        if path.hasPrefix("/") { append(URL(fileURLWithPath: path)) }
+        // ③ App 包里的资源：演示文档（sample.md 里的 sample.png）常常只存在于包里
+        append(bundleURL(forImagePath: path))
+
+        return urls
+    }
+
+    /// 去 App 包里找这张图。包里是平铺的，所以「路径里那几层目录」和「只剩文件名」都试一遍。
+    private static func bundleURL(forImagePath path: String) -> URL? {
+        let full = path as NSString
+        let bare = full.lastPathComponent as NSString
+        for (name, fileExtension) in [(full.deletingPathExtension, full.pathExtension),
+                                      (bare.deletingPathExtension, bare.pathExtension)] {
+            guard !name.isEmpty else { continue }
+            // 扩展名为空时按 png 试（老写法就是这么兜的）
+            let lookup = fileExtension.isEmpty ? "png" : fileExtension
+            if let url = Bundle.main.url(forResource: name, withExtension: lookup) { return url }
+        }
+        return nil
+    }
+
+    /// 去掉路径里的 `.` 段并解开 `..`（`./sample.png` → `sample.png`）。
+    ///
+    /// 留着 `.` 不影响读文件，但会让「去 App 包里按名字找」那一步对不上号（包里不会有个叫 `./sample` 的资源）。
+    private static func normalizingDotSegments(_ path: String) -> String {
+        guard path.contains(".") else { return path }
+        var stack: [String] = []
+        for part in path.split(separator: "/", omittingEmptySubsequences: false) {
+            switch part {
+            case ".", "": continue          // 开头的 `/` 会拆出一个空段，跳过它（下面单独补回来）
+            case "..": if !stack.isEmpty { stack.removeLast() }
+            default: stack.append(String(part))
+            }
+        }
+        let joined = stack.joined(separator: "/")
+        return path.hasPrefix("/") ? "/" + joined : joined
     }
 
     /// 是不是本地相对路径（`sample.png`、`sub/a.jpg`）。带协议、`//cdn/...`、绝对 http 地址都不是。
@@ -214,15 +333,13 @@ enum MarkdownHTMLExporter {
         return colon > slash
     }
 
-    private static func fileURL(for reference: String, baseDirectory: URL?) -> URL? {
-        // 源码里写 `![](my%20photo.png)` 是有可能的，先把百分号编码还原成真的文件名
-        let path = reference.removingPercentEncoding ?? reference
-        if path.hasPrefix("/") { return URL(fileURLWithPath: path) }
-        guard let baseDirectory else { return nil }
-        return baseDirectory.appendingPathComponent(path)
+    /// 扩展名 → MIME，认不出来再按文件头的几个字节猜（`IMG_1234` 这种没有扩展名的图也能内联）。
+    /// 都猜不出来返回 nil（宁可保留原路径，也别编出一个打不开的 `data:` URL）。
+    private static func mimeType(for url: URL, data: Data) -> String? {
+        if let byExtension = mimeType(forExtension: url.pathExtension) { return byExtension }
+        return sniffedMimeType(data)
     }
 
-    /// 扩展名 → MIME。认不出来的返回 nil（宁可保留原路径，也别编出一个打不开的 `data:` URL）
     private static func mimeType(forExtension extension: String) -> String? {
         switch `extension`.lowercased() {
         case "png": return "image/png"
@@ -237,5 +354,29 @@ enum MarkdownHTMLExporter {
         case "ico": return "image/x-icon"
         default: return nil
         }
+    }
+
+    /// 按文件头猜格式。每种图的头几个字节是固定的（PNG 是 `‰PNG`，JPEG 是 `FF D8 FF`），比扩展名可靠。
+    private static func sniffedMimeType(_ data: Data) -> String? {
+        let bytes = [UInt8](data.prefix(12))
+        guard bytes.count >= 4 else { return nil }
+
+        if bytes.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return "image/png" }
+        if bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF { return "image/jpeg" }
+        if bytes.starts(with: Array("GIF8".utf8)) { return "image/gif" }
+        if bytes[0] == 0x42, bytes[1] == 0x4D { return "image/bmp" }
+        // TIFF：`II*\0`（小端）/ `MM\0*`（大端）
+        if bytes.starts(with: [0x49, 0x49, 0x2A, 0x00]) || bytes.starts(with: [0x4D, 0x4D, 0x00, 0x2A]) {
+            return "image/tiff"
+        }
+        // WEBP / HEIC 都是 `….ftyp` / `RIFF….WEBP` 这种「盒子」结构，品牌名在第 4～12 字节里
+        if bytes.starts(with: Array("RIFF".utf8)), bytes.count >= 12,
+           Array(bytes[8..<12]) == Array("WEBP".utf8) { return "image/webp" }
+        if bytes.count >= 12, Array(bytes[4..<8]) == Array("ftyp".utf8) {
+            let brand = String(bytes: bytes[8..<12], encoding: .ascii) ?? ""
+            // heic / heix / hevc / mif1（HEIF 的通用品牌）都能被浏览器当 HEIC 解
+            if ["heic", "heix", "hevc", "hevx", "mif1", "msf1"].contains(brand) { return "image/heic" }
+        }
+        return nil
     }
 }

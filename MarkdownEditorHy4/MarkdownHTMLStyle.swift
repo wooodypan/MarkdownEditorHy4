@@ -183,6 +183,15 @@ struct MarkdownHTMLTokens {
           border-radius: 4px;
         }
         a.footnote-backref { text-decoration: none; margin-left: 0.15em; }
+        @media print {
+          body { max-width: none; padding: 0; }
+          /* 屏幕上是「表格太宽就在自己的盒子里横滑」，纸面上没有滚动条 —— 不还原成真正的表格，宽出来的那几列就永远看不到 */
+          table { display: table; width: 100%; max-width: 100%; overflow: visible; }
+          /* 同理：代码块在纸上得折行，不然超宽的部分被裁掉 */
+          pre { white-space: pre-wrap; overflow: visible; }
+          pre, table, blockquote, img, li { break-inside: avoid; }
+          h1, h2, h3, h4 { break-after: avoid; }
+        }
         """
     }
 
