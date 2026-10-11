@@ -97,16 +97,20 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         setupMenuButton()
         setupEditor()
         setupStatusLabel()
+        // ⚠️ 顺序有讲究：**先把用户存过的设置写进主题，再装文档**。
+        // 反过来（先 `apply(item)` 再 `applyEditorStyle()`）会让同一份内容渲染两次：
+        // `setMarkdown` 先用默认主题整篇渲一遍，紧接着 `refreshTheme()` 再用真主题整篇重渲一遍。
+        // 用户改过字号 / 行高的话，那就是白花一次整篇渲染的功夫（实测 ~155 ms，占打开文档的两成）。
+        // 这里只写主题、不重排 —— 编辑器此刻还没内容，重排等于空跑。
+        applyStyleToTheme()
         // 套用宿主送来的内容项。到这一步才做，是因为下面的界面这时才建好 ——
-        // 而且大纲的「初次拉取」也依赖文档已经装进去了
+        // 而且大纲的「初次拉取」也依赖文档已经装进去了。
+        // 这一次渲染用的就是上面那套最终主题，不用再来第二遍
         if let item = pendingItem {
             apply(item)
         }
         // 放在文档加载**之后**：装配时的「初次拉取」才能真正拉到标题。
-        // 放前面也能跑（编辑器那次 push 会被忽略），但会白拉一次空列表。
-        // 这里也顺带把用户存过的字号 / 行高 / 段间距套上去 —— 文档刚才是用默认主题
-        // 渲进去的，不补这一下，改过设置的人下次启动会看到「开头那几秒是默认字号」
-        applyEditorStyle()
+        // 放前面也能跑（编辑器那次 push 会被忽略），但会白拉一次空列表
         setupOutline()
         // 查找条放在最后：它是浮层，后加的视图画在上面，这样它才盖得住正文和大纲面板
         setupFindBar()
@@ -592,20 +596,13 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         applyEditorStyle()
     }
 
-    /// 把「配色」「正文排版」「表格列宽」「图片尺寸」四组配置一起写进编辑器主题，再整篇重排一遍。
+    /// 把「配色」「正文排版」「表格列宽」「图片尺寸」四组配置写进编辑器主题，再套上主题外壳（编辑区字号、链接样式、底色）。**不重排。**
     ///
-    /// ### 为什么这四组合成一个方法
-    /// 它们走的是同一条路：改主题里的数值 → **必须重渲染才生效**
-    /// （字号、行高、段间距、首行缩进是渲染时烙进段落样式的；表格是渲染时画成图的；
-    /// 图片尺寸是渲染时就写进 attachment 的 `bounds` 的，事后改主题也改不动已经排好的图）。
-    /// 各写一个方法、各排一遍的话，用户在设置页拖一下滑块会白排两遍。
+    /// 🚨 单拆出来是为了「打开文档」那条路：那边必须在 `setMarkdown` **之前**调它，让文档那一次渲染就用上最终主题。
+    /// 顺序反过来（先 `setMarkdown` 再 `refreshTheme()`）会先用默认主题整篇渲一遍、紧接着再用真主题整篇重渲一遍 —— 同一份内容白渲染两次，实测各 ~155 ms（2026-10-11 的 Time Profiler）。
     ///
-    /// ### 为什么非得重排
-    /// 只改主题里的数值、不重新渲染，屏幕上那篇文字纹丝不动。好在这套渲染是幂等的：
-    /// 同一份源码 + 同一套主题永远得到同一个结果，所以拖滑块时每动一下就重排一遍
-    /// 也扛得住 —— 而且它保着光标位置（见 `MarkdownTextView.refreshTheme`），
-    /// 不会拖两下就跳回文首。
-    private func applyEditorStyle() {
+    /// 「为什么这四组必须一起写」见下面 `applyEditorStyle` 的注释。
+    private func applyStyleToTheme() {
         // 配色放最前面：它只改颜色，后面那三组（字号、表格列宽、图片尺寸）
         // 会再按用户拖过的滑块覆盖自己那几个值，两者不冲突
         settings.applyColors(to: &editor.renderer.theme,
@@ -621,9 +618,27 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 行宽是**编辑器自己的布局参数**，不走主题 ——
         // 主题管「文字长什么样」，行宽取决于窗口有多宽，是布局的事
         editor.maxContentWidth = settings.bodyContentWidthLimit.map { CGFloat($0) }
-        // 行号是编辑器自己的显示开关：改它会让左边的装订线占/让出一条带子，
-        // 正文宽度跟着变，所以放在 `refreshTheme()`（整篇重排）之前一起生效
+        // 行号是编辑器自己的显示开关：改它会让左边的装订线占/让出一条带子，正文宽度跟着变
         editor.showsLineNumbers = settings.showsLineNumbers
+        // 字号 / 链接色 / 底色存在 view 自己身上，不跟着富文本走，得手动搬一次
+        editor.applyThemeChrome()
+    }
+
+    /// 设置变了（设置页改了排版、主题页换了配色）：写主题 + 整篇重排一遍。
+    ///
+    /// ### 为什么这四组合成一个方法
+    /// 它们走的是同一条路：改主题里的数值 → **必须重渲染才生效**
+    /// （字号、行高、段间距、首行缩进是渲染时烙进段落样式的；表格是渲染时画成图的；
+    /// 图片尺寸是渲染时就写进 attachment 的 `bounds` 的，事后改主题也改不动已经排好的图）。
+    /// 各写一个方法、各排一遍的话，用户在设置页拖一下滑块会白排两遍。
+    ///
+    /// ### 为什么非得重排
+    /// 只改主题里的数值、不重新渲染，屏幕上那篇文字纹丝不动。好在这套渲染是幂等的：
+    /// 同一份源码 + 同一套主题永远得到同一个结果，所以拖滑块时每动一下就重排一遍
+    /// 也扛得住 —— 而且它保着光标位置（见 `MarkdownTextView.refreshTheme`），
+    /// 不会拖两下就跳回文首。
+    private func applyEditorStyle() {
+        applyStyleToTheme()
         editor.refreshTheme()
     }
 

@@ -545,13 +545,16 @@ extension MarkdownThemeViewController: UITableViewDelegate {
     /// 把当前配色 + 用户调过的排版套到预览上、整篇重排一遍。
     ///
     /// ⚠️ 换颜色**必须整篇重渲染**：颜色是在渲染那一刻烙进 `NSAttributedString` 的，只改主题画面纹丝不动。
+    ///
+    /// ⚠️ **先套主题、再 `setMarkdown`，最后不要再补一次 `refreshTheme()`** —— 那样等于把同一份内容渲染两遍（正文那条路踩过同一个坑，见 `MarkdownDocumentViewController.applyStyleToTheme`）。
     private func refreshPreview() {
         settings.applyColors(to: &preview.renderer.theme, customPalette: currentCustomPalette)
         settings.applyTypography(to: &preview.renderer.theme)
         // 预览区才多宽，别再按「行宽上限」给它留一圈白 —— 那一项是给正文排版的
         preview.maxContentWidth = nil
+        // 字号 / 链接色 / 底色存在 view 自己身上，不跟着富文本走，得手动搬一次
+        preview.applyThemeChrome()
         preview.setMarkdown(Self.previewMarkdown)
-        preview.refreshTheme()
     }
 }
 

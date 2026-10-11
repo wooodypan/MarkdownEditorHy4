@@ -69,3 +69,4 @@ pptmp
 /PandaNote/Public/MultiTabController
 .workbuddy
 .build
+*.pyc

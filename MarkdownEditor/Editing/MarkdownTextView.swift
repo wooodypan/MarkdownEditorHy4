@@ -425,6 +425,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     /// 整篇替换内容
     func setMarkdown(_ markdown: String) {
+        // ⚠️ 先把左右内边距按**当前**主题和设置算一遍，再去读可用宽度。
+        // 不这么做的话，主题刚改过（字号 / 行号 / 行宽上限）时读到的还是上一套内边距算出来的宽度，图片和表格会按错的宽度渲染；紧接着那一轮布局发现宽度变了，又整篇重排一遍 —— 等于白渲染一次。
+        updateTextContainerInsetIfNeeded()
         documentStore.load(markdown: markdown, containerWidth: currentContainerWidth)
         renderedWidth = currentContainerWidth
         lastSyncedString = documentStore.renderedString
@@ -483,6 +486,20 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         return max(120, width - textContainer.lineFragmentPadding * 2)
     }
 
+    /// 把主题里那几个**存在 view 自己身上**的属性搬过来（编辑区字号、链接样式、底色）。
+    ///
+    /// 🚨 单拆出来是给「打开文档」那条路用的：那边必须在 `setMarkdown` **之前**先把它调一次，这样文档那一次渲染出来就是最终效果。
+    /// 顺序反过来（先 `setMarkdown` 再 `refreshTheme()`）会先用默认主题整篇渲一遍、紧接着再用真主题整篇重渲一遍 —— 同一份内容白渲染两次，实测各 ~155 ms（2026-10-11 的 Time Profiler）。
+    func applyThemeChrome() {
+        // textView 自己的 font 只影响「没被富文本属性覆盖的地方」（比如光标高度、
+        // 打新字时的临时样式），但既然字号换了，这里也一起对齐
+        font = renderer.theme.bodyFont
+        // 主题可能换了（配色联动时），链接颜色和整片底色都得跟着换 ——
+        // 底色不在富文本里，是 view 自己的属性，只能在这儿手动搬一次
+        syncLinkTextAttributes()
+        backgroundColor = renderer.theme.editorBackground
+    }
+
     /// 主题改过（字号 / 行高 / 段间距 / 首行缩进）之后，按新样式把整篇重排一遍。
     ///
     /// ### 为什么必须有这个入口
@@ -492,13 +509,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 重排会保着光标停在原来的源码位置（见 `reRenderPreservingCaret`），
     /// 所以设置页上拖滑块时不会每动一下就跳回文首。
     func refreshTheme() {
-        // textView 自己的 font 只影响「没被富文本属性覆盖的地方」（比如光标高度、
-        // 打新字时的临时样式），但既然字号换了，这里也一起对齐
-        font = renderer.theme.bodyFont
-        // 主题可能换了（配色联动时），链接颜色和整片底色都得跟着换 ——
-        // 底色不在富文本里，是 view 自己的属性，只能在这儿手动搬一次
-        syncLinkTextAttributes()
-        backgroundColor = renderer.theme.editorBackground
+        applyThemeChrome()
         reRenderPreservingCaret()
     }
 
@@ -1344,7 +1355,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
             button.anchor = anchor.info
             button.apply(isCollapsed: anchor.info.isCollapsed)
             button.frame = CGRect(x: x,
-                                  y: line.midY + side/2 - 5,
+                                  y: line.midY + 5,
                                   width: side,
                                   height: side)
             button.addTarget(self, action: #selector(foldButtonTapped(_:)), for: .touchUpInside)
