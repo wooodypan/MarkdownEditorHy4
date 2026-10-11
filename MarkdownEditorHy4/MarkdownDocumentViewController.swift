@@ -473,6 +473,25 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     }
     #endif
 
+    /// 「显示标尺」开关（只在 Debug 版本里存在）。
+    ///
+    /// 打开之后编辑器上边和左侧会浮出一条半透明标尺，读数是**文档坐标下的 pt** —— 和代码里打印的那些矩形（代码块灰底、引用竖条、折叠锚点）用的是同一套数，想核对「画上去的东西有没有偏」时直接把读数拿去和日志比就行。
+    ///
+    /// 和前两条一样必须存成属性：勾（`UIAction.state`）是记在 action 对象自己身上的，每次现造一个的话勾会永远停在初始值。
+    #if DEBUG
+    private lazy var rulerAction = UIAction(
+        title: "显示标尺",
+        image: UIImage(systemName: "ruler"),
+        state: .off
+    ) { [weak self] action in
+        guard let self else { return }
+        // 返回值就是「现在开着吗」：true = 刚挂上，false = 刚摘掉
+        let isOn = self.editor.installRuler()
+        action.state = isOn ? .on : .off
+        self.flashStatus(isOn ? "已显示标尺（读数是文档坐标，单位 pt）" : "已隐藏标尺")
+    }
+    #endif
+
     /// 组装弹出菜单里的条目。
     /// 每个 UIAction 就是一行：标题 + 图标 + 点击后要执行的代码
     private func makeActionMenu() -> UIMenu {
@@ -526,7 +545,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 以后再加调试开关，只往这个数组里塞一个 action 就行，别的不用动
         let debugSection = UIMenu(
             options: .displayInline,
-            children: [textKitDebugAction, viewBordersAction]
+            children: [textKitDebugAction, viewBordersAction, rulerAction]
         )
         return UIMenu(children: actions + [debugSection])
         #else
