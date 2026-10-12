@@ -181,12 +181,14 @@ extension MarkdownTextView {
 
     // MARK: 命中测试
 
-    /// 屏幕坐标 `point` 上盖着的是哪个脚注引用（返回它的 ID）。
+    /// textView 坐标 `point` 上盖着的是哪个脚注引用（返回它的 ID）。
+    ///
+    /// `point` 就是手势 `location(in: self)` 给的那一套（已含滚动偏移），别先减 `contentOffset`。
     func footnoteReferenceID(at point: CGPoint) -> String? {
         footnoteHit(.markdownFootnoteReference, at: point)?.id
     }
 
-    /// 屏幕坐标 `point` 上盖着的是哪条脚注定义（返回它的 ID）。整块定义都算命中 —— 它是「文末那一坨」，点哪儿都是它。
+    /// textView 坐标 `point` 上盖着的是哪条脚注定义（返回它的 ID）。整块定义都算命中 —— 它是「文末那一坨」，点哪儿都是它。
     func footnoteDefinitionID(at point: CGPoint) -> String? {
         footnoteHit(.markdownFootnoteDefinition, at: point)?.id
     }
@@ -201,8 +203,10 @@ extension MarkdownTextView {
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage,
               bounds.width > 1 else { return nil }
 
-        let target = CGPoint(x: point.x + contentOffset.x - textContainerInset.left,
-                             y: point.y + contentOffset.y - textContainerInset.top)
+        // ⚠️ 同样是「别再加 contentOffset」：point 来自 `gesture.location(in: self)`，而滚动视图的坐标原点就是 bounds.origin（= contentOffset），已经含了滚动偏移。
+        // 多加一次的症状和点图片那个一模一样：文档滚过之后 ⌘+点在脚注上没反应。
+        let target = CGPoint(x: point.x - textContainerInset.left,
+                             y: point.y - textContainerInset.top)
 
         let documentStart = contentStorage.documentRange.location
         var found: (id: String, renderedRange: NSRange)?

@@ -303,4 +303,83 @@ final class MarkdownFootnoteTests: XCTestCase {
         XCTAssertLessThanOrEqual(NSMaxRange(range), separator,
                                  "终点不能越过后面的分隔线 —— 老算法会一路吃到下一条定义，高亮铺满半个屏幕")
     }
+
+    // MARK: 命中测试（⌘+点脚注）
+
+    /// 文档滚过一段之后，⌘+点正文里的 `[^1]` 还得认得出它。
+    ///
+    /// ### 这个用例守的是什么
+    /// 手势 `location(in: self)` 给的是 textView 自己的坐标，而滚动视图的坐标原点就是 `bounds.origin`（= `contentOffset`）—— 这个点**已经含了滚动偏移**。
+    /// 命中测试里若再减一次 `contentOffset`，就等于把滚动量算了两遍：手指点在脚注上，问出去的却是「下方一屏处」的位置。
+    /// 症状和「点图片没反应」一模一样（同一次修复的两处调用点，见 `bugHistory.md` 第 23 条）：文档一滚，⌘+点在脚注上毫无反应，点脚注上方一屏处的文字反倒跳转过去。
+    ///
+    /// ⚠️ 必须让 `contentOffset` 真的不为 0 才测得出问题 —— 停在文档顶部时两种算法结果相同。
+    func testFootnoteReferenceIsHitAfterScrolling() throws {
+        let editor = MarkdownTextView()
+        editor.frame = CGRect(x: 0, y: 0, width: 600, height: 800)
+        let window = UIWindow(frame: editor.frame)
+        window.addSubview(editor)
+        window.makeKeyAndVisible()
+
+        var source = ""
+        for index in 0..<40 {
+            source += "第 \(index) 段正文，用来把脚注顶到下面去。\n\n"
+        }
+        // ⚠️ 这里刻意**不写** `[^1]: 定义` 那一行：cmark 会把定义行当成 CommonMark 的「链接引用定义」吃掉，顺手把正文里的 `[^1]` 也解析成链接 —— 那种情况下引用标记压根打不上（另一个独立的 bug，已记进 `2026-10-12.md`）。
+        // 本用例只守「坐标换算」这一件事，所以用悬空引用的形状（`[^1]` 没有对应定义，现实中就是 ID 写错了）。
+        source += "这里有一个引用[^1]。\n"
+        editor.setMarkdown(source)
+        editor.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        editor.contentOffset = CGPoint(x: 0, y: 600)
+        editor.layoutIfNeeded()
+        XCTAssertGreaterThan(editor.contentOffset.y, 0, "这个用例要真滚起来才有意义")
+
+        let center = try XCTUnwrap(referenceCenter(in: editor), "没排出正文里那个脚注引用")
+        XCTAssertEqual(editor.footnoteReferenceID(at: center), "1",
+                       "文档滚过之后 ⌘+点在脚注引用上却认不出来（多半是坐标里把滚动量算了两遍）")
+
+        // 往上挪一屏不该再命中（修复前命中的正是这个点）
+        let oneScreenAbove = CGPoint(x: center.x, y: center.y - editor.contentOffset.y)
+        XCTAssertNil(editor.footnoteReferenceID(at: oneScreenAbove),
+                     "脚注引用上方一屏处的普通正文被误判成脚注了")
+    }
+
+    /// 正文里那个 `[^1]` 在 textView 坐标系里的中心点。
+    ///
+    /// ⚠️ 换算只加 `textContainerInset`、**不加** `contentOffset` —— 这就是手势 `location(in: self)` 给出的那一套坐标（滚动视图的坐标原点本身就是它）。
+    private func referenceCenter(in editor: MarkdownTextView) -> CGPoint? {
+        guard let layoutManager = editor.textLayoutManager,
+              let contentStorage = layoutManager.textContentManager as? NSTextContentStorage else {
+            return nil
+        }
+
+        let storage = editor.textStorage
+        var markedRange: NSRange?
+        storage.enumerateAttribute(.markdownFootnoteReference,
+                                   in: NSRange(location: 0, length: storage.length),
+                                   options: []) { value, range, stop in
+            guard value != nil else { return }
+            markedRange = range
+            stop.pointee = true
+        }
+        guard let marked = markedRange else { return nil }
+
+        let documentStart = contentStorage.documentRange.location
+        guard let start = contentStorage.location(documentStart, offsetBy: marked.location),
+              let end = contentStorage.location(documentStart, offsetBy: NSMaxRange(marked)),
+              let textRange = NSTextRange(location: start, end: end) else { return nil }
+
+        var rect: CGRect?
+        layoutManager.enumerateTextSegments(in: textRange, type: .standard, options: []) { _, segment, _, _ in
+            guard !segment.isNull else { return true }
+            rect = rect.map { $0.union(segment) } ?? segment
+            return true
+        }
+        guard let rect else { return nil }
+
+        return CGPoint(x: rect.midX + editor.textContainerInset.left,
+                       y: rect.midY + editor.textContainerInset.top)
+    }
 }

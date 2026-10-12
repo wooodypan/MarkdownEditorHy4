@@ -196,7 +196,54 @@ final class MarkdownImageSizeTests: XCTestCase {
                      "空白处被误判成图片了")
     }
 
-    /// 找出「图片那一行」在屏幕上的中心点（用来模拟点击）
+    /// 文档滚过一段之后，图片还得点得中。
+    ///
+    /// ### 这个用例守的是什么
+    /// 手势 `location(in: self)` 给的是 textView 自己的坐标，而滚动视图的坐标原点就是 `bounds.origin`（= `contentOffset`）—— 也就是说这个点**已经含了滚动偏移**。
+    /// 命中测试里若再减一次 `contentOffset`，就等于把滚动量算了两遍：手指点在图片正中，问出去的却是「图片下方滚动量那么多点」的位置。
+    ///
+    /// 症状（见 `bugHistory.md`）：文档一滚，点图片全没反应；而点图片上方一屏处的文字，反倒弹出图片预览。
+    ///
+    /// ⚠️ 必须让 `contentOffset` 真的不为 0 才测得出问题 —— 停在文档顶部时两种算法结果相同。
+    func testTappingImageStillWorksAfterScrolling() throws {
+        let url = try makeImageFile(width: 200, height: 100)
+        let textView = MarkdownTextView()
+        textView.frame = CGRect(x: 0, y: 0, width: 600, height: 800)
+
+        let window = UIWindow(frame: textView.frame)
+        window.addSubview(textView)
+        window.makeKeyAndVisible()
+
+        // 图片前面垫够正文，保证「滚到图片处」时 contentOffset 明显大于 0
+        var markdown = ""
+        for index in 0..<40 {
+            markdown += "第 \(index) 段正文，用来把图片顶到下面去。\n\n"
+        }
+        markdown += "![](\(url.absoluteString))\n"
+        textView.setMarkdown(markdown)
+        textView.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        textView.contentOffset = CGPoint(x: 0, y: 600)
+        textView.layoutIfNeeded()
+        XCTAssertGreaterThan(textView.contentOffset.y, 0, "这个用例要真滚起来才有意义")
+
+        let center = try XCTUnwrap(centerOfImageFragment(in: textView),
+                                   "没排出图片所在的 fragment —— 布局还没做完")
+        XCTAssertNotNil(textView.imageAttachment(at: center),
+                        "文档滚过之后点在图片上却认不出来（多半是坐标里把滚动量算了两遍）")
+
+        // 反过来也得成立：把同一个点往上挪「一屏」之后不该再命中图片。
+        // 修复前命中的正是这个点 —— 那对应「点图片上方的文字弹出图片预览」
+        let oneScreenAbove = CGPoint(x: center.x, y: center.y - textView.contentOffset.y)
+        XCTAssertNil(textView.imageAttachment(at: oneScreenAbove),
+                     "图片上方一屏处的普通正文被误判成图片了")
+    }
+
+    /// 找出「图片那一行」在 textView 坐标系里的中心点（用来模拟点击）。
+    ///
+    /// ⚠️ 换算只加 `textContainerInset`、**不加** `contentOffset` —— 这就是手势 `location(in: self)` 给出的那一套坐标（滚动视图的坐标原点本身就是 `contentOffset`）。
+    /// 多加一次 `contentOffset` 会把「点在图片上」算成「点在图片下方一屏处」，见 `testTappingImageStillWorksAfterScrolling`。
     private func centerOfImageFragment(in textView: MarkdownTextView) -> CGPoint? {
         guard let layoutManager = textView.textLayoutManager,
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage else {
@@ -219,10 +266,10 @@ final class MarkdownImageSizeTests: XCTestCase {
             }
             guard isImage else { return true }
 
-            // fragment 坐标 → 屏幕坐标（和 `imageAttachment(at:)` 里那套是同一个方向）
+            // fragment 坐标 → textView 坐标（和 `imageAttachment(at:)` 里那套同一方向）
             let frame = fragment.layoutFragmentFrame
-            result = CGPoint(x: frame.midX + textView.textContainerInset.left - textView.contentOffset.x,
-                             y: frame.midY + textView.textContainerInset.top - textView.contentOffset.y)
+            result = CGPoint(x: frame.midX + textView.textContainerInset.left,
+                             y: frame.midY + textView.textContainerInset.top)
             return false
         }
         return result

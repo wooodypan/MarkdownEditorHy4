@@ -381,18 +381,21 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// **fragment 坐标系**，再逐个 fragment 问「你包含这个点吗」，
     /// 命中之后在那个 fragment 覆盖的字符范围里找 `ImageAttachment`。
     ///
-    /// ### 坐标系换算（和 `computeQuoteBarFrames` 里那套一致，别各写一份）
+    /// ### 坐标系换算（⚠️ 这里**不要**再加 `contentOffset`）
     /// - `layoutFragmentFrame` 的原点是 textContainer 左上角，**不含** `textContainerInset`；
-    /// - 文档坐标 = fragment 坐标 + inset；
-    /// - 屏幕坐标 = 文档坐标 − contentOffset。
-    /// 反推就是下面这两行。
+    /// - `point` 走的是 textView 自己的坐标，也就是手势 `location(in: self)` 给的那一套；
+    /// - 而滚动视图的坐标原点就是 `bounds.origin`（等于 `contentOffset`），所以这一套里**已经含了滚动偏移**。
+    ///
+    /// 因此换算只剩「减掉 inset」这一步。曾经这里还减了一次 `contentOffset`，等于把滚动量算了两遍：
+    /// 手指点在图片正中，问出去的却是「滚动量那么多点**下方**」的位置。
+    /// 表现见 `bugHistory.md`：「文档滚过一段之后点图片没反应，点图片上方一屏处的文字反而弹出图片预览」。
     func imageAttachment(at point: CGPoint) -> ImageAttachment? {
         guard let textLayoutManager,
               let contentStorage = textLayoutManager.textContentManager as? NSTextContentStorage,
               bounds.width > 1 else { return nil }
 
-        let target = CGPoint(x: point.x + contentOffset.x - textContainerInset.left,
-                             y: point.y + contentOffset.y - textContainerInset.top)
+        let target = CGPoint(x: point.x - textContainerInset.left,
+                             y: point.y - textContainerInset.top)
 
         let documentStart = contentStorage.documentRange.location
         var found: ImageAttachment?

@@ -93,6 +93,15 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     private var savedSource = ""
     /// 有没有未保存的改动
     private var isDirty: Bool { editor.markdownSource != savedSource }
+    /// 「这次存完就把这一页弹回去」。
+    ///
+    /// ### 为什么不能存完当场弹、非得先记一笔
+    /// iPhone 上点「返回」选了「保存」之后，存盘**不一定这一下就完** ——新建的文档还顶着占位名，会先弹个框请用户起名字（见 `promptForFileName`），输完名字才算真的存完。所以这里先挂一笔「存完就走」，等 `writeCurrentSource` 真正写成功那一次再执行；中途取消就把它抹掉。
+    private var popAfterSaving = false
+    /// 「从左边缘滑回去」那个手势原来的代理。
+    ///
+    /// 装了返回确认之后，这个手势的代理归本页管（见 `takeOverPopGestureIfNeeded`）——离开之前必须原样还回去，否则**下一个页面**要滑的时候没人管，会滑出半截卡在原地的动画（导航条跟着失去响应）。
+    private weak var popGesturePreviousDelegate: UIGestureRecognizerDelegate?
     /// 临时提示（比如「已保存」）显示完要恢复成常规状态栏
     private var statusResetWork: DispatchWorkItem?
 
@@ -102,6 +111,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
         // 顺序有讲究：菜单按钮先建好（正文、大纲、查找条的上边界都拿它当参照，参照物本身见 `contentTopAnchor`）
         setupMenuButton()
+        // 左上角那个「返回」也得换成自己一颗：系统那颗按下直接走人，中间没有插话的机会
+        setupBackButton()
         setupEditor()
         setupStatusLabel()
         // ⚠️ 顺序有讲究：**先把用户存过的设置写进主题，再装文档**。
@@ -135,6 +146,15 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         super.viewDidAppear(animated)
         // 窗口（windowScene）要等 view 挂上去才有，标题在这里补一次
         updateWindowTitle()
+        // 接管「左边缘滑回去」手势的代理 —— 只在 iPhone 上、且真的在导航栈里时才拿得到
+        takeOverPopGestureIfNeeded()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        // 代理要还回导航控制器，理由见 `giveBackPopGesture`。
+        // 弹设置 / 主题面板时这个回调也会走一趟，不要紧 ——那些面板关掉、本页重新出现时 `viewDidAppear` 会再接管一次
+        giveBackPopGesture()
     }
 
     /// 窗口尺寸变了（拉窗口、转屏）之后把悬浮圆点拉回可见范围。
@@ -438,6 +458,32 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             menuButton.widthAnchor.constraint(equalToConstant: 40),
             menuButton.heightAnchor.constraint(equalToConstant: 40)
         ])
+    }
+
+    /// 导航栏左上角的「返回」按钮（只在 iPhone 上装）。
+    ///
+    /// ### 为什么要自己造一颗，不用系统那颗
+    /// 系统那颗按下就 pop，中间没有插话的机会 —— 这一页改过的东西会**静默丢掉**。
+    /// 换成自己这颗，就能在真正走人之前先问一句「要不要存」（见 `handleBackTapped`）。
+    ///
+    /// ### iPhone 上这是**唯一的存盘入口**
+    /// 「⋯」菜单里没有「保存」这一项，iPhone 上也没有 ⌘S（⌘S 是 Mac 菜单栏的事）——不问一句，用户改了半天一返回就全没了。
+    ///
+    /// ### 只在 iPhone 上装
+    /// iPad / Mac 上这一页是多 Tab 宿主里的子控制器、**不在导航栈里**（理由同 `setupMenuButton`），压根没有「返回」这回事；那边关掉一页由 Tab 自己的关闭按钮管。
+    private func setupBackButton() {
+        guard usesNavigationBarMenuButton else { return }
+
+        // 用系统那个 chevron 图标，看着和原来的返回按钮一样。
+        // 不带文字 —— 上一页（左侧栏）本来也没设标题，系统那颗画出来也就是个箭头
+        let item = UIBarButtonItem(image: UIImage(systemName: "chevron.backward"),
+                                   style: .plain,
+                                   target: self,
+                                   action: #selector(handleBackTapped))
+        // 只有图标没有文字，读屏软件得靠这一句知道它是什么
+        item.accessibilityLabel = "返回"
+        // 关键的一行：换上自己这颗之后，系统那颗就不再出现了
+        navigationItem.leftBarButtonItem = item
     }
 
     // MARK: 调试菜单项
@@ -840,6 +886,96 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         present(alert, animated: true)
     }
 
+    // MARK: 返回前的确认
+
+    /// 导航栏左上角「返回」被点了一下。
+    ///
+    /// 没改过就直接回去；改过就先问一句「存 / 不存 / 算了」。
+    @objc private func handleBackTapped() {
+        guard isDirty else {
+            popBack()
+            return
+        }
+        promptSaveBeforeLeaving()
+    }
+
+    /// 有改动没存时，走之前问一句要怎么办。
+    ///
+    /// ### 为什么是三个选项
+    /// - **保存**：存完再走（存盘可能要绕一趟「起名字」，见 `saveThenLeave`）；
+    /// - **不保存**：按用户说的走、改动丢掉 —— 用 `destructive` 红字，别让手滑的人误点；
+    /// - **取消**：留在这一页接着改。多这一个按钮，是因为返回键太好按到了：
+    ///   只给「存 / 不存」的话，手滑一下就只能两害相权，白搭一次改动。
+    ///
+    /// 返回按钮和「从左边缘滑回去」两条路都走这里（见 `gestureRecognizerShouldBegin`），所以「带着改动离开」这个规矩只有一处。
+    private func promptSaveBeforeLeaving() {
+        // 已经弹着东西了（比如用户连滑两下）就不再叠一个
+        guard presentedViewController == nil else { return }
+
+        let name = openedFileURL?.lastPathComponent ?? "这份文档"
+        let alert = UIAlertController(title: "要保存改动吗？",
+                                      message: "「\(name)」改了还没存，返回就没了。",
+                                      preferredStyle: .alert)
+
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "不保存", style: .destructive) { [weak self] _ in
+            self?.popBack()
+        })
+        alert.addAction(UIAlertAction(title: "保存", style: .default) { [weak self] _ in
+            self?.saveThenLeave()
+        })
+
+        present(alert, animated: true)
+    }
+
+    /// 返回时选了「保存」：存完就把这一页弹回去。
+    ///
+    /// ### 为什么这里只是「挂个标记」，不直接存完再弹
+    /// 存盘这一下**可能不是终点** —— 新建的文档还顶着占位名，`saveDocument()`
+    /// 会先弹框请用户起名字（见 `promptForFileName`），输完名字才算真的存完。
+    /// 所以这里先挂一笔「存完就走」，由 `writeCurrentSource` 在真正写成功那一次执行；
+    /// 用户中途取消（不起名字了）就把标记抹掉，人留在原地。
+    private func saveThenLeave() {
+        guard openedFileURL != nil else {
+            // 没有对应文件（宿主没送内容项），存不了。
+            // 走正常保存那条路把提示弹出来就行，别顺手设标记 —— 没地方可存，也就没有「存完」那一刻
+            saveDocument()
+            return
+        }
+        popAfterSaving = true
+        saveDocument()
+    }
+
+    /// 把这一页从导航栈里弹回去（等于按了返回）。
+    private func popBack() {
+        navigationController?.popViewController(animated: true)
+    }
+
+    /// 把「从左边缘滑回去」那个手势的代理接过来（只在 iPhone 上）。
+    ///
+    /// ### 为什么要管这个手势
+    /// 返回按钮拦住了，可用户还能从左边缘一滑 —— 那条路一样会静默 pop，改动照样丢，等于只堵了一半。接了代理之后就能在 `gestureRecognizerShouldBegin` 里先看一眼「改过没有」，改过就不让滑、改问一句。
+    ///
+    /// ### 为什么要把原来那个代理存下来
+    /// 这个手势的代理本来是**导航控制器自己**，它靠代理做两件事：
+    /// 拦下「栈里只有一页时的手势」（不然会滑出半截卡住的动画），以及驱动交互式转场。
+    /// 本页离开时必须原样还回去 —— 直接把代理置空，下一个页面就要出怪事。
+    private func takeOverPopGestureIfNeeded() {
+        guard usesNavigationBarMenuButton,
+              let gesture = navigationController?.interactivePopGestureRecognizer,
+              gesture.delegate !== self else { return }
+        popGesturePreviousDelegate = gesture.delegate
+        gesture.delegate = self
+    }
+
+    /// 把「左边缘滑回去」手势的代理还回去。
+    private func giveBackPopGesture() {
+        guard let gesture = navigationController?.interactivePopGestureRecognizer,
+              gesture.delegate === self else { return }
+        gesture.delegate = popGesturePreviousDelegate
+        popGesturePreviousDelegate = nil
+    }
+
     // MARK: 保存
 
     /// ⌘S：写回这个 Tab 对应的文件。
@@ -906,6 +1042,16 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         refreshStatus()
         updateWindowTitle()
         flashStatus("已保存 \(url.lastPathComponent)")
+
+        // 返回时选的「保存」：到这儿才算真的存完了，可以把这一页弹回去。
+        // ⚠️ 等一拍再弹 —— 此刻还在保存这条调用链上，链尾（`save(from:as:)` 那边）
+        // 接着还要用 self 收尾，当场把页面弹掉会让那些动作落在已经拆掉的界面上
+        if popAfterSaving {
+            popAfterSaving = false
+            DispatchQueue.main.async { [weak self] in
+                self?.popBack()
+            }
+        }
         return true
     }
 
@@ -938,6 +1084,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             // 取消 = 这一下不存。正文还在编辑器里、标题上的「已修改」也还在，
             // 但得说一声，免得用户以为刚才那一下存过了
             self?.flashStatus("已取消保存")
+            // 若这次保存是「返回」那条路发起的（选了保存、结果被问名字），取消就等于「别走了」—— 把标记抹掉，人留在原地
+            self?.popAfterSaving = false
         })
         // `weak alert`：UIAlertController 持有 action、action 持有这个闭包，
         // 闭包里再强引用 alert 就绕成一个圈，弹框关了也放不掉
@@ -1000,7 +1148,11 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         alert.addAction(UIAlertAction(title: "重新起名", style: .default) { [weak self] _ in
             self?.promptForFileName(startingFrom: url, suggested: triedName)
         })
-        alert.addAction(UIAlertAction(title: "好", style: .cancel))
+        alert.addAction(UIAlertAction(title: "好", style: .cancel) { [weak self] _ in
+            // 名字一直定不下来，这一次保存就此作罢。
+            // 若它是「返回」那条路发起的，这一下就等于放弃保存 —— 别把页面弹走
+            self?.popAfterSaving = false
+        })
         present(alert, animated: true)
     }
 
@@ -1311,5 +1463,29 @@ extension MarkdownDocumentViewController: QLPreviewControllerDataSource {
         // 万一真的没有（时序异常），给个空壳也比强解包崩掉好
         previewItem ?? ImagePreviewItem(url: URL(fileURLWithPath: NSTemporaryDirectory()),
                                         title: "图片")
+    }
+}
+
+extension MarkdownDocumentViewController: UIGestureRecognizerDelegate {
+
+    /// 「从左边缘滑回去」这个手势要不要开始。
+    ///
+    /// 两条判据，缺一不可：
+    /// 1. **栈里得真有两页以上** —— 这是导航控制器自己原来那条判据，接代理时最容易漏。
+    ///    漏了的话在根页（左侧栏）上也能滑，滑出来是个卡住的半截动画，导航条从此不吃点击；
+    /// 2. **没有未保存的改动** —— 滑完就直接 pop 走了，中间没有插话的机会，
+    ///    所以改过就不让它滑：这一下先拒掉（免得留下半截动画），再把返回按钮那个确认框弹出来，两条路的规矩保持一致。
+    ///
+    /// 代理只装在「左边缘滑回去」这一个手势上（见 `takeOverPopGestureIfNeeded`），别的手势不会走到这儿来。
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        // 根页不许滑：不然后面没有可返回的页面，手势会滑出一个卡死的半截动画
+        guard (navigationController?.viewControllers.count ?? 0) > 1 else { return false }
+        guard isDirty else { return true }
+
+        // 等这一下手势处理完再弹框：在 `shouldBegin` 里当场 present，会和正在收尾的手势状态撞上
+        DispatchQueue.main.async { [weak self] in
+            self?.promptSaveBeforeLeaving()
+        }
+        return false
     }
 }

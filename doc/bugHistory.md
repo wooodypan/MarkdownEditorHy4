@@ -39,6 +39,7 @@
 | [19](#19-语言名-swift-的底部被代码块灰底压住2026-09-19) ★ | 2026-09-19 | 灰底的上沿是拿「正文首行 fragment 顶 − padding」定的，而 fragment 里含着**段后间距**。段距被调小（用户可调 0~40），灰底上沿就往上抬进上一行 ```swift 的字里 | `MarkdownTextView.swift`、`CodeBlockBackgroundClearanceTests.swift`（新增） |
 | [20](#20-最后一个--戳出代码块灰底2026-09-19) ★ | 2026-09-19 | 修第 19 条时加的两道「夹子」**夹过头了**：围栏行和正文之间的空隙全靠段间距撑着，段距调到 0 时空隙归零，夹子只能往里挤 —— 把灰底底边挤进了正文最后一行，`}` 戳出去 6pt = 灰底高度的 10%。修法换成「给首尾围栏行的段间距兜下限」，夹子整段删掉 | `MarkdownTheme.swift`、`MarkupToAttributedRenderer.swift`、`MarkdownTextView.swift`、`CodeBlockBackgroundClearanceTests.swift`、`MarkdownTypographyTests.swift` |
 | [22](#22-分隔线末尾按回车不换行2026-09-20) ★ | 2026-09-20 | 分隔线在渲染串里只占 1 个字符位（一条横线附件），却按 cmark 给的 range 把**后面的空行一起认领**了 —— 那些空行既没有渲染字符、也轮不到补漏步骤补上，等于在屏幕上凭空消失。用户在 `---` 末尾按回车，源码多了一个换行、画面一动不动 | `MarkupToAttributedRenderer.swift`、`SeparatorEnterTests.swift`（新增） |
+| [23](#23-文档滚动之后点图片没反应2026-10-12) ★ | 2026-10-12 | 手势给的坐标**已经含了滚动偏移**（滚动视图的坐标原点就是 `contentOffset`），命中测试又减了一次 —— 手指点在图片上，问出去的却是「下方一屏处」的位置。症状是「滚过一段之后点图片全没反应，点图片上方一屏处的文字反倒弹出图片预览」 | `MarkdownTextView.swift`、`MarkdownTextView+Footnote.swift`、`MarkdownImageSizeTests.swift` |
 
 ---
 
@@ -2002,3 +2003,71 @@ inlineCodeBackground: UIColor(red: 0.95, green: 0.95, blue: 0.95, alpha: 1.00)
 
 **修复做的事**（大白话版）：把那条规矩改成「横线只负责它自己那一行的换行，后面的空行不再归它管」。那些空行从此各自单独排队、单独占一行 —— 你按一次 Enter，屏幕上就真的多出一行；按 10 次就是 10 行。现在打开 sample.md，光标停在第 49 行 `---` 末尾敲回车，能直接看到效果。
 
+
+---
+
+## 23. 文档滚动之后点图片没反应（2026-10-12）★
+
+**一句话：手指点下去的位置「本来就带着滚动量」，代码又给减了一次滚动量 —— 于是问的是「图片下方一屏处」是哪儿。**
+
+打个比方：你站在一列火车上，告诉调度员「我脚下这里是 3 号车厢」。可调度员拿到的坐标是「从车头数第几节」—— 他以为你说的 3 是「离车头 3 节」，再按你站的位置往前滑了一整个车队的长度，最后去问的是「离这儿还很远的那一节」。你明明踩着 8 号车厢，他去问 11 号，当然说「这儿没有你要找的东西」。
+
+### 现象
+
+打开 `cmark-gfm 常见语法精简测试文件.md`（沙盒 Documents 里那份），
+
+- 滚到第 8 节，**点那两张图片一点反应都没有**（本该弹出 `QLPreviewController` 预览）；
+- 但把手往上移一屏，点那儿的**普通文字**（比如 `## 5. Inline Code`、`## 6. Link` 这两行），反而弹出了图片预览 —— 点的位置和弹出来的东西完全对不上。
+
+停在文档最顶上（没滚过）时，点图片是正常的。
+
+### 为什么会这样
+
+1. 点图片的手势里，`point = gesture.location(in: self)` 拿到的是「在 `textView` 自己的坐标系里的位置」。
+2. **`textView` 是滚动视图，它自己的坐标原点就是 `bounds.origin`，而 `bounds.origin` 恒等于 `contentOffset`。** 也就是说：滚到 1863 点处时，屏幕左上角那个点在 `textView` 坐标里就是 `(0, 1863)`，**滚动量已经算进去了**。
+3. 可命中测试里写的是「先按**屏幕坐标**算，再加回 `contentOffset`」：
+
+   ```swift
+   let target = CGPoint(x: point.x + contentOffset.x - textContainerInset.left,
+                        y: point.y + contentOffset.y - textContainerInset.top)
+   ```
+
+   `point` 既然已经含了滚动量，这里再加一次，就等于**把滚动量算了两遍**。
+4. 结果：手指点在图片上（内容坐标 y=2564），问出去的是 y=2564+1863=4427 那个位置 —— 早跑到文档下面别处去了，那里没有图片，于是「没反应」。
+
+   反过来也成立：手指点在图片**上方 1863 点**的普通文字处，问出去的正好是 y=700+1863=2563，**落在图片上** —— 这就是「点上面的文字反倒弹出图片预览」。
+
+   （`contentOffset` 为 0 时两种算法结果一样，所以在文档顶部点图片一直是好的，`MarkdownImageSizeTests` 里那条老用例也一直是绿的 —— 它只在 `contentOffset = 0` 的情况下量。）
+
+### 怎么修的
+
+`point` 本来就跟 `layoutFragmentFrame` 只差一个 `textContainerInset`，所以换算只剩一步：**减掉 inset，不要再动 `contentOffset`**。
+
+- `MarkdownTextView.swift` 的 `imageAttachment(at:)`
+- `MarkdownTextView+Footnote.swift` 的 `footnoteHit(_:at:)` —— 同一个毛病，症状是「滚过之后 ⌘+点在脚注引用上没反应」
+
+```swift
+let target = CGPoint(x: point.x - textContainerInset.left,
+                     y: point.y - textContainerInset.top)
+```
+
+两处的文档注释也改了：明确写上「`point` 用手势给的那套坐标，**别再加 `contentOffset`**」。
+
+### 怎么验证的
+
+1. 一次性探针（已删）先钉死坐标约定：把 `contentOffset` 设成 500，再把「可见区左上角」按 UIKit 的换算公式换到 `textView` 坐标系 —— 得到 `(0, 500)`，说明手势给的就是**内容坐标**。
+2. 拿用户那份真文件复现（容器 700×800，`contentOffset.y = 1863.7`）：
+
+   | 手指落在 | 修复前 | 修复后 |
+   | --- | --- | --- |
+   | 第 1 张图上（内容 y=2564） | nil（认不出来） | 认出来了 |
+   | 第 2 张图上（内容 y=3009） | nil（认不出来） | 认出来了 |
+   | 图片上方 1863 点处（内容 y=700） | 认出来了（就是用户看到的怪现象） | nil |
+
+3. 新增回归用例 `MarkdownImageSizeTests.testTappingImageStillWorksAfterScrolling`：前面垫 40 段正文把图片顶下去，真滚 600 点之后再断言「点在图片上认得出」「往上挪一屏不认」。**做了一次反向验证**：把生产代码临时改回旧公式，这条用例变红；换回来立刻绿。
+
+### 以后注意什么
+
+- **`gesture.location(in: 滚动视图)` 给的是内容坐标，已经含滚动偏移。** 凡是拿它去和 `layoutFragmentFrame`（容器坐标，不含 inset）比，只减 `inset` 就够了。
+- 这个坑的伪装是「在文档顶部测永远是对的」：**任何跟滚动位置有关的行为，测试必须先把 `contentOffset` 真的推成非 0**，否则测的等于没测。
+- 同一个文件里还有一处**故意**加 `contentOffset` 的地方：装饰层（代码块灰底、折叠三角、行号…）。那些视图挂在**钉在视口上的父层**里，父层自己的 `frame.origin.y` 就等于 `contentOffset`，所以它们算的确实是「视口坐标」。两套约定并存，别互相抄。
