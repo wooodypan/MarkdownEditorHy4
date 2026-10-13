@@ -7,9 +7,8 @@
 	<dict>
 		<key>NSExtensionAttributes</key>
 		<dict>
-			<!-- true = 数据型：我们只交一份数据（文本 / HTML），窗口界面由系统 Quick Look 负责画 -->
-			<key>QLIsDataBasedPreview</key>
-			<true/>
+			<!-- 这里刻意不写 QLIsDataBasedPreview：写了才是「数据型」（只交一份数据，界面由系统画）。
+			     不写 = 视图型，系统会去加载 NSExtensionPrincipalClass 那个 UIViewController -->
 			<!-- 声明「我们管这个类型」。net.daringfireball.markdown 就是 .md 文件的标准 UTI -->
 			<key>QLSupportedContentTypes</key>
 			<array>
@@ -20,9 +19,10 @@
 		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.quicklook.preview</string>
-		<!-- 数据型的入口是「一个类」，不是 storyboard。$(PRODUCT_MODULE_NAME) 构建时会被换成模块名 -->
+		<!-- 视图型的入口是一个 UIViewController（不是 storyboard，视图全在 PreviewViewController 里用代码搭）。
+		     $(PRODUCT_MODULE_NAME) 构建时会被换成模块名。想换回「交 HTML」那条路，就把这里改回 PreviewProvider 并在上面加上 QLIsDataBasedPreview -->
 		<key>NSExtensionPrincipalClass</key>
-		<string>$(PRODUCT_MODULE_NAME).PreviewProvider</string>
+		<string>$(PRODUCT_MODULE_NAME).PreviewViewController</string>
 	</dict>
 </dict>
 </plist>

@@ -13,6 +13,7 @@
 4. **装完不一定会生效**：扩展默认可能是关的，要去「系统设置 → 通用 → 登录项与扩展 → 快速查看」里打开。QLMarkdown 的 README 也专门写了这条（`README.md:457`）。
 5. **切换预览器没有「按文件选」这回事**：同一个文件类型只会有一个赢家，系统自己挑，没有公开 API 指定。可控的只有一件事 —— **把不要的关掉**。
 6. ⚠️ **建 target 别走错标签页**：同一个 `Quick Look Preview Extension` 模板在 iOS 和 macOS 两个标签页下都有。**Catalyst 工程必须选 iOS 标签页** —— 从 macOS 标签页建出来的是「纯 macOS 扩展」，在「Embed in Application」里根本选不到你的 App（Xcode 只列同平台的宿主）。详见 4.1 节，这是 10-13 实测纠正的一条。
+7. ⚠️ **数据型 vs 视图型，选之前先想好**：数据型只交一份数据（HTML / PDF），界面归系统画；视图型是自己交一个 `UIViewController`，可以把**编辑器自己那套渲染**原样摆进去。本项目最终走的是**视图型 + `MarkdownTextView`**（见 4.8 节，10-13 落地）：只有这条路才能做到「空格键看到的东西」和「编辑页看到的东西」是同一份代码画的，数据型再像也只是另一套排版。数据型那份 `PreviewProvider` 留在工程里当备选，改 `Info.plist` 两行就能切回去。
 
 ---
 
@@ -352,6 +353,57 @@ codesign -d --entitlements :- "你的.app/Contents/PlugIns/你的.appex" | pluti
 | 确认扩展注册了没 | 见 5.3 节的命令数组 |
 | 预览不刷新 | `qlmanage -r`，还不行 `killall Finder` |
 
+### 4.8 另一条路（本项目在用的）：视图型 + 编辑器自己的 UITextView
+
+4.2 / 4.3 那两节写的是**数据型**：扩展交一整页 HTML，界面归系统。它足够简单，但产物是「另一套排版」—— 想把**编辑器里那套渲染**（代码块底色、引用竖条、复选框、图片、表格横滑）搬到预览里，只能走视图型。
+
+四条关键差异：
+
+| | 数据型 | 视图型（本项目） |
+| --- | --- | --- |
+| plist | `QLIsDataBasedPreview = true` + `PrincipalClass` 指 `QLPreviewProvider` 子类 | **不写** `QLIsDataBasedPreview` + `PrincipalClass` 指 `UIViewController` |
+| 入口方法 | `providePreview(for:) async throws -> QLPreviewReply` | `preparePreviewOfFile(at:) async throws` |
+| 界面 | 系统的（WebView / PDF 视图） | 自己搭，想放什么放什么 |
+| 产物上限 | 只能交数据（HTML / PDF / 图片） | 没有限制，滚动、选中、懒加载都能自己来 |
+
+入口类的最小写法（`MarkdownQuicklookHy4/PreviewViewController.swift` 的骨架）：
+
+```swift
+final class PreviewViewController: UIViewController, QLPreviewingController {
+    private let editor = MarkdownTextView()   // 就是编辑器那个组件，一行都没改
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        // 只读：能滚、能选中复制，但不给编辑
+        editor.isEditable = false
+        editor.isSelectable = true
+        // 把 editor 钉满整个 view（约束代码略）
+    }
+
+    func preparePreviewOfFile(at url: URL) async throws {
+        // ⚠️ 这个方法可能在视图加载之前就被调到，先逼一次加载，否则 editor 还不在视图树里
+        loadViewIfNeeded()
+        let source = try String(contentsOf: url, encoding: .utf8)
+        editor.imageBaseURL = url.deletingLastPathComponent()   // 相对路径的图片按 md 所在目录找
+        // ⚠️ 顺序：先把主题装好，再装内容 —— 反过来会用默认主题白渲一遍
+        editor.renderer.theme = makeTheme()
+        editor.applyThemeChrome()
+        editor.setMarkdown(source)
+    }
+}
+```
+
+**为什么 macOS 的快速查看肯加载一个 UIKit 控制器**：Catalyst 工程的扩展本质上是 iOS 版扩展，系统按 UIKit-on-Mac 加载。旁证在 Apple 文档里 —— `QLPreviewingController` 上那条「For Catalyst compatibility, avoid using gesture recognizers that take interactions over large portions of the view」的注意事项（本机头文件 `QuickLook.framework/Headers/QLPreviewingController.h` 里就有这句），要是不加载 Catalyst 扩展，这条根本没必要写。
+
+**视图型的四条代价**（都要提前知道，别踩了才发现）：
+
+1. **拿不到用户在 App 里选的配色**。App 的设置存在 App 自己的 `UserDefaults` 域里，扩展是另一个 bundle，读不到；要共享得配 **App Group**（额外的 entitlement + 描述文件）。本项目的做法：按系统明暗外观挑一套内置配色（浅色用 `MarkdownTheme.default`，深色套 `MarkdownColorTheme.vueDark`）—— 深色下不能不管，默认正文是深灰、代码块底色近白，摆在深色面板上根本看不清。
+2. **注入不到 App 层的东西**。公式渲染器 `SwiftMathRenderer` 在 App 层（`MarkdownEditorHy4/`），扩展只编 `MarkdownEditor/`，所以 `$...$` 会**按源码原文显示**（组件本来就有这个降级：没注入 `mathRenderer` 就不渲染公式）。同理还有富文本粘贴、剪贴板转换那些 App 层的注入。
+3. **扩展内存有限**。视图型要真的把 TextKit 排起来，比交一段 HTML 重；超长文档要自己考虑截断或分段。
+4. **视图型更难调**。断点挂在 `preparePreviewOfFile` 上（4.7 节那套 `Executable = Finder`），改动后记得 `qlmanage -r`。
+
+**切回数据型**：把 `Info.plist` 里 `NSExtensionPrincipalClass` 改回 `$(PRODUCT_MODULE_NAME).PreviewProvider`，并在 `NSExtensionAttributes` 里加回 `QLIsDataBasedPreview = true`。两条路**同时开着**时系统按 plist 里的键挑，很容易出现「改了半天这边不生效」的迷惑场面，所以只留一条。
+
 ---
 
 ## 5. 「怎么让它抢在 QLMarkdown 前面」/「怎么换回去」
@@ -490,6 +542,14 @@ $ qlmanage -m plugins | grep -i markdown
 ⑥ 老式第三方 qlgenerator：2 个（坚果云、搜狗皮肤），Sequoia 之后已失效
 
 ⑦ 正在跑的相关进程：com.apple.quicklook.ThumbnailsAgent（缩略图代理）
+
+⑧ 本项目自己的扩展（10-13，Mac Catalyst Debug 产物）
+   build/DDCatalyst/Build/Products/Debug-maccatalyst/MarkdownEditorHy4.app/Contents/PlugIns/MarkdownQuicklookHy4.appex
+   CFBundleIdentifier         = com.yijian.mirror.MarkdownQuicklookHy4（宿主 = com.yijian.mirror）
+   NSExtensionPrincipalClass  = MarkdownQuicklookHy4.PreviewViewController   ← 视图型
+   NSExtensionAttributes      = QLSupportedContentTypes 只有 net.daringfireball.markdown（**没有** QLIsDataBasedPreview）
+   entitlements（codesign -d 实测）= app-sandbox + files.user-selected.read-only + get-task-allow
+   代码规模佐证：appex 的 debug dylib 8.4 MB（里面装着整个 MarkdownEditor/ 模块）
 ```
 
 ---
@@ -501,11 +561,13 @@ $ qlmanage -m plugins | grep -i markdown
 想「换」成别的预览器        → 系统设置 → 通用 → 登录项与扩展 → 快速查看 → 只留一个
 想「自己写」一个            → Catalyst 工程 → **iOS 标签页**新建 Quick Look Preview Extension target
                               （纯 macOS 壳 App 才用 macOS 标签页；选错了 Embed 里找不到你的 App）
-                              + 扩展 target 开 SUPPORTS_MACCATALYST
-                              + Info.plist 写 QLSupportedContentTypes
-                              + 实现 providePreview(for:) 回 HTML
-                              + entitlements 开沙箱
-                              + 嵌入 App.app/Contents/PlugIns + 打开 App + 面板开启 + qlmanage -r
+                               + 扩展 target 开 SUPPORTS_MACCATALYST
+                               + Info.plist 写 QLSupportedContentTypes
+                               + 二选一：数据型 → 实现 providePreview(for:) 回 HTML
+                                         视图型 → NSExtensionPrincipalClass 指 UIViewController，实现 preparePreviewOfFile(at:)
+                                                 （本项目走的是视图型，见 4.8 节；plist 里**不要**写 QLIsDataBasedPreview）
+                               + entitlements 开沙箱
+                               + 嵌入 App.app/Contents/PlugIns + 打开 App + 面板开启 + qlmanage -r
 想「查谁在抢」              → 5.1 节那段 PlistBuddy 循环（qlmanage 已经查不到了）
 ```
 

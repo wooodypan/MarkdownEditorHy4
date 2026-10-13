@@ -69,6 +69,16 @@
 			);
 			target = 3B009112307E7764003589CF /* MarkdownQuicklookHy4 */;
 		};
+		AA0000000000000000000008 /* Exceptions for "MarkdownEditor" folder in "MarkdownQuicklookHy4" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Debugging/RulerOverlayView.swift,
+				Debugging/TextKitDebugOverlay.swift,
+				Debugging/TextKitDebugOverlay_Usage.swift,
+				Debugging/ViewBorders.swift,
+			);
+			target = 3B009112307E7764003589CF /* MarkdownQuicklookHy4 */;
+		};
 		3B41EA72304497FD00F4E5EA /* Exceptions for "MarkdownEditorHy4" folder in "MarkdownEditorHy4" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -107,6 +117,9 @@
 		};
 		AA0000000000000000000001 /* MarkdownEditor */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				AA0000000000000000000008 /* Exceptions for "MarkdownEditor" folder in "MarkdownQuicklookHy4" target */,
+			);
 			path = MarkdownEditor;
 			sourceTree = "<group>";
 		};
@@ -118,6 +131,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				3B009116307E7764003589CF /* QuickLook.framework in Frameworks */,
+				AA0000000000000000000007 /* Markdown in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -198,9 +212,11 @@
 			);
 			fileSystemSynchronizedGroups = (
 				3B009117307E7764003589CF /* MarkdownQuicklookHy4 */,
+				AA0000000000000000000001 /* MarkdownEditor */,
 			);
 			name = MarkdownQuicklookHy4;
 			packageProductDependencies = (
+				AA0000000000000000000006 /* Markdown */,
 			);
 			productName = MarkdownQuicklookHy4;
 			productReference = 3B009113307E7764003589CF /* MarkdownQuicklookHy4.appex */;
@@ -437,6 +453,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -469,6 +486,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -866,6 +884,11 @@
 			productName = SwiftSoup;
 		};
 		AA0000000000000000000003 /* Markdown */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */;
+			productName = Markdown;
+		};
+		AA0000000000000000000006 /* Markdown */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = AA0000000000000000000002 /* XCRemoteSwiftPackageReference "swift-markdown" */;
 			productName = Markdown;

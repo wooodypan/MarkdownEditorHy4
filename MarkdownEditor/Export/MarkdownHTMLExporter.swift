@@ -282,14 +282,23 @@ enum MarkdownHTMLExporter {
 
         // ① 相对文档所在目录（绝大多数情况）
         if let baseDirectory { append(baseDirectory.appendingPathComponent(path)) }
-        // 找不到文档在哪时（还没保存过）退到 App 的 Documents —— 粘贴进来的图片都存那儿
-        if baseDirectory == nil { append(DocumentsWorkspace.folderURL.appendingPathComponent(path)) }
+        // 找不到文档在哪时（还没保存过）退到本进程的 Documents 目录 —— 粘贴进来的图片都存那儿
+        if baseDirectory == nil { append(defaultDocumentsDirectory.appendingPathComponent(path)) }
         // ② 源码里写的就是绝对路径
         if path.hasPrefix("/") { append(URL(fileURLWithPath: path)) }
         // ③ App 包里的资源：演示文档（sample.md 里的 sample.png）常常只存在于包里
         append(bundleURL(forImagePath: path))
 
         return urls
+    }
+
+    /// 「不知道文档在哪」时相对谁去认那张图 —— 就是本进程自己的 Documents 目录。
+    ///
+    /// 表达式和 `DocumentsWorkspace.folderURL` 是同一个，所以在 App 里行为一字不变；
+    /// 扩展 / SPM 包里没有 `DocumentsWorkspace` 也能编过（那两种场合下 `baseDirectory` 一般都有值，压根走不到这儿）。
+    private static var defaultDocumentsDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
     }
 
     /// 去 App 包里找这张图。包里是平铺的，所以「路径里那几层目录」和「只剩文件名」都试一遍。
