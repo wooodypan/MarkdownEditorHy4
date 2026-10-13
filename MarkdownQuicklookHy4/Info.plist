@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 扩展的入口全部写在这个 NSExtension 字典里，系统就是靠它找到我们 -->
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<!-- true = 数据型：我们只交一份数据（文本 / HTML），窗口界面由系统 Quick Look 负责画 -->
+			<key>QLIsDataBasedPreview</key>
+			<true/>
+			<!-- 声明「我们管这个类型」。net.daringfireball.markdown 就是 .md 文件的标准 UTI -->
+			<key>QLSupportedContentTypes</key>
+			<array>
+				<string>net.daringfireball.markdown</string>
+			</array>
+			<key>QLSupportsSearchableItems</key>
+			<false/>
+		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.quicklook.preview</string>
+		<!-- 数据型的入口是「一个类」，不是 storyboard。$(PRODUCT_MODULE_NAME) 构建时会被换成模块名 -->
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).PreviewProvider</string>
+	</dict>
+</dict>
+</plist>

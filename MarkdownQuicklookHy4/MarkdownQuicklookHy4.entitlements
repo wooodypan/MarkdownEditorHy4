@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 沙箱开关。macOS 的 App 扩展必须开着它，否则系统根本不肯加载 —— 表现就是「按空格什么也不发生」 -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- 允许读「用户当前选中的那个文件」，也就是 Finder 里按空格时被预览的那份 md -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+</dict>
+</plist>
