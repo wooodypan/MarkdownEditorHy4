@@ -6,6 +6,11 @@
 //  本文件代码最开始存在于MarkdownTextView.swift，2026-10-12从MarkdownTextView.swift移动到这里
 
 import UIKit
+// Mac Catalyst 上要直接用 AppKit 的 `NSCursor` 换鼠标指针，只有这一个平台看得见它；
+// iOS / iPadOS 那边既用不上也不需要，整段连同下面的方法一起用 `#if` 关掉
+#if targetEnvironment(macCatalyst)
+import AppKit
+#endif
 
 extension MarkdownTextView {
 
@@ -14,7 +19,61 @@ extension MarkdownTextView {
     /// 铺好三角所在的控件层（最上层，只有按钮吃点击）
     func setupFoldDecorations() {
         addSubview(foldControlLayer)
+        // ⚠️ 只有 Mac 上才有「鼠标悬停」这回事 —— iOS / iPadOS 没有鼠标指针可换，那边不装这个手势
+        #if targetEnvironment(macCatalyst)
+        setupFoldHoverCursor()
+        #endif
     }
+
+#if targetEnvironment(macCatalyst)
+
+    // MARK: macOS 上的鼠标指针
+
+    /// 让 macOS 上鼠标移到折叠三角 / 「⋯」上面时，指针从插入符（I 形）变成**手指**。
+    ///
+    /// ### 为什么要自己换（Mac Catalyst 的坑）
+    /// 编辑器本体是 `UITextView`，AppKit 给整片正文区域挂的光标是**插入符**（✅ 能打字的意思）。
+    /// 三角虽然是个真的 `UIButton`、浮在上面也真能吃点击，但它压不住底下那一整片的插入符——
+    /// 鼠标指上去还是一根 I 形竖线，看着像「这里能写字」，不像「这里能点」。
+    ///
+    /// ### 为什么不把手势挂到按钮自己身上
+    /// 这两个按钮**每轮布局都整批销毁重建**（见 `positionFoldControls`），滚一下就换一批新对象。
+    /// 挂在按钮上等于每次滚动都要重装一遍手势；更要命的是鼠标不动时旧按钮会先消失，
+    /// `.ended` 事件收不到，指针就卡在手指形状再也回不来。
+    /// 改成只往 textView 上挂**一个**悬停手势，每次现场问「这个点压没压在某颗按钮上」，最稳。
+    private func setupFoldHoverCursor() {
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleFoldHover(_:)))
+        // 别让它吃掉任何触摸：textView 自己的「点一下放光标 / 拖动选中」要照旧工作
+        hover.cancelsTouchesInView = false
+        hover.delaysTouchesBegan = false
+        addGestureRecognizer(hover)
+    }
+
+    /// 鼠标动了：压在折叠按钮上就是手指，离开就换回正文的插入符。
+    ///
+    /// ### 为什么要掺一层 foldControlLayer 的 hitTest
+    /// 热区是允许撑到按钮 `frame` 外面的（`CollapsedSectionButton.point(inside:)` 四面各撑了几 pt，
+    /// 手小一点才好点），直接比 `frame` 会把撑出来那圈漏掉 —— 手指只在框内才出现、框边缘又变回 I 形。
+    /// 交给层的 `hitTest` 判定，两边永远一致。
+    ///
+    /// ### 为什么离开时要**主动**换回插入符
+    /// `NSCursor.set()` 是「只此一改、此后不改」：设成手指之后，只要没人再设一次，指针就一直是手指。
+    /// 所以移出按钮必须自己把它设回去（这一带周围全是正文，插回去就是插入符）。
+    @objc private func handleFoldHover(_ gesture: UIHoverGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed:
+            let point = gesture.location(in: foldControlLayer)
+            let overButton = foldControlLayer.hitTest(point, with: nil) is UIButton
+            // `NSCursor.pointingHand` / `.iBeam` 都是现成的系统光标实例，直接取来用
+            (overButton ? NSCursor.pointingHand : NSCursor.iBeam).set()
+        case .ended, .cancelled, .failed:
+            NSCursor.iBeam.set()
+        default:
+            break
+        }
+    }
+
+#endif
 
     /// 滚动停下之后再补一次重画（每次滚动都取消上一个任务，只留最后一个）。
     ///

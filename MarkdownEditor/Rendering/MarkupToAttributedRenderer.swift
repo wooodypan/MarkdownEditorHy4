@@ -665,6 +665,9 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         // 这样 UI 层才能算出「外层竖条贯穿整块、内层竖条只到内层结束」两种范围。
         out.addAttributesIfAbsent([.markdownQuoteChain: newChain])
 
+        // ⚠️ 引用内容那层淡底色（开关 `theme.showsQuoteBackground`）**不在这里画**，由 UI 层按矩形铺（见 `positionQuoteDecorations`）。
+        // 原因是它要「从竖条一直铺到行尾」：富文本的 `.backgroundColor` 只跟着**文字**走，行尾那段空白铺不到，看着就是一块块断开的色斑。
+
         return out
     }
 

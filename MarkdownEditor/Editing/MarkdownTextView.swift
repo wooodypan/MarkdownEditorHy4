@@ -157,6 +157,36 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 输入法组合还没结束，等结束（markedTextRange == nil）再补一次排版
     private var needsReconcileAfterComposition = false
 
+    // MARK: 只读模式
+
+    /// 只读模式：**看得见、选得着、复制得出来，但一个字都不许改**（默认 `false`，也就是正常编辑）。
+    ///
+    /// ### 怎么开：就是 `isEditable = false`
+    /// UITextView 有 `isEditable` 和 `isSelectable` **两个**开关，只读要的是「前者关、后者开着」：
+    /// `isEditable = false` 之后系统既不弹键盘也不让改，而 `isSelectable`（默认 `true`）不动 —— 能滚、能选、能复制全靠它。
+    /// （两个一起关那是「纯展示」，主题页那块预览才是这个设定，不是这里要的。）
+    ///
+    /// ### 自己还拦了哪几道（`isEditable` 挡不住的那部分）
+    /// `isEditable = false` 只挡**系统**的输入（键盘、粘贴、自动纠错）；我们自己发起的编辑不走系统那条路，得自己拦：
+    /// 1. `MarkdownEditController.textView(_:shouldChangeTextIn:)` —— 系统想把字符塞进 `textStorage` 时先过这里，返回 `false` 就拦回去（只读下这一道其实轮不到，留着是防止 `isEditable` 被别处改回去）；
+    /// 2. `reconcileFromTextChange()` —— 万一有别的地方绕开第 1 道把文本改了，这里也不会把改动写回**源码**；
+    /// 3. `applyEdit(...)` —— 我们自己发起的编辑（点复选框、粘贴转 markdown、⌘B 加粗、快速操作面板）全走它，这是最后的总闸。
+    ///
+    /// 还有一处不在编辑管线上，是交互层的：任务列表的复选框在只读时设成「不可交互」（见 `positionCheckboxes`），点了既不会改源码，也不会把这一下点击从正文手里抢走。
+    ///
+    /// ### 键盘（iPhone / iPad）
+    /// 只读了还立一块键盘在屏幕下方，既碍事又像是「还能输入」。`isEditable = false` 之后系统本来就不会弹，已经弹着的那块由下面那句 `resignFirstResponder()` 当场收掉。
+    var isReadOnly = false {
+        didSet {
+            guard isReadOnly != oldValue else { return }
+            // 关门：系统不弹键盘也不让改；`isSelectable` 不动，选中复制照旧
+            isEditable = !isReadOnly
+            if isReadOnly { resignFirstResponder() }
+            // 复选框「能不能点」是摆位那一趟定下来的，改了开关要等下一次布局才生效
+            setNeedsLayout()
+        }
+    }
+
     // MARK: 代码块装饰（整块背景矩形 + 右上角复制按钮）
     //
     // ⚠️ 这一节的属性都没标 `private`：画它们、算矩形、摆位的代码在 `MarkdownTextView+Decorations.swift` 里，跨文件够不到 `private`。
@@ -200,6 +230,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     //
     // ⚠️ 同代码块那节：竖条的算与画在 `MarkdownTextView+Decorations.swift` 里。
 
+    /// 引用内容底色所在的层：加在**最底层**（比代码块背景还低），画在文字下面
+    ///
+    /// 为什么比代码块背景还低：引用里可以嵌代码块，代码块的灰底是不透明的，
+    /// 引用那层淡底要是压在它上面，代码块那一片会被染上引用色。让它在下面，谁先画谁在后，互不干扰。
+    /// 不开 `private`：导出长图要直接 render 这一层（见 `MarkdownTextView+Export.swift`）。
+    let quoteBackgroundLayer = UIView()
     /// 竖条所在的层：加在代码块背景之上、文字之下（引用里可以嵌代码块）
     /// 不开 `private`：导出长图要直接 render 这一层（见 `MarkdownTextView+Export.swift`）。
     let quoteBarLayer = UIView()
@@ -623,7 +659,7 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
 
     /// 系统已经把文本改完了（用户敲键、自动纠错、粘贴…），我们 diff 出改动范围再回写给模型。
     func reconcileFromTextChange() {
-        guard !isApplyingModelChange else { return }
+        guard !isApplyingModelChange, !isReadOnly else { return }
 
         // 输入法还在组合：先不动，等 unmarkText 之后再补
         guard markedTextRange == nil else {
@@ -688,6 +724,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     func applyEdit(renderedRange: NSRange,
                    replacementText: String,
                    alreadyAppliedToTextStorage: Bool) {
+        // 只读模式下什么都不许改 —— 这是最后一道总闸，见 isReadOnly 的注释
+        guard !isReadOnly else { return }
         let outcome = documentStore.applyEdit(inRenderedRange: renderedRange,
                                               replacementText: replacementText,
                                               containerWidth: currentContainerWidth)

@@ -59,8 +59,9 @@ extension MarkdownTextView {
             (backgroundColor ?? .systemBackground).setFill()
             context.fill(CGRect(origin: .zero, size: bounds.size))
 
-            // 层次和真实视图一致：代码块背景、引用竖条在文字下面，勾选框在文字上面。
+            // 层次和真实视图一致：引用底色最底、其次代码块背景、引用竖条在文字下面，勾选框在文字上面。
             // 复制按钮 / 折叠三角是操作入口，不画进分享图
+            quoteBackgroundLayer.layer.render(in: cg)
             codeBlockBackgroundLayer.layer.render(in: cg)
             quoteBarLayer.layer.render(in: cg)
             drawAllLayoutFragments(in: cg)

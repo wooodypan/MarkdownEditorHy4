@@ -21,8 +21,10 @@ extension MarkdownTextView {
 
     /// 铺好两层容器：背景在**最底层**（被文字压着），复制按钮在**最上层**（能点）
     func setupCodeBlockDecorations() {
-        // 背景层要插到 index 0，否则会盖住文字
-        insertSubview(codeBlockBackgroundLayer, at: 0)
+        // 引用底色在最底下（引用里嵌代码块时，代码块的灰底要盖在它上面），其次才是代码块背景
+        insertSubview(quoteBackgroundLayer, at: 0)
+        quoteBackgroundLayer.isUserInteractionEnabled = false
+        insertSubview(codeBlockBackgroundLayer, aboveSubview: quoteBackgroundLayer)
         // 竖条层放在代码块背景上面（引用里可以嵌代码块，竖条要压在灰背景上），
         // 但仍在文字之下 —— 它跟背景层一样只是陪衬，不许抢点击
         insertSubview(quoteBarLayer, aboveSubview: codeBlockBackgroundLayer)
@@ -36,7 +38,7 @@ extension MarkdownTextView {
             // 1) 先按缓存的文档坐标平移一次 —— 这一步很便宜，每帧都要做，
             //    否则背景会跟着滚动掉队（哪怕只掉一帧也看得出来）
             self?.positionCodeBlockDecorations()
-            self?.positionQuoteBars()
+            self?.positionQuoteDecorations()
             self?.positionCheckboxes()
             self?.positionTableScrollViews()
             self?.positionFoldControls()
@@ -131,7 +133,7 @@ extension MarkdownTextView {
         checkboxFrames = boxes
         tableScrollFrames = computeTableScrollFrames(reusingOutside: band)
         positionCodeBlockDecorations()
-        positionQuoteBars()
+        positionQuoteDecorations()
         positionCheckboxes()
         positionTableScrollViews()
         return (codePending || barPending, stable)
@@ -156,7 +158,7 @@ extension MarkdownTextView {
         let signature = "\(textStorage.length)/\(Int(bounds.width))"
         guard needsCodeBlockRefresh || signature != lastCodeBlockSignature else {
             positionCodeBlockDecorations()
-            positionQuoteBars()
+            positionQuoteDecorations()
             positionCheckboxes()
             // 纯滚动：缓存里那些「块还在屏幕外时算出来的」坐标要趁现在纠正掉。
             // 必须放在布局里做（滚动回调那会儿 TextKit 的 viewport 还没更新，算出来还是错的）
@@ -586,18 +588,26 @@ extension MarkdownTextView {
         return (bars, missingLayout)
     }
 
-    /// 把文档坐标的竖条搬到屏幕上（和 positionCodeBlockDecorations 同一套平移逻辑）
-    private func positionQuoteBars() {
+    /// 把文档坐标的竖条搬到屏幕上，顺带把引用的内容底色一起铺了（和 positionCodeBlockDecorations 同一套平移逻辑）
+    ///
+    /// ### 内容底色为什么跟竖条一起画
+    /// 它俩吃的是**同一批矩形**（`quoteBarFrames`：每层引用的纵向范围），只是横向不一样 —— 竖条是一条窄带，底色从竖条一直铺到行尾。
+    /// 分开画就得在两个地方各维护一份「视野内可见」的判断，滚动时少画一处就是缺口。
+    private func positionQuoteDecorations() {
         // 关掉隐式动画：见 beginDecorationPositioning 的注释（键盘弹出那一下竖条会淡入）
         beginDecorationPositioning()
         defer { endDecorationPositioning() }
         quoteBarLayer.frame = bounds
+        quoteBackgroundLayer.frame = bounds
         // 竖条数量很少，每次重建比维护复用池省心
         quoteBarLayer.subviews.forEach { $0.removeFromSuperview() }
+        quoteBackgroundLayer.subviews.forEach { $0.removeFromSuperview() }
 
         let theme = renderer.theme
         // 可见范围，上下各留 200pt 余量，滚快一点也不会闪出空白
         let visible = CGRect(x: 0, y: -200, width: bounds.width, height: bounds.height + 400)
+        // 行尾 = 正文右边界（扣掉右边内间距），底色一律铺到这儿
+        let rightEdge = bounds.width - textContainerInset.right
 
         for bar in quoteBarFrames {
             // 文档坐标 → 本层坐标：减掉滚动偏移
@@ -606,6 +616,18 @@ extension MarkdownTextView {
             frame.origin.y -= contentOffset.y
 
             guard frame.intersects(visible) else { continue }
+
+            // 内容底色：从竖条那条线开始，一直铺到行尾（默认关，见 `theme.showsQuoteBackground`）
+            if theme.showsQuoteBackground, rightEdge > frame.minX {
+                let band = UIView(frame: CGRect(x: frame.minX,
+                                                y: frame.minY,
+                                                width: rightEdge - frame.minX,
+                                                height: frame.height))
+                band.backgroundColor = theme.quoteBackground
+                band.layer.cornerRadius = theme.codeBlockCornerRadius
+                band.isUserInteractionEnabled = false
+                quoteBackgroundLayer.addSubview(band)
+            }
 
             let strip = UIView(frame: frame)
             strip.backgroundColor = theme.quoteBarColor
@@ -688,7 +710,7 @@ extension MarkdownTextView {
         return (boxes, false)
     }
 
-    /// 把复选框摆到屏幕上（和 `positionQuoteBars` 同一套平移逻辑）
+    /// 把复选框摆到屏幕上（和 `positionQuoteDecorations` 同一套平移逻辑）
     func positionCheckboxes() {
         // 关掉隐式动画：见 beginDecorationPositioning 的注释（键盘弹出那一下复选框会从左上角飞过来）
         beginDecorationPositioning()
@@ -734,6 +756,14 @@ extension MarkdownTextView {
             button.apply(isChecked: entry.info.isChecked,
                          theme: theme,
                          covers: style.coversCheckboxLiteral)
+            // 只读模式：复选框照样画出来（它反映的是源码状态），但**不许点**。
+            //
+            // ⚠️ 这里用 `isUserInteractionEnabled = false` 而不是 `isEnabled = false`：前者会让
+            // 这一层的 `hitTest` 直接跳过这个按钮，点击**穿透**给下面的 textView —— 用户依然能在
+            // `[x]` 那三个字上放光标、选中它；后者只是让按钮自己不响应，点击照样被它吃掉，
+            // 那一小块地方就永远点不到正文了（看着像界面坏了）。
+            // target 也不用摘：按钮都不可交互了，`touchUpInside` 根本发不出来。
+            button.isUserInteractionEnabled = !isReadOnly
             button.addTarget(self, action: #selector(checkboxTapped(_:)), for: .touchUpInside)
             checkboxLayer.addSubview(button)
         }

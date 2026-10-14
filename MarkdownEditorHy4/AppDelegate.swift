@@ -48,17 +48,29 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         ]
 
         if let existingFileMenu = builder.menu(for: .file) {
-            // 保险起见：先摘掉占用了 ⌘N / ⌘S 的旧项。
-            // UIKit 对重复快捷键是零容忍的 —— 撞上就抛
-            // NSInvalidArgumentException: Replacement elements contain duplicates 直接崩，
-            // 所以宁可先让路，再把我们这组放到菜单最前面
+            // ### 保险起见：先让路
+            // UIKit 对重复快捷键是零容忍的 —— 撞上就抛 `NSInvalidArgumentException: Replacement elements contain duplicates` 直接崩，而且是**崩在启动那一刻**（菜单是启动时构建的），查起来毫无头绪。所以宁可先让路，再把我们这组放到菜单最前面。
+            //
+            // ⚠️ 2026-10-14 实测（这条踩过一次）：**必须递归往下找**。系统那几组 ——「新建窗口」「打开…」「关闭」… —— 都不是直接挂在「文件」菜单下的，而是套在子菜单分组里（`com.apple.menu.new-item` / `com.apple.menu.open` 这种）。只看第一层的话，下面这段过滤等于没写。
+            // 具体踩到的：为了「设置」独立窗口把 `UIApplicationSupportsMultipleScenes` 打开之后，系统往「文件」菜单里多塞了一条 **New Window (⌘N)**，正好和我们的「新建」撞车 → 启动即崩。
             let takenInputs: Set<String> = ["n", "s"]
-            let keptItems = existingFileMenu.children.filter { element in
-                guard let command = element as? UIKeyCommand,
-                      let input = command.input,
-                      command.modifierFlags == .command else { return true }
-                return !takenInputs.contains(input)
+
+            /// 这一项（或者它下面任意一层）有没有占用我们要用的快捷键。
+            /// `UICommand`（Move / Rename… 那种系统项）读不到快捷键，一律当没占用。
+            func takesOurShortcut(_ element: UIMenuElement) -> Bool {
+                if let command = element as? UIKeyCommand {
+                    guard let input = command.input, command.modifierFlags == .command else { return false }
+                    return takenInputs.contains(input)
+                }
+                if let menu = element as? UIMenu {
+                    return menu.children.contains(where: takesOurShortcut)
+                }
+                return false
             }
+
+            // 分组里只要有一项撞上就**整组摘掉**（不去动组内其他项）：现实里这样的分组都只装着自己一项 —— 上面那条 New Window 就是独占 `com.apple.menu.new-item` 一组的。
+            // 代价是少了一条「新建窗口」：本工程是多 Tab 编辑器，⌘N 留给「新建文档」更合适，也不需要开第二个工作区窗口。
+            let keptItems = existingFileMenu.children.filter { !takesOurShortcut($0) }
             builder.replaceChildren(ofMenu: .file) { _ in
                 fileItems + keptItems
             }
@@ -72,6 +84,18 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                                   children: fileItems)
             builder.insertSibling(fileMenu, afterMenu: .application)
         }
+
+        // ### 「设置…」(⌘,)
+        // 这是 macOS 的固定约定：菜单项放在 App 菜单里「关于」的**正下方**，快捷键就是 ⌘+逗号。
+        // 系统只在 App 自带 `Settings.bundle` 时才会自动提供这一项（本工程没有），所以得自己加 —— 也正因为没有，撞不上系统那条，不用担心快捷键重复。
+        // 点它的效果：有 Tab 时是 `MarkdownDocumentViewController.showSettings`、没 Tab 时是本类下面那个兜底，两条都汇到 `SettingsOpener.open()` —— Mac 上开**独立窗口**，其它设备模态弹出。
+        let preferences = UIKeyCommand(title: "设置…",
+                                       action: #selector(MarkdownDocumentViewController.showSettings),
+                                       input: ",",
+                                       modifierFlags: .command)
+        // 标题留空 + `.displayInline`：不生成二级菜单，这一行直接平铺在 App 菜单里（和上面「存储」那个分组的写法一样）。
+        let preferencesMenu = UIMenu(title: "", options: .displayInline, children: [preferences])
+        builder.insertSibling(preferencesMenu, afterMenu: .about)
     }
     #endif
 
@@ -90,6 +114,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     @objc func newDocument() {
         NotificationCenter.default.post(name: DocumentsWorkspace.newDocumentRequestedNotification,
                                         object: nil)
+    }
+
+    // MARK: ⌘, 的兜底落点
+
+    /// 「打开设置」的**兜底实现**，理由和上面的 `newDocument()` 一模一样：**一个 Tab 都没开**（右侧空空）时，响应链上没人接 ⌘,，菜单里那一项就会变灰、按不动，而 App 委托是响应链的最后一站（窗口 → 场景 → 应用 → 委托），放在这儿必然找得到。
+    ///
+    /// 有 Tab 的时候轮不到这里 —— 排在前面的 `MarkdownDocumentViewController.showSettings` 会先接住；两条路走的是同一个入口（`SettingsOpener.open`），Mac 开独立窗口、其它设备模态弹出。
+    @objc func showSettings() {
+        // 不传 host：模态那条路会让 `SettingsOpener` 自己去当前活动窗口的根控制器弹（Mac 上根本用不到这个参数）
+        SettingsOpener.open()
     }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
@@ -130,7 +164,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, configurationForConnecting connectingSceneSession: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         // Called when a new scene session is being created.
         // Use this method to select a configuration to create the new scene with.
-        return UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
+        let config = UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
+        // ⚠️ 这一行不能省。Info.plist 里那份配置是按**名字**找的，靠名字匹配有点绕；这里直接点名 SceneDelegate，保证**设置窗口那个新场景**（Mac 上点 ⌘, 时由 `requestSceneSessionActivation` 创建）也归 SceneDelegate 管 —— 它得先认出「这是设置窗口」，才不会搭出一整个工作区来。
+        config.delegateClass = SceneDelegate.self
+        return config
     }
 
     func application(_ application: UIApplication, didDiscardSceneSessions sceneSessions: Set<UISceneSession>) {

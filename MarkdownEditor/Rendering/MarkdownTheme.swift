@@ -113,6 +113,28 @@ struct MarkdownTheme {
     var quoteBarColor: UIColor
     /// 引用块左侧绿条的宽度（相当于 CSS 里的 border-left-width）
     var quoteBarWidth: CGFloat
+
+    /// 引用块**内容区**（竖条右边那一整片）要不要再铺一层淡背景。
+    ///
+    /// - `false`（默认）：只有左边一条竖条，引文底色和正文一样干净；
+    /// - `true`：竖条右边整片铺一层淡淡的底色（颜色见 `quoteBackground`），引用看上去像一整块色条。
+    ///
+    /// 底色是 UI 层按矩形铺的（和代码块背景同一套机制，见 `positionQuoteDecorations`），
+    /// 从竖条那条线一直铺到行尾；关掉就只剩竖条。
+    var showsQuoteBackground: Bool = false
+
+    /// 引用块内容区那层淡背景：就是把 `quoteBarColor` 的透明度压到 **10%**。
+    ///
+    /// ### 为什么必须是半透明
+    /// 早期它是烙进富文本、跟着文字一起画的 `.backgroundColor`，而系统选中高亮（框选出来那块蓝底）画在它下面，
+    /// 一用不透明实色就会把蓝底整块盖住，看着像压根没选中。
+    /// 现在它改成铺在文字**下面**的矩形（见 `positionQuoteDecorations`），选中高亮盖在它上面，原本不会冲突了；
+    /// 但 10% 这个透明度留着还有一层用处：引用里嵌了行内代码时，底下的引用色要透得出来，不然那一小块会突然变深。
+    ///
+    /// ### 为什么写成计算属性而不是存一份
+    /// 它是从 `quoteBarColor` **派生**出来的：用户在主题页把竖条换成别的颜色，背景必须跟着走。
+    /// 存一份就得多一处同步（漏一处就是「竖条变色了、背景还是老颜色」）。
+    var quoteBackground: UIColor { quoteBarColor.withAlphaComponent(0.1) }
     /// 折叠按钮（小三角）的边长，同时也是点击热区大小
     var foldButtonSide: CGFloat
     /// 折叠按钮和正文之间的间距
@@ -252,7 +274,7 @@ struct MarkdownTheme {
             codeBlockTextInset: 10,
             quoteBarColor: UIColor(red: 0.20, green: 0.63, blue: 0.44, alpha: 1.00),
             quoteBarWidth: 5,
-            foldButtonSide: 20,
+            foldButtonSide: 30,
             foldButtonGap: 2,
             foldGutterWidth: 22,
             // 32 × 20：宽比高大约 3:2，'⋯' 摆在正中间才像个按钮（宽高一样就成了圆形）

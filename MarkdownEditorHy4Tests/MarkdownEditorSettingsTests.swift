@@ -168,7 +168,8 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
-        let toggle = try XCTUnwrap(firstSwitch(in: controller.view), "设置页里应该有一个开关")
+        let toggle = try XCTUnwrap(switchControl(in: controller.view, labeled: "记住上次阅读位置"),
+                                   "设置页里应该有「记住上次阅读位置」这个开关")
         XCTAssertFalse(toggle.isOn, "配置里是关的，开关就该显示成关的")
 
         // 拨一下开关：走的是 cell 上挂的 target/action，和用户手点效果一样
@@ -186,7 +187,8 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
 
-        let toggle = try XCTUnwrap(firstSwitch(in: controller.view))
+        let toggle = try XCTUnwrap(switchControl(in: controller.view, labeled: "记住上次阅读位置"),
+                                   "设置页里应该有「记住上次阅读位置」这个开关")
         toggle.isOn = false
         toggle.sendActions(for: .valueChanged)
 
@@ -724,12 +726,22 @@ final class MarkdownEditorSettingsTests: XCTestCase {
     }
 
     /// 递归找一个开关出来（设置页把开关挂在 cell 上，只能从视图树里挖）
-    private func firstSwitch(in view: UIView) -> UISwitch? {
+    /// 按**无障碍标签**找开关。
+    ///
+    /// ⚠️ 不能用「视图树里第一个开关」来定位：页面上有好几个开关，而 `UITableView` 的
+    /// subviews 顺序**不保证**等于分组顺序（实测分段控件的先后就是反的），
+    /// 往设置页加一行新开关，「第一个」就可能换成别人 —— 表现出来是「拨了开关却没写回配置」这种看不懂的失败。
+    private func switchControl(in view: UIView, labeled title: String) -> UISwitch? {
+        var found: [UISwitch] = []
+        collectSwitches(in: view, into: &found)
+        return found.first { $0.accessibilityLabel == title }
+    }
+
+    private func collectSwitches(in view: UIView, into result: inout [UISwitch]) {
         for subview in view.subviews {
-            if let toggle = subview as? UISwitch { return toggle }
-            if let found = firstSwitch(in: subview) { return found }
+            if let toggle = subview as? UISwitch { result.append(toggle) }
+            collectSwitches(in: subview, into: &result)
         }
-        return nil
     }
 
     /// 按**无障碍标签**找分段控件（页面上有两个：「高度怎么算」「宽度怎么算」）。

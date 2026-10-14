@@ -486,6 +486,37 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         navigationItem.leftBarButtonItem = item
     }
 
+    // MARK: 只读模式
+
+    /// 动作菜单里那个「只读模式」开关（打开了左边带一个勾）。
+    ///
+    /// ### 为什么必须存成属性，而不是在 `makeActionMenu()` 里现造一个
+    /// 勾是记在 **action 对象自己** 身上的（`UIAction.state`）。每次弹菜单都新建一个 action 的话，
+    /// 勾会永远停在创建时的初始值 —— 明明已经打开了，菜单里却不显示勾，看着像「点了没反应」。
+    /// 所以整个控制器生涯只用这一个实例，每次点击就地改它的 `state`（和下面那几个调试开关同一个坑）。
+    private lazy var readOnlyAction = UIAction(
+        title: "只读模式",
+        image: UIImage(systemName: "lock"),
+        // 初始的勾要照着配置里「上次存下来的状态」画：开了只读关掉 App 再进来，菜单里得是勾着的
+        state: settings.isReadOnly ? .on : .off
+    ) { [weak self] action in
+        self?.toggleReadOnly(action)
+    }
+
+    /// 拨一下「只读模式」：改配置 → 同步给编辑器 → 改勾 → 状态栏说一句。
+    ///
+    /// ### 为什么这里手动再赋一次 `editor.isReadOnly`
+    /// 配置的通知（`MarkdownEditorSettings.didChangeNotification`）走的是「写主题 + **整篇重渲染**」那条路，
+    /// 而这只个**行为**开关，一个字都不用重排 —— 特意绕开那条重活，直接赋值即可。
+    /// （打开文档那条恢复状态的路子另有 `applyStyleToTheme`，两边互补。）
+    private func toggleReadOnly(_ action: UIAction) {
+        let isOn = !settings.isReadOnly
+        settings.setIsReadOnly(isOn)
+        editor.isReadOnly = isOn
+        action.state = isOn ? .on : .off
+        flashStatus(isOn ? "只读模式：能选能复制，键盘也不再弹出来" : "已退出只读模式，可以编辑了")
+    }
+
     // MARK: 调试菜单项
 
     /// 「TextKit 调试层」开关（只在 Debug 版本里存在）。
@@ -558,6 +589,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
                 // 顶部滑出查找 / 替换横条
                 self?.showFindBar()
             },
+            // 「只读模式」带勾开关：一开，这份文档就只能看不能改了（见 toggleReadOnly）
+            readOnlyAction,
             // 导出（图片 / HTML / PDF）收成**一项子菜单**：展开才选格式。
             // 这一组菜单项由 `DocumentExporter` 生成 —— 左栏右键那个「导出」是同一份，两处永远一致
             exporter.exportMenu { [weak self] in self?.exportSource() },
@@ -604,15 +637,13 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
 
     // MARK: 设置
 
-    /// 弹出设置页。
+    /// 打开设置页。「⋯」菜单里的「设置」和 Mac 菜单栏的「设置…」(⌘,) 都走到这里。
     ///
-    /// 包一层 `UINavigationController`：设置页右上角那个「完成」要挂在导航栏上才正常，
-    /// 而且以后设置项多了、需要点进二级页面时，导航栏是现成的。
-    /// 用弹窗（present）而不是 push 到主界面：设置和文档是两码事，看完就关，
-    /// 不该占着主界面的导航栈
-    @objc private func showSettings() {
-        let controller = SettingsViewController(settings: settings)
-        present(UINavigationController(rootViewController: controller), animated: true)
+    /// ⚠️ 这里刻意不加 `private`：Mac 菜单栏那条 ⌘, 要引用它的 selector（`AppDelegate.buildMenu`），别处写的 `#selector` 够不到 `private` 的方法，编译直接报「inaccessible due to 'private' protection level」—— 和下面 `saveDocument` 是同一个理由。
+    ///
+    /// 具体怎么开（Mac 独立窗口 / 其它设备模态，还有「已经开着就不再开一个」）收在 `SettingsOpener.open(from:)` 里，这里只回答「从谁身上开」。
+    @objc func showSettings() {
+        SettingsOpener.open(from: self)
     }
 
     /// 弹出主题页。
@@ -665,6 +696,11 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         editor.maxContentWidth = settings.bodyContentWidthLimit.map { CGFloat($0) }
         // 行号是编辑器自己的显示开关：改它会让左边的装订线占/让出一条带子，正文宽度跟着变
         editor.showsLineNumbers = settings.showsLineNumbers
+        // 只读模式是编辑器的**行为**开关（能不能改），和长什么样无关，单独赋值一次
+        editor.isReadOnly = settings.isReadOnly
+        // 「引用内容加底色」是**渲染期**读的开关，改完要整篇重渲染才见效 ——
+        // 从设置页过来那条路会走到 `applyEditorStyle()`（里面有刷新），不用在这儿再排一遍
+        editor.renderer.theme.showsQuoteBackground = settings.showsQuoteBackground
         // 字号 / 链接色 / 底色存在 view 自己身上，不跟着富文本走，得手动搬一次
         editor.applyThemeChrome()
     }

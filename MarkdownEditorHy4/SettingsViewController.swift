@@ -25,8 +25,8 @@ import UIKit
 /// 一行一个「标题 + 说明 + 右侧控件」，用户在 iOS 和 Mac Catalyst 上都认得。
 ///
 /// ### 打开方式
-/// 由 `ViewController` 包在 `UINavigationController` 里弹出来（和「源码」那一页一致），
-/// 所以这里只需要一个「完成」按钮把页面关掉。
+/// 一律走 `SettingsOpener.open(from:)`：Mac 上是**独立窗口**，iPhone / iPad 上是包在 `UINavigationController` 里模态弹出（和「源码」那一页一致，右上角那个「完成」就是给它准备的）。
+/// ⚠️ 独立窗口那条路直接把本页当窗口的根控制器，没有导航栏 —— 关窗口靠标题栏左上的红绿灯，「完成」在那儿是按不到的。
 final class SettingsViewController: UIViewController {
 
     // MARK: 分组
@@ -65,7 +65,7 @@ final class SettingsViewController: UIViewController {
                         .paragraphIndentCharacters, .bodyContentWidth]
             case .reading:
                 // 行号放最上面：它是「一眼能看出开关有没有生效」的那一项
-                return [.showsLineNumbers, .remembersScrollPosition]
+                return [.showsLineNumbers, .remembersScrollPosition, .showsQuoteBackground]
             case .outlineSize:
                 // 顺序就是界面上从上到下的顺序：宽度（怎么算 + 两个数值）、再高度（同样三行）、最后是背景多透。
                 // 两种模式的说明都要跟模式联动，所以每一组里「怎么算」放最上面
@@ -103,6 +103,8 @@ final class SettingsViewController: UIViewController {
         /// 正文左边要不要显示行号
         case showsLineNumbers
         case remembersScrollPosition
+        /// 引用块的内容要不要铺一层淡背景（竖条颜色的 10% 透明度）
+        case showsQuoteBackground
         // 大纲面板：宽度
         /// 面板宽度按什么算（百分比 / 固定点数）
         case outlineWidthMode
@@ -148,6 +150,8 @@ final class SettingsViewController: UIViewController {
                 return "行宽上限"
             case .showsLineNumbers:
                 return "显示行号"
+            case .showsQuoteBackground:
+                return "引用内容加底色"
             case .remembersScrollPosition:
                 return "记住上次阅读位置"
             case .outlineWidthMode:
@@ -226,6 +230,11 @@ final class SettingsViewController: UIViewController {
             case .remembersScrollPosition:
                 return "打开：关闭文件时记住读到哪儿，下次打开同一个文件回到原处。"
                     + "关闭：每次打开都从文档开头看起。目录大纲永远跟着光标走，不受这一项影响。"
+            case .showsQuoteBackground:
+                return "打开：引用块除了左边那条竖条，右边那一整片再铺一层极淡的底色（竖条颜色的 10%），"
+                    + "从竖条一直铺到行尾，引用看着像一整块色条；关闭：只有一条竖条，和正文一样干净。"
+                    + "ⓘ 底色和竖条同色，跟着主题里的「引用竖条」颜色走；"
+                    + "它铺在文字下面，框选引用文字时系统的蓝色高亮照样盖得住。"
             case .outlineWidthMode:
                 return "「按百分比」：宽度跟着窗口走，窗口拉宽面板也变宽；"
                     + "「固定宽度」：永远是你指定的点数，跟窗口无关。"
@@ -340,6 +349,7 @@ final class SettingsViewController: UIViewController {
             case .showsLineNumbers: return settings.showsLineNumbers
             case .remembersScrollPosition: return settings.remembersScrollPosition
             case .pastesHTMLAsMarkdown: return settings.pastesHTMLAsMarkdown
+            case .showsQuoteBackground: return settings.showsQuoteBackground
             default: return false
             }
         }
@@ -472,6 +482,8 @@ final class SettingsViewController: UIViewController {
         switch row {
         case .showsLineNumbers:
             settings.setShowsLineNumbers(sender.isOn)
+        case .showsQuoteBackground:
+            settings.setShowsQuoteBackground(sender.isOn)
         case .remembersScrollPosition:
             settings.setRemembersScrollPosition(sender.isOn)
         case .pastesHTMLAsMarkdown:
@@ -545,6 +557,7 @@ final class SettingsViewController: UIViewController {
         case .imageMaxHeight:
             settings.setImageMaxHeight(stepped)
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
+             .showsQuoteBackground,
              .outlineWidthMode, .outlineHeightMode, .imageWidthMode:
             // 这几行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
             // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
@@ -714,7 +727,8 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
         guard let row = row(at: indexPath) else { return UITableViewCell() }
 
         switch row {
-        case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown:
+        case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
+             .showsQuoteBackground:
             return makeToggleCell(for: row)
         case .outlineWidthMode:
             return makeOutlineWidthModeCell()

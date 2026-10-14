@@ -24,8 +24,14 @@
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
+		<!-- ⚠️ 这一项必须为 true：Mac 上「设置…」(⌘,) 走的是**独立窗口** ——
+		     靠 `requestSceneSessionActivation` 新建一个场景来实现。关掉的话系统
+		     根本不给第二个窗口，那个调用会静默失败（表现就是「按了 ⌘, 没反应」）。
+		     Catalyst 默认就是 true，本工程原先写死成 false，2026-10-14 为设置窗口改过来。
+		     ⚠️ 打开之后系统有可能往「文件」菜单里塞「新建窗口」之类占 ⌘N 的项 ——
+		     AppDelegate.buildMenu 里那段「先摘掉占了 ⌘N / ⌘S 的旧项」就是防它撞车的。 -->
 		<key>UIApplicationSupportsMultipleScenes</key>
-		<false/>
+		<true/>
 		<key>UISceneConfigurations</key>
 		<dict>
 			<key>UIWindowSceneSessionRoleApplication</key>

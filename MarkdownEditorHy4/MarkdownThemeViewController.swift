@@ -85,7 +85,9 @@ final class MarkdownThemeViewController: UIViewController {
     private static let fileCellID = "fileCell"
     /// 导出来的那份 JSON 叫什么（用户存的时候还能改名字，这只是默认那个）
     private static let exportFileName = "markdown-theme.json"
-    /// 预览区（表格顶端那一块）的高度
+    /// 顶部那块预览区的高度。
+    ///
+    /// ⚠️ 这一块是**钉住**的（不是 `tableHeaderView`）：用户得往下滑到「我的主题」「逐色调整」才能挑配色，预览要是跟着滚上去，挑的时候正好看不见效果 —— 那正是「点了半天不知道变没变」的来源。
     private static let previewHeight: CGFloat = 190
 
     /// 预览区里那段 markdown：挑几样颜色最直观的语法摆在一起，够看清一套配色的脾气。
@@ -111,7 +113,7 @@ final class MarkdownThemeViewController: UIViewController {
     private let tableView = UITableView(frame: .zero, style: .insetGrouped)
     /// 预览用的编辑器：和正文是同一个控件，只是不许输入
     private lazy var preview = MarkdownTextView(markdown: Self.previewMarkdown)
-    /// 预览区的容器，挂在 `tableHeaderView` 上，跟着表格一起滚
+    /// 预览区的容器：钉在页面顶部，**不**跟着表格滚
     private let previewContainer = UIView()
 
     // MARK: 状态
@@ -161,17 +163,6 @@ final class MarkdownThemeViewController: UIViewController {
         if let observer { NotificationCenter.default.removeObserver(observer) }
     }
 
-    /// 表格变宽变窄（转屏、拉窗口）时预览区也要跟着改宽度：`tableHeaderView` 不会自己适应
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        let width = tableView.bounds.width
-        if abs(previewContainer.frame.width - width) > 0.5 {
-            previewContainer.frame.size.width = width
-            // 改完 frame 要重新赋一次，`UITableView` 才会按新宽度再排一遍
-            tableView.tableHeaderView = previewContainer
-        }
-    }
-
     @objc private func done() {
         dismiss(animated: true)
     }
@@ -187,8 +178,9 @@ final class MarkdownThemeViewController: UIViewController {
         tableView.estimatedRowHeight = 64
         view.addSubview(tableView)
 
+        // 表格从预览区**底下**开始排（两者是兄弟，预览固定在顶上不参与滚动）
         NSLayoutConstraint.activate([
-            tableView.topAnchor.constraint(equalTo: view.topAnchor),
+            tableView.topAnchor.constraint(equalTo: previewContainer.bottomAnchor),
             tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
@@ -202,17 +194,33 @@ final class MarkdownThemeViewController: UIViewController {
         preview.translatesAutoresizingMaskIntoConstraints = false
         previewContainer.addSubview(preview)
 
+        // ⚠️ 这里**不用** `tableHeaderView`：那个是「表格排在最前面的那一行」，会跟着内容一起滚上去。
+        // 预览要的是「一直待在页面顶部」，所以它跟表格是**并排的两个兄弟**（上下叠着放），各滚各的。
+        previewContainer.translatesAutoresizingMaskIntoConstraints = false
+        // 给个底色：底下没有东西会滚过来，但固定区域还是画实了好 —— 以后万一有内容从下面滑过，不透明才不会透出字
+        previewContainer.backgroundColor = .systemGroupedBackground
+        view.addSubview(previewContainer)
+
+        // 高度：平时就是 `previewHeight`，但**窗口特别矮**时（手机横屏、Catalyst 把窗口拉得又扁又宽）让预览先让步。
+        // 这一块钉死不动，还占满 190 的话，下面挑主题的那张列表就只剩一丝缝了 —— 那是把「看不见效果」换成了「挑不了主题」，不值。
+        // 写法上用约束表达（而不是布局完再去夹 frame）：两条规则一次交给 Auto Layout，它自己会算怎么让步
+        let height = previewContainer.heightAnchor.constraint(equalToConstant: Self.previewHeight)
+        height.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
             preview.topAnchor.constraint(equalTo: previewContainer.topAnchor, constant: 8),
             preview.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor, constant: 12),
             preview.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor, constant: -12),
-            preview.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor, constant: -8)
-        ])
+            preview.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor, constant: -8),
 
-        previewContainer.frame = CGRect(x: 0, y: 0,
-                                        width: max(1, view.bounds.width),
-                                        height: Self.previewHeight)
-        tableView.tableHeaderView = previewContainer
+            // 宽度交给 Auto Layout 跟着页面走（转屏、Catalyst 拉窗口都不用再手动同步一次）
+            // ⚠️ 顶边贴的是**安全区**，不是 `view.topAnchor`：导航栏是半透明的，`view` 会一直伸到屏幕最上面被栏子盖住，贴 view 的话预览最上面那一条就藏在「主题 / 完成」底下看不见了
+            previewContainer.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            previewContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            previewContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            height,
+            previewContainer.heightAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.heightAnchor, multiplier: 0.5)
+        ])
     }
 
     // MARK: 当前用到的颜色

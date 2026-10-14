@@ -118,6 +118,14 @@ final class MarkdownEditorSettings {
         /// 但默认打开会白占正文左边一条带子 —— 纯读文档的人不需要它
         static let showsLineNumbers = false
 
+        /// 「引用内容铺淡背景」默认**关闭**：默认是只有左边一条竖条的干净样子，
+        /// 铺底色会让页面多出一大块浅色，不是所有人都喜欢
+        static let showsQuoteBackground = false
+
+        /// 「只读模式」默认**关闭**：默认是能正常编辑的。
+        /// 打开之后能选能复制、也能移动光标，但改不动一个字（理由见 `MarkdownTextView.isReadOnly`）
+        static let isReadOnly = false
+
         /// 大纲面板的默认外观 —— 「宽度默认多少点」这一项**从它读**，免得同一个数字在配置层和组件层各写一份（改了一边忘了另一边）。
         /// 只构造一次，别在下面反复访问
         static let outlineAppearance = MarkdownOutlineAppearance()
@@ -246,6 +254,10 @@ final class MarkdownEditorSettings {
         var pastesHTMLAsMarkdown: Bool?
         /// 正文左边要不要显示行号
         var showsLineNumbers: Bool?
+        /// 引用块的内容（竖条右边那一整片）要不要铺一层淡背景
+        var showsQuoteBackground: Bool?
+        /// 只读模式：能选能复制但不能改
+        var isReadOnly: Bool?
         /// 大纲宽度那一组。模式同样存字符串，理由见下面 `outlineHeightMode` 的注释
         var outlineWidthMode: String?
         var outlineWidthRatio: Double?
@@ -306,6 +318,24 @@ final class MarkdownEditorSettings {
     /// （渲染文本和源码不是一对一 —— 图片、表格只占一个字符位却吃掉一大段源码 ——
     /// 所以行号数的是「屏幕上第几行」，不是「源文件第几行」）。
     private(set) var showsLineNumbers: Bool
+
+    /// 引用块的内容要不要铺一层淡背景。默认 `false`（关）。
+    ///
+    /// 打开之后，引用块除了左边那条竖条之外，右边那一整片会铺上一层极淡的底色
+    /// （颜色 = 竖条颜色透明度压到 10%，见 `MarkdownTheme.quoteBackground`）。
+    ///
+    /// ⚠️ 它是**渲染时**烙进富文本的，改完得把整篇重新渲染一遍才生效。
+    private(set) var showsQuoteBackground: Bool
+
+    /// 只读模式。默认 `false`（关），也就是正常编辑。
+    ///
+    /// 打开后：光标能移动、文字能选中也能复制，但**输入、粘贴、格式化、点复选框**这些会改源码的入口全部失灵
+    /// （拦在哪几道见 `MarkdownTextView.isReadOnly` 的注释）。
+    ///
+    /// ### 开关在哪儿
+    /// 入口在文档页右上角「⋯」菜单里那一条带勾的「只读模式」（`MarkdownDocumentViewController.readOnlyAction`），
+    /// 这里是它**存盘**的地方 —— 关掉 App 再回来还是上次的形态。
+    private(set) var isReadOnly: Bool
 
     /// 大纲面板的宽度按什么算，默认「固定宽度」。
     /// 两种模式的详细解释见 `OutlineWidthMode`
@@ -458,6 +488,25 @@ final class MarkdownEditorSettings {
     func setShowsLineNumbers(_ value: Bool) {
         guard value != showsLineNumbers else { return }
         showsLineNumbers = value
+        save()
+        postChange()
+    }
+
+    /// 改「引用内容铺淡背景」。
+    ///
+    /// 底色是 UI 层按矩形铺的（见 `MarkdownTheme.showsQuoteBackground`），通知发出去之后由内容页整篇重排一遍。
+    /// 严格说只要重摆一次装饰就够，但这里走的是和别的开关同一条刷新路径 —— 多渲一遍也看不出来
+    func setShowsQuoteBackground(_ value: Bool) {
+        guard value != showsQuoteBackground else { return }
+        showsQuoteBackground = value
+        save()
+        postChange()
+    }
+
+    /// 改「只读模式」。拨了之后输入框还看得见光标、也还能选中复制，就是改不动内容
+    func setIsReadOnly(_ value: Bool) {
+        guard value != isReadOnly else { return }
+        isReadOnly = value
         save()
         postChange()
     }
@@ -674,6 +723,8 @@ final class MarkdownEditorSettings {
         self.remembersScrollPosition = Default.remembersScrollPosition
         self.pastesHTMLAsMarkdown = Default.pastesHTMLAsMarkdown
         self.showsLineNumbers = Default.showsLineNumbers
+        self.showsQuoteBackground = Default.showsQuoteBackground
+        self.isReadOnly = Default.isReadOnly
         self.outlineWidthMode = Default.outlineWidthMode
         self.outlineWidthRatio = Default.outlineWidthRatio
         self.outlineWidthPoints = Default.outlineWidthPoints
@@ -711,6 +762,8 @@ final class MarkdownEditorSettings {
         if let value = payload.remembersScrollPosition { remembersScrollPosition = value }
         if let value = payload.pastesHTMLAsMarkdown { pastesHTMLAsMarkdown = value }
         if let value = payload.showsLineNumbers { showsLineNumbers = value }
+        if let value = payload.showsQuoteBackground { showsQuoteBackground = value }
+        if let value = payload.isReadOnly { isReadOnly = value }
         // 宽度那一组：模式和高度一样存字符串，认不出来就只让这一项退回默认
         if let raw = payload.outlineWidthMode, let value = OutlineWidthMode(rawValue: raw) {
             outlineWidthMode = value
@@ -783,6 +836,8 @@ final class MarkdownEditorSettings {
         let payload = Payload(remembersScrollPosition: remembersScrollPosition,
                               pastesHTMLAsMarkdown: pastesHTMLAsMarkdown,
                               showsLineNumbers: showsLineNumbers,
+                              showsQuoteBackground: showsQuoteBackground,
+                              isReadOnly: isReadOnly,
                               outlineWidthMode: outlineWidthMode.rawValue,
                               outlineWidthRatio: outlineWidthRatio,
                               outlineWidthPoints: outlineWidthPoints,

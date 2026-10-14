@@ -30,7 +30,13 @@ final class MarkdownEditController: NSObject, UITextViewDelegate {
     /// - 列表续写必须**在字符插进去之前**定下来 —— 等系统插完再 diff 回写就变成两步编辑，
     ///   撤销栈记成两条，按一次 ⌘Z 只退掉标记、换行还留着（详见 `MarkdownTextView+ListContinuation.swift` 的顶部注释）。
     func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-        guard text == "\n", let editor = self.textView, editor === textView else { return true }
+        guard let editor = self.textView, editor === textView else { return true }
+
+        // 只读模式：一切字符改动都不许进（键盘输入、自动纠错、粘贴都先从这里过）。
+        // 详见 `MarkdownTextView.isReadOnly` 的注释
+        guard !editor.isReadOnly else { return false }
+
+        guard text == "\n" else { return true }
         return !editor.applyListContinuationForNewline(at: range.location)
     }
 
