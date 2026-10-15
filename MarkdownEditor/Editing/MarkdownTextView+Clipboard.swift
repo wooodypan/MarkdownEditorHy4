@@ -38,6 +38,36 @@ extension MarkdownTextView {
         }
     }
 
+    /// 剪贴板里**只有图片、没有文字**时，也要让「粘贴」这一项能按下去。
+    ///
+    /// ### ⚠️ 为什么必须自己补这一句（这是「微信截屏的图粘不进来」的根因，别删）
+    /// 系统默认的判据是「剪贴板里有没有**文字**」——`hasStrings` 为假时，
+    /// 不管里面装的是多完整的一张图，`paste:` 一律判为不可用：
+    ///
+    /// - Edit 菜单里的「粘贴」变灰、⌘V 按下去一点反应都没有（弹不出任何东西）；
+    /// - 而我们下面的 `paste(_:)` 实现其实**完全有能力**处理这张图 —— 它进不来只是因为门口没开灯。
+    ///
+    /// 实测（2026-10-15，Catalyst，用真剪贴板分别喂两种内容）：
+    /// ```
+    /// 剪贴板里只有文字 → canPerformAction(paste:) = true
+    /// 剪贴板里只有图片 → canPerformAction(paste:) = false   ← 图永远进不来
+    /// ```
+    ///
+    /// ### 为什么以前没暴露
+    /// 从 Finder 里 ⌘C 复制图片时，剪贴板里**同时**放着一串文件地址（`public.file-url`），
+    /// 那串地址在系统眼里就是「文字」，`hasStrings` 于是为真、粘贴照样可用 —— 一条歪打正着的路。
+    /// 微信截屏（以及 macOS 自带的 ⇧⌃⌘4 截屏）只往剪贴板里放图片、**一个字都不放**，
+    /// 正好踩在这个判据上。
+    ///
+    /// ### 出处
+    /// 「拿 `hasImages` 把 `paste:` 点亮」这一手不是自己想出来的，抄的是 MiaoYan（妙言）iOS 端编辑器 `MiaoYanMobile/Views/MarkdownEditorView.swift`，它在同一个位置覆写了 `canPerformAction`。
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)), UIPasteboard.general.hasImages {
+            return true
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
     override func paste(_ sender: Any?) {
         // 1) 剪贴板里是图片：存成临时文件，插入 ![](路径) 源码
         if pasteboardController.handlePasteImage() { return }

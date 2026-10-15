@@ -166,6 +166,22 @@ final class MarkdownPasteboardController {
     /// 只有原文件那一份才是没动过的。地址读不到（沙箱没给权限等情况）再退而求其次，
     /// 按类型挨个问剪贴板要（② ③），最后才自己编码（④）。
     ///
+    /// ### ⚠️ 为什么后三步一律「遍历所有条目」，而不是只问第一个（Catalyst 上真吃过这个亏，2026-10-15）
+    /// 剪贴板里放**几个**条目是写入方自己决定的。有些 App（微信截屏就是）会把「一段文字 / 一个地址」
+    /// 放第一个条目，「图片」放第二个 —— 而 UIKit 那三个最顺手的 API：
+    ///
+    /// - `data(forPasteboardType:)` —— 文档原话 "works on the first item"，只看第一个条目；
+    /// - `image` —— 同样只看第一个条目，第一个不是图就返回 nil；
+    /// - `items` 里那个 value —— **在 Catalyst 上是已经解好码的 `UIImage`，不是 `Data`**。
+    ///
+    /// 于是「图片在第二个条目」这种情况下，前两样一概返回 nil，第三样又被 `value as? Data` 静默跳过，
+    /// 四步全落空、看着就像「剪贴板里根本没有图」，而粘贴会一路退到系统默认行为（＝没反应）。
+    /// 所以：
+    ///
+    /// - ② 改用 `data(forPasteboardType:inItemSet:)`，一次问**所有条目**要同一类型，拿到的还是原始字节；
+    /// - ③ 逐条目扫时把「`Data`」和「`UIImage`」两种形态都认；
+    /// - ④ 兜底用 `images`（它**是**跨条目的，`image` 不是）。
+    ///
     /// ### 为什么文件名只在第 ① 步真拿到、后面几步照样带着
     /// 名字是从文件地址上取的，跟「用哪份字节」是两件事：哪怕最后用了系统转出来的那份 PNG，
     /// 用户心里这张图还是叫「截图 2026-10-15」——「用原始文件名」那一档就该用这个名字。
@@ -180,9 +196,13 @@ final class MarkdownPasteboardController {
             return PastedImage(data: data, originalFileName: originalFileName)
         }
 
-        // ② 按「最可能拿到原始格式」的顺序，逐个类型问剪贴板要数据
+        // 「所有条目」的集合。⚠️ 别指望 `inItemSet` 传 nil 就等于「全部」—— 语义文档没写死，显式给
+        let everyItem = IndexSet(integersIn: 0 ..< max(pasteboard.numberOfItems, 1))
+
+        // ② 按「最可能拿到原始格式」的顺序，逐个类型、**逐个条目**问剪贴板要数据
         for type in candidateImageTypes(hintedBy: fileURL) {
-            if let data = pasteboard.data(forPasteboardType: type), isImageData(data) {
+            guard let datas = pasteboard.data(forPasteboardType: type, inItemSet: everyItem) else { continue }
+            for data in datas where isImageData(data) {
                 return PastedImage(data: data, originalFileName: originalFileName)
             }
         }
@@ -196,10 +216,24 @@ final class MarkdownPasteboardController {
             }
         }
 
-        // ④ 实在取不到原始字节（有些 App 只往剪贴板里放一份解好码的图）再退回自己编码。
-        //    这一条路上拿到的永远是 PNG，扩展名也就会跟着算成 png，这是没办法的事
-        guard let data = pasteboard.image?.pngData() else { return nil }
+        // ④ 走到这儿说明剪贴板里确实有图，但它只以**解好码的 `UIImage`** 形式给出来（没有字节可拿）。
+        //    那就自己编码成 PNG —— 这一条路上拿到的永远是 PNG，扩展名也就会跟着算成 png，这是没办法的事
+        guard let data = decodedImageData(in: pasteboard) else { return nil }
         return PastedImage(data: data, originalFileName: originalFileName)
+    }
+
+    /// 把「只以解码后形式给出」的图片编成 PNG 字节。
+    ///
+    /// ### 为什么先翻 `items` 再退到 `images`
+    /// 两者都跨条目，但 `items` 那条路能顺带看见「是哪一个条目、什么类型」，
+    /// 将来要区分「剪贴板里的第几张图」时有得选；`images` 是官方那个「剪贴板上的图片数组」，留作最后一道墙。
+    private func decodedImageData(in pasteboard: UIPasteboard) -> Data? {
+        for item in pasteboard.items {
+            for (_, value) in item {
+                if let image = value as? UIImage, let data = image.pngData() { return data }
+            }
+        }
+        return pasteboard.images?.first?.pngData()
     }
 
     /// 这份数据到底是不是图片。
