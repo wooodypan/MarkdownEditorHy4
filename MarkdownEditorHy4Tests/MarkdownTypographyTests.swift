@@ -473,7 +473,7 @@ final class MarkdownTypographyTests: XCTestCase {
     /// 那是测试自己没把页面铺开，不是功能坏了
     func testSettingsPageHasTypographySlidersAndWritesBack() throws {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .typography, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
@@ -522,7 +522,7 @@ final class MarkdownTypographyTests: XCTestCase {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
         settings.setBodyContentWidth(600)
 
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .typography, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()

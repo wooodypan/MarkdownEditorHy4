@@ -48,7 +48,9 @@ MarkdownEditor/                 ← 编辑器组件（可被单独复用）
 MarkdownEditorHy4/              ← App 层（demo 外壳）
   MarkdownDocumentViewController（内容页，1157 行）
   MarkdownEditorSettings（配置持久化，802 行）
-  SettingsViewController（设置页，726 行）
+  SettingsCatalog（设置清单：有哪些分组 / 每组有哪些行）
+  SettingsListViewController / SettingsPaneViewController / SettingsSplitViewController（设置页：目录 → 面板；Mac 上是分栏）
+  SettingsOpener（设置页的唯一入口：Mac 独立窗口 / 其它模态）
   DocumentsWorkspace / DocumentListViewController / WorkspaceCoordinator …
 ```
 
@@ -490,7 +492,7 @@ editor.refreshTheme()          // 保光标
 | 图片加载 / 尺寸        | `ImageAttachment.swift` + `ImageLoader.swift`                                                   |
 | 代码高亮               | `Highlighting/`（加语言只改 `CodeLanguageProfile+*.swift`）                                     |
 | 复选框                 | `MarkupToAttributedRenderer.appendTaskListMarker` + `CheckboxControl.swift`                     |
-| 设置项                 | `MarkdownEditorSettings.swift` + `SettingsViewController.swift`（加一行要改四处）               |
+| 设置项                 | `MarkdownEditorSettings.swift`（值 + 落盘）+ `SettingsCatalog.swift`（界面清单）+ `SettingsPaneViewController.swift`（一行一个控件） |
 | 层序 / 生命周期        | `MarkdownTextView.swift`（`setup*` / `layoutSubviews`）                                         |
 
 **配套文档**：`doc/架构与界面约定.md`（**只放 markdown 渲染相关**的判据与踩坑，6 节）、`doc/代码高亮方案.md`、`doc/引用渲染方案.md`、`doc/任务列表渲染方案.md`、`doc/标题大纲渲染方案.md`、`doc/表格渲染方案.md`、`doc/查找替换方案.md`、`doc/bugHistory.md`（历史 bug，2026-09-21 起不再新增）。

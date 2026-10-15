@@ -311,7 +311,7 @@ final class PasteHTMLSettingTests: XCTestCase {
     /// ⚠️ 帧高给到 4200：这一行在最后一个分组，帧不够高时它的 cell 根本不会被建出来（那是测试没把页面铺开，不是功能坏了）。
     func testSettingsPageHasTheToggleAndWritesBack() throws {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .clipboard, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 4200)
         controller.view.layoutIfNeeded()

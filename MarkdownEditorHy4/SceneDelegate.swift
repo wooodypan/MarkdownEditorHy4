@@ -56,19 +56,24 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     #if targetEnvironment(macCatalyst)
     /// 给设置场景搭一扇独立小窗口。
     ///
-    /// ### 根控制器为什么不是「导航控制器 + 设置页」
-    /// 设置页右上角那个「完成」按钮是给模态弹窗用的（`dismiss` 只能关掉被 present 出来的页面），在独立窗口里它是够不着的。所以这里直接把设置页当根，关窗口交给标题栏左上角的红绿灯 —— 系统会顺手销毁这个场景，`sceneDidDisconnect` 里再把登记清掉。
+    /// ### 根控制器是「分栏」，不是导航栈
+    /// 走 `SettingsOpener.makeRootViewController()`：Mac 上拿到的是 `SettingsSplitViewController`（左边侧边栏、右边面板），它直接当窗口的根，不套 `UINavigationController` —— 窗口自己已经有标题栏了，再来一根导航栏就是两个头。
+    ///
+    /// ### 那「完成」按钮呢
+    /// 没有了，也不需要：那个按钮是给模态弹窗用的（`dismiss` 只能关掉被 present 出来的页面），在独立窗口里够不着。
+    /// 关窗口交给标题栏左上角的红绿灯 —— 系统会顺手销毁这个场景，`sceneDidDisconnect` 里再把登记清掉。
     private func setUpSettingsWindow(windowScene: UIWindowScene) {
         // ### 尺寸
-        // 给一个「小窗口」的合理范围：最小 480×520 —— 设置页里那些说明都是整段中文，再窄就挤成一根长条了；最大 800×1000 —— 再大就不像系统偏好设置那扇小窗口了。
+        // 最小 640×520：这一页是**左右分栏**的，侧边栏要 180~260 点宽，再减去面板里的留白，640 是「侧边栏 + 一列带滑块的设置行」都还看得清楚的下限 —— 比这窄就该去用 iPhone 那块列表了。
+        // 最大 900×1000：再大就不像系统偏好设置那扇小窗口了。
         // 用区间而不是「最小=最大」的死尺寸：用户想拉大一点看长说明，不该被拦住。
-        windowScene.sizeRestrictions?.minimumSize = CGSize(width: 480, height: 520)
-        windowScene.sizeRestrictions?.maximumSize = CGSize(width: 800, height: 1000)
+        windowScene.sizeRestrictions?.minimumSize = CGSize(width: 640, height: 520)
+        windowScene.sizeRestrictions?.maximumSize = CGSize(width: 900, height: 1000)
         windowScene.titlebar?.titleVisibility = .visible
         windowScene.title = "设置"
 
         let window = UIWindow(windowScene: windowScene)
-        window.rootViewController = SettingsViewController()
+        window.rootViewController = SettingsOpener.makeRootViewController()
         self.window = window
         window.makeKeyAndVisible()
 

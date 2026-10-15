@@ -152,18 +152,21 @@ final class MarkdownEditorSettingsTests: XCTestCase {
 
     // MARK: - 设置页
 
-    /// ⚠️ 下面每处都把页面铺成 420 × 2600，是**故意的**，别改小。
-    /// `UITableView` 只创建**可见范围内**的 cell：帧太矮时靠下的行根本不存在，
+    /// ⚠️ 下面每处都把页面铺成 420 × 2600，是故意的，别改小。
+    /// `UITableView` 只创建可见范围内的 cell：帧太矮时靠下的行根本不存在，
     /// 递归找控件的辅助函数就会返回 nil，`XCTUnwrap` 报「找不到控件」——
-    /// 那是测试自己没把页面铺开，不是功能坏了。设置页现在有四个分组十来行，
-    /// 帧高得盖过整个内容高度，行才会全部建出来。
+    /// 那是测试自己没把页面铺开，不是功能坏了。
+    ///
+    /// ⚠️ 这些用例造的现在是「一块面板」（`SettingsPaneViewController(section:settings:)`，一个分组一张表），
+    /// 从前造的是「整页」（所有分组一张表 —— 那时得铺到 2600 点高才能把靠下的行建出来）。
+    /// 帧高照旧留着不缩：面板里哪个分组都有五六行，铺开点总没错。
 
     /// 设置页要能建起来，开关显示的必须是配置里的真实值，拨一下要能写回去
     func testSettingsPageShowsCurrentValueAndWritesBack() throws {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
         settings.setRemembersScrollPosition(false)
 
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .reading, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
@@ -182,7 +185,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
     /// 拨完再从盘上读一遍，确认这一下是真的落盘了（不是只改了内存）
     func testSettingsPageChangeIsPersisted() throws {
         let url = makeTempFileURL()
-        let controller = SettingsViewController(settings: MarkdownEditorSettings(fileURL: url))
+        let controller = SettingsPaneViewController(section: .reading, settings: MarkdownEditorSettings(fileURL: url))
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
@@ -352,7 +355,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
         settings.setOutlineHeightMode(.percentage)
 
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .outlineSize, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
@@ -375,7 +378,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
         settings.setOutlineHeightMode(.percentage)
 
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .outlineSize, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
@@ -397,7 +400,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
     /// 拖滑块 → 写回配置，并且吸到步进上（免得停在 0.63 这种数上）
     func testDraggingRatioSliderWritesBackSteppedValue() throws {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .outlineSize, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
@@ -414,7 +417,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
     /// 「背景不透明度」这一行：有个滑块、默认停在不透明那一端、拖动写回配置并按步进吸附
     func testSettingsPageHasBackgroundOpacitySliderAndWritesBack() throws {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .outlineSize, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
@@ -497,7 +500,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
     /// 设置页里该有「最小 / 最大列宽」两个滑块，拖动要写回配置并吸到步进上
     func testSettingsPageHasTableColumnSlidersAndWritesBack() throws {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .tableLayout, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
         controller.view.layoutIfNeeded()
@@ -633,24 +636,26 @@ final class MarkdownEditorSettingsTests: XCTestCase {
 
     // MARK: - 图片尺寸：设置页控件
 
-    /// 设置页该有「宽度怎么算」的两个选项和三根滑块；
+    /// 图片尺寸这一块面板该有「宽度怎么算」的两个选项和三根滑块；
     /// 当前模式用不上的那一根要灰掉
     ///
-    /// ⚠️ 帧高给到 3600：图片尺寸是新加的分组，排在表格最下面，
-    /// 帧不够高时它的 cell 根本不会被建出来，递归找控件就会返回 nil
-    /// （那是测试没把页面铺开，不是功能坏了）。
+    /// ⚠️ 帧高给到 3600 是照老规矩留着（从前「图片尺寸」排在整页表格最下面，帧不够高时它的 cell 根本不会被建出来，
+    /// 递归找控件就会返回 nil）。现在这一组自成一块面板，行数就四行，帧高其实富余很多。
     func testSettingsPageHasImageSizeControls() throws {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
         settings.setImageWidthMode(.percentage)
 
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .imageSize, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 3600)
         controller.view.layoutIfNeeded()
 
-        // 页面上有三个分段控件：大纲「宽度怎么算」「高度怎么算」，加上图片「宽度怎么算」。⚠️ 要拿具体哪一个必须按 `accessibilityLabel` 找 —— 视图树顺序和分组顺序**不一致**，用 `last` / `first` 是在碰运气。大纲那两个的标识特意加了「大纲」前缀，就是为了和图片这一条重名的可见标题区分开。配色那一条已经挪到单独的主题页里了，别在这儿找它
+        // 图片尺寸这一块面板里只有这一个分段控件。⚠️ 即便只有一个也按 `accessibilityLabel` 找 ——
+        // 以后再往这一组里加一个分段控件，`first` / `last` 那种写法就会悄悄摸错人。
+        // （从前所有分组摊在一页里，这里断言的是「整页三个」：大纲两个 + 图片一个；
+        // 拆成「一块面板一个分组」之后就只剩这一个了）
         let controls = allSegmentedControls(in: controller.view)
-        XCTAssertEqual(controls.count, 3, "该有三个分段控件，实际 \(controls.count) 个")
+        XCTAssertEqual(controls.count, 1, "图片尺寸这一组该只有 1 个分段控件，实际 \(controls.count) 个")
 
         let control = try XCTUnwrap(segmentedControl(in: controller.view, labeled: "宽度怎么算"),
                                     "图片这一组的「宽度怎么算」该存在")
@@ -673,7 +678,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
         settings.setImageWidthMode(.percentage)
 
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .imageSize, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 3600)
         controller.view.layoutIfNeeded()
@@ -699,7 +704,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
     /// 拖「宽度百分比」和「最大高度」→ 写回配置并按步进吸附
     func testDraggingImageSizeSlidersWritesBack() throws {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
-        let controller = SettingsViewController(settings: settings)
+        let controller = SettingsPaneViewController(section: .imageSize, settings: settings)
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 3600)
         controller.view.layoutIfNeeded()
@@ -715,7 +720,7 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertEqual(settings.imageMaxHeight, 520, accuracy: 0.0001, "513 该被吸到 520（步进 20）")
     }
 
-    /// 递归找所有的分段控件（页面上有两个：大纲高度在前、图片宽度在后）
+    /// 递归找所有的分段控件（一块面板里最多一个分段控件，但数一遍比「找第一个」保险）
     private func allSegmentedControls(in view: UIView) -> [UISegmentedControl] {
         var result: [UISegmentedControl] = []
         for subview in view.subviews {
