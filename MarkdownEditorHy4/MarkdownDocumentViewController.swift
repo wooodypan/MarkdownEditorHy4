@@ -182,13 +182,14 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         editor.pasteboardController.richTextConverter = { pasteboard in
             ClipboardHTMLMarkdown.markdown(from: pasteboard)
         }
-        // 装上「图片存到哪儿」的决定者：粘贴图片时组件会问一句「这份字节存哪儿、正文里写什么路径」，
-        // 答案按设置页「插入图片」那一组的选择给（见 `ImageAssetStore`）。
+        // 装上「图片存到哪儿、文件叫什么名字」的决定者：粘贴图片时组件会问一句
+        // 「这份字节存哪儿、正文里写什么路径」，还会把图片**原来的文件名**一起递过来（没有就是 nil）。
+        // 两个答案都按设置页「插入图片」那一组的选择给（见 `ImageAssetStore`）。
         // ⚠️ 这里读 `openedFileURL` 是**每次插入的那一刻**才读的：用户可能中途换了文档，
         // 图片得跟着当前这份笔记走，不能装配时就把路径记死
-        editor.pasteboardController.imageFileWriter = { [weak self] data in
+        editor.pasteboardController.imageFileWriter = { [weak self] data, originalFileName in
             guard let self else { return nil }
-            let outcome = ImageAssetStore.write(data, for: self.openedFileURL)
+            let outcome = ImageAssetStore.write(data, for: self.openedFileURL, originalFileName: originalFileName)
             // 本来是存到指定文件夹、结果没写成（文件夹被挪走之类）时，得让用户知道图去哪儿了 ——
             // 不然他会以为「粘贴没反应」
             if let note = outcome.note { self.flashStatus(note) }

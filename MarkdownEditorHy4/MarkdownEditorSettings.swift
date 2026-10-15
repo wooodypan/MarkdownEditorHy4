@@ -115,6 +115,38 @@ enum ImageInsertionMode: String, Codable, CaseIterable {
     }
 }
 
+/// 粘贴 / 插入的图片，**文件叫什么名字**。
+///
+/// 三种规则是互斥的，用户在设置页上单选。不管选哪种，**后缀都跟着图片的真实格式走**
+/// （`jpg` / `png` / `gif`…）—— 不然会出现 `x.png` 里装着 JPEG 这种自相矛盾的名字。
+///
+/// ### 三种规则的取舍
+/// - 「原始文件名」：Finder 里复制过来的图叫什么就叫什么（`截屏2026-10-15.png`），最好认；
+///   但截图、网页里的图**没有原始名字**，那些会退回哈希，同一个目录里就会混着两种风格。
+/// - 「当前时间」：名字永远唯一、一眼看得出什么时候存的；代价是看名字不知道图是什么内容。
+/// - 「内容哈希」：名字不重、同一张图反复粘也只会有一份；代价是完全看不出图是什么。
+///
+/// ### 重名了怎么办（三种规则都适用）
+/// 落盘前会先看目标目录里有没有同名文件，有就改用**内容哈希**兜底（见 `MarkdownImageFileStore.store`）。
+/// 所以「用原始文件名」时连着粘两次同一张图，磁盘上会是 `截屏.png` + `<哈希>.png` 两份。
+enum ImageNameMode: String, Codable, CaseIterable {
+    /// 用图片原来的文件名（没有原始名字时退回哈希）
+    case originalName
+    /// 用当前时间，`20261015_172442` 这种
+    case timestamp
+    /// 用图片内容算出来的 md5
+    case contentHash
+
+    /// 设置页菜单上显示的名字
+    var displayName: String {
+        switch self {
+        case .originalName: return "使用原始文件名"
+        case .timestamp: return "使用当前时间"
+        case .contentHash: return "使用文件 MD5 哈希"
+        }
+    }
+}
+
 /// 编辑器的用户配置。
 ///
 /// ### 颜色主题存在这里的是什么
@@ -224,6 +256,9 @@ final class MarkdownEditorSettings {
         static let imageInsertionMode: ImageInsertionMode = .assetsFolder
         /// 「指定路径」那个文件夹默认**没有** —— 用户没选过就是 nil
         static let imageCustomFolderPath: String? = nil
+        /// 图片文件名默认「用原始文件名」：Finder 里拖过来的图叫什么就叫什么，最好认；
+        /// 拿不到原始名字的那些（截图、网页图）会自己退回哈希，不会存不下
+        static let imageNameMode: ImageNameMode = .originalName
     }
 
     /// 各项数值的合法范围。
@@ -340,6 +375,8 @@ final class MarkdownEditorSettings {
         var imageInsertionMode: String?
         /// 「指定路径」那个文件夹的完整路径
         var imageCustomFolderPath: String?
+        /// 图片文件名按什么起（原始名 / 时间 / 哈希）
+        var imageNameMode: String?
     }
 
     // MARK: 配置项
@@ -533,6 +570,9 @@ final class MarkdownEditorSettings {
     /// 沙盒下光有路径，重启之后是写不进去的。
     private(set) var imageCustomFolderPath: String?
 
+    /// 粘贴 / 插入的图片**文件叫什么名字**。默认「用原始文件名」。三种规则的取舍见 `ImageNameMode`
+    private(set) var imageNameMode: ImageNameMode
+
     /// 「指定路径」那个文件夹，转成 `URL` 给落盘用。没选过、或者存的是空串时返回 `nil`
     var imageCustomFolderURL: URL? {
         guard let imageCustomFolderPath, !imageCustomFolderPath.isEmpty else { return nil }
@@ -559,6 +599,15 @@ final class MarkdownEditorSettings {
         let normalized = (value?.isEmpty ?? true) ? nil : value
         guard normalized != imageCustomFolderPath else { return }
         imageCustomFolderPath = normalized
+        save()
+    }
+
+    /// 改「插入图片的文件名怎么起」。
+    ///
+    /// 不发广播的理由同上：它只影响**下一次**插入的图叫什么，屏幕上那篇一个字都不用动。
+    func setImageNameMode(_ value: ImageNameMode) {
+        guard value != imageNameMode else { return }
+        imageNameMode = value
         save()
     }
 
@@ -841,6 +890,7 @@ final class MarkdownEditorSettings {
         self.imageMaxHeight = Default.imageMaxHeight
         self.imageInsertionMode = Default.imageInsertionMode
         self.imageCustomFolderPath = Default.imageCustomFolderPath
+        self.imageNameMode = Default.imageNameMode
         self.colorTheme = Default.colorTheme
         self.customThemeFileName = Default.customThemeFileName
         load()
@@ -928,6 +978,10 @@ final class MarkdownEditorSettings {
         if let value = payload.imageCustomFolderPath, !value.isEmpty {
             imageCustomFolderPath = value
         }
+        // 文件名规则：同样存字符串，认不出来的名字只让这一项退回默认
+        if let raw = payload.imageNameMode, let value = ImageNameMode(rawValue: raw) {
+            imageNameMode = value
+        }
         // 认不出来的主题名（老版本存的、或者手改坏了）只让这一项退回默认
         if let raw = payload.colorTheme, let value = MarkdownColorTheme(rawValue: raw) {
             colorTheme = value
@@ -965,7 +1019,8 @@ final class MarkdownEditorSettings {
                               colorTheme: colorTheme.rawValue,
                               customThemeFileName: customThemeFileName,
                               imageInsertionMode: imageInsertionMode.rawValue,
-                              imageCustomFolderPath: imageCustomFolderPath)
+                              imageCustomFolderPath: imageCustomFolderPath,
+                              imageNameMode: imageNameMode.rawValue)
         guard let data = try? JSONEncoder().encode(payload) else { return }
         do {
             // 目录可能还不存在（第一次跑），先建出来

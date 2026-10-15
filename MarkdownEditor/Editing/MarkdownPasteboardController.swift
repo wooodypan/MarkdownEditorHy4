@@ -40,8 +40,11 @@ final class MarkdownPasteboardController {
     /// 组件单独拿去用（没有 App 的设置页）时，粘贴图片照样能用。
     ///
     /// - parameter data: 图片的**原始字节**（剪贴板里是什么格式就是什么格式，我们不做转码）
+    /// - parameter originalFileName: 图片**原来的文件名**（`截图 2026-10-15.png` 这种）。
+    ///   从 Finder 里 ⌘C 复制的那张图才有；截图、网页里的图、剪贴板里只有一份解码后图片的那些都没有，是 `nil`。
+    ///   App 层拿它当「用原始文件名」那一档的名字（见 `ImageAssetStore`）
     /// - returns: markdown 里要写的图片路径（相对路径 / 绝对路径都行）；`nil` = 这次没存下，粘贴不再由本类接管
-    var imageFileWriter: ((Data) -> String?)?
+    var imageFileWriter: ((Data, String?) -> String?)?
 
     /// ### 为什么这里要显式写 `nonisolated deinit`（很重要，别删）
     /// 原因和 `MarkdownBlock` 里那段注释完全一样：app target 开了
@@ -95,20 +98,20 @@ final class MarkdownPasteboardController {
 
     /// 剪贴板里是图片时，存成本地文件并插入 `![](路径)` 源码。
     ///
-    /// 文件叫什么名字由 `MarkdownImageFileStore` 定（内容哈希 + 真实格式的后缀），
+    /// 文件叫什么名字由 `MarkdownImageFileStore` 定（按 App 层选的规则），
     /// 存到哪儿由 `imageFileWriter` 定（App 层按设置页的选择给）。
     ///
     /// - returns: `true` 表示已处理
     @discardableResult
     func handlePasteImage() -> Bool {
         guard let textView else { return false }
-        // 「是不是图」这件事交给 `pasteboardImageData` 自己判断：它取不到图就返回 nil，
+        // 「是不是图」这件事交给 `pasteboardImage` 自己判断：它取不到图就返回 nil，
         // 那就是这次不接管，粘贴继续往下走别的路子（纯文本 / 富文本那条）
-        guard let data = pasteboardImageData() else { return false }
+        guard let image = pasteboardImage() else { return false }
 
         // App 没注入就用自己的默认存法，保证组件单独也能用
         let writer = imageFileWriter ?? Self.defaultImageFileWriter
-        guard let path = writer(data) else { return false }
+        guard let path = writer(image.data, image.originalFileName) else { return false }
 
         // 图片插入同样走「可撤销」那条路：图片源码渲染出来是一个附件字符，
         // 和源码长度差得更远，交给系统记撤销会残留一串字符
@@ -142,7 +145,15 @@ final class MarkdownPasteboardController {
         return text
     }
 
-    /// 剪贴板里那张图的**原始字节**。
+    /// 从剪贴板里取到的一张图。
+    private struct PastedImage {
+        /// 图片的原始字节
+        var data: Data
+        /// 图片**原来的文件名**（从 Finder 复制的图才有）。理由见 `imageFileWriter` 的参数说明
+        var originalFileName: String?
+    }
+
+    /// 剪贴板里那张图：字节 + （能拿到的话）它原来的文件名。
     ///
     /// ### 为什么要绕开 `UIPasteboard.general.image` 去翻剪贴板
     /// 那个属性给的是一张**解好码的 `UIImage`**，要是写完再 `pngData()`，就等于把图片重新编码了一遍：
@@ -154,16 +165,26 @@ final class MarkdownPasteboardController {
     /// 所以第 ① 步先按地址去读原文件；剪贴板里另外十几种格式（PNG / TIFF / BMP…）都是系统现转的，
     /// 只有原文件那一份才是没动过的。地址读不到（沙箱没给权限等情况）再退而求其次，
     /// 按类型挨个问剪贴板要（② ③），最后才自己编码（④）。
-    private func pasteboardImageData() -> Data? {
+    ///
+    /// ### 为什么文件名只在第 ① 步真拿到、后面几步照样带着
+    /// 名字是从文件地址上取的，跟「用哪份字节」是两件事：哪怕最后用了系统转出来的那份 PNG，
+    /// 用户心里这张图还是叫「截图 2026-10-15」——「用原始文件名」那一档就该用这个名字。
+    private func pasteboardImage() -> PastedImage? {
         let pasteboard = UIPasteboard.general
+        let fileURL = pasteboardFileURL(pasteboard)
+        // `lastPathComponent` 给的是**解过百分号编码**的名字，`我的%20图.png` → `我的 图.png`
+        let originalFileName = fileURL?.lastPathComponent
 
         // ① 剪贴板里是「文件地址」→ 直接读原文件
-        let fileURL = pasteboardFileURL(pasteboard)
-        if let fileURL, let data = readImageFile(at: fileURL) { return data }
+        if let fileURL, let data = readImageFile(at: fileURL) {
+            return PastedImage(data: data, originalFileName: originalFileName)
+        }
 
         // ② 按「最可能拿到原始格式」的顺序，逐个类型问剪贴板要数据
         for type in candidateImageTypes(hintedBy: fileURL) {
-            if let data = pasteboard.data(forPasteboardType: type), isImageData(data) { return data }
+            if let data = pasteboard.data(forPasteboardType: type), isImageData(data) {
+                return PastedImage(data: data, originalFileName: originalFileName)
+            }
         }
 
         // ③ 还有些 App 会把图片放在很冷门的自定义类型里（`dyn.…`）。前面都没命中的话，
@@ -171,13 +192,14 @@ final class MarkdownPasteboardController {
         for item in pasteboard.items {
             for (_, value) in item {
                 guard let data = value as? Data, isImageData(data) else { continue }
-                return data
+                return PastedImage(data: data, originalFileName: originalFileName)
             }
         }
 
         // ④ 实在取不到原始字节（有些 App 只往剪贴板里放一份解好码的图）再退回自己编码。
         //    这一条路上拿到的永远是 PNG，扩展名也就会跟着算成 png，这是没办法的事
-        return pasteboard.image?.pngData()
+        guard let data = pasteboard.image?.pngData() else { return nil }
+        return PastedImage(data: data, originalFileName: originalFileName)
     }
 
     /// 这份数据到底是不是图片。
@@ -253,10 +275,18 @@ final class MarkdownPasteboardController {
 
     /// 没有 App 注入时用的默认存法：`Documents/attachments/<内容 md5>.<后缀>`。
     ///
+    /// ### 为什么默认仍然按内容哈希起名、不用原始文件名
+    /// 这一层没有设置页，「用哪种名字」是用户选的；组件单独拿去用时没有那个选择，
+    /// 那就挑一个**任何时候都不会出错**的：哈希名字既不重名、同一张图也不会攒出副本。
+    /// 想按原始文件名存的人，在 App 里把 `imageFileWriter` 接上就有了（见 `ImageAssetStore`）。
+    ///
+    /// ### 为什么 `originalFileName` 拿到了却不用
+    /// 参数是给 App 层用的，这一层用不上。签名保持一致，App 注入的那个闭包才能直接替掉它。
+    ///
     /// ⚠️ 标 `nonisolated` 是因为要把它**当成函数值**塞进 `imageFileWriter`（那个属性是普通函数类型）：
     /// 不标的话它跟着全项目默认隔离在主线程，赋值时编译器会警告「在非隔离上下文里引用主线程隔离的方法」。
     /// 它本身就只碰文件、不碰 UI，标了没有任何副作用。
-    private nonisolated static func defaultImageFileWriter(_ data: Data) -> String? {
+    private nonisolated static func defaultImageFileWriter(_ data: Data, originalFileName: String?) -> String? {
         guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return nil
         }

@@ -83,13 +83,14 @@ final class SettingsViewController: UIViewController {
                 // 最后是「最多占多高」
                 return [.imageWidthMode, .imageWidthRatio, .imageWidthPoints, .imageMaxHeight]
             case .imageInsertion:
-                // 「存哪儿」在上面：它是这一组的主题。
-                // 「指定路径那个文件夹」跟在后面 —— 只有选中「复制到指定路径」时它才有意义，
-                // 而且只有 Mac 上才有这一项（理由见 `ImageInsertionMode.selectableCases`）
+                // 「存哪儿」在上面：它是这一组的主题。「指定路径那个文件夹」紧跟着 ——
+                // 只有选中「复制到指定路径」时它才有意义，而且只有 Mac 上才有这一项
+                // （理由见 `ImageInsertionMode.selectableCases`）。最后是「文件叫什么名字」，
+                // 它和存哪儿互相独立（哪个目录都能配哪种名字）
                 #if targetEnvironment(macCatalyst)
-                return [.imageInsertionMode, .imageCustomFolderPath]
+                return [.imageInsertionMode, .imageCustomFolderPath, .imageNameMode]
                 #else
-                return [.imageInsertionMode]
+                return [.imageInsertionMode, .imageNameMode]
                 #endif
             case .clipboard:
                 return [.pastesHTMLAsMarkdown]
@@ -149,6 +150,8 @@ final class SettingsViewController: UIViewController {
         case imageInsertionMode
         /// 「复制到指定路径」用的那个文件夹（只有 Mac 上有这一行）
         case imageCustomFolderPath
+        /// 插入的图片文件叫什么名字（原始文件名 / 当前时间 / 内容哈希）
+        case imageNameMode
         /// 粘贴网页复制来的富文本时，要不要先转成 markdown 源码
         case pastesHTMLAsMarkdown
 
@@ -201,6 +204,8 @@ final class SettingsViewController: UIViewController {
                 return "图片存放位置"
             case .imageCustomFolderPath:
                 return "指定路径的文件夹"
+            case .imageNameMode:
+                return "图片文件名"
             case .pastesHTMLAsMarkdown:
                 return "粘贴网页内容时转成 Markdown"
             }
@@ -310,12 +315,21 @@ final class SettingsViewController: UIViewController {
                     + "四个选项的区别只有「文件放哪儿」：和笔记放一起（./）、放进笔记旁边的 assets 文件夹、"
                     + "放进和笔记同名的文件夹（笔记叫「游记.md」就是「游记/」）、"
                     + "或者放进你指定的一个固定文件夹（只有 Mac 上能选）。"
-                    + "文件名按图片内容算出来，同一张图重复粘贴不会存成两份。"
+                    + "文件叫什么名字由下面那一项决定。"
             case .imageCustomFolderPath:
                 return "点一下选一个文件夹，「复制到指定路径」就是往这儿存。"
                     + "正文里记的是完整路径（图片在笔记目录之外，相对路径表达不了），"
                     + "所以这个文件夹以后最好别删、也别挪窝 ——"
                     + "真挪走了，插入图片时会自动改存到 ./assets，并在状态栏告诉你一声。"
+            case .imageNameMode:
+                return "图片文件叫什么名字。后缀（.jpg / .png）永远按图片的真实格式来，这一项只管前面那截。"
+                    + "「原始文件名」：Finder 里复制过来的图，原来叫什么就叫什么；"
+                        + "截图、网页里的图本来就没有文件名，这些会退回用哈希。"
+                    + "「当前时间」：存成 20261015_172442 这种（年月日_时分秒），一眼看得出是什么时候粘的。"
+                    + "「文件 MD5 哈希」：按图片内容算名字，同一张图反复粘贴只会留下一个文件。"
+                    + "三者都会先把名字里的空格之类换掉（换成 -）——"
+                    + "markdown 的图片地址里带空格会解析不出来。"
+                    + "另外，目标目录里已经有同名文件时会自动改用哈希，不会把原来那张盖掉。"
             case .pastesHTMLAsMarkdown:
                 return "打开：从网页、Word、备忘录复制内容再粘贴，粘进来的是 markdown 源码 ——"
                     + "标题、列表、表格、链接、图片都转成对应的 markdown 写法，而不是一堆标签。"
@@ -591,7 +605,7 @@ final class SettingsViewController: UIViewController {
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
              .showsQuoteBackground,
              .outlineWidthMode, .outlineHeightMode, .imageWidthMode,
-             .imageInsertionMode, .imageCustomFolderPath:
+             .imageInsertionMode, .imageCustomFolderPath, .imageNameMode:
             // 这几行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
             // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
             // 编译器会直接报「switch must be exhaustive」逼你回来接上 ——
@@ -683,15 +697,29 @@ final class SettingsViewController: UIViewController {
     }
 
     /// 「插入的图片存到哪儿」：一个按钮，点一下弹带对勾的菜单。
+    private func makeImageInsertionModeCell() -> UITableViewCell {
+        makeMenuCell(for: .imageInsertionMode,
+                     title: settings.imageInsertionMode.displayName,
+                     menu: makeImageInsertionMenu())
+    }
+
+    /// 「插入的图片文件叫什么名字」：同一套按钮 + 菜单，只有三项
+    private func makeImageNameModeCell() -> UITableViewCell {
+        makeMenuCell(for: .imageNameMode,
+                     title: settings.imageNameMode.displayName,
+                     menu: makeImageNameMenu())
+    }
+
+    /// 「按钮上写着当前选中项，点一下弹菜单」这种行的通用造法。
     ///
     /// ### 为什么这儿不用分段控件（上面几个「二选一」用的那种）
-    /// 这里有四个选项，名字还都不短（「复制到与笔记同名的文件夹」）——
-    /// 四个平铺在一行里必被截成「复制…」，用户根本分不出哪个是哪个。
+    /// 这些选项至少三项，名字还都不短（「复制到与笔记同名的文件夹」「使用文件 MD5 哈希」）——
+    /// 平铺在一行里必被截成「复制…」，用户根本分不出哪个是哪个。
     /// 菜单是系统设置里处理「多项选一」的通用做法：点开一列、选中的打勾、一眼看全。
-    private func makeImageInsertionModeCell() -> UITableViewCell {
+    private func makeMenuCell(for row: Row, title: String, menu: UIMenu) -> UITableViewCell {
         let button = UIButton(type: .system)
         var config = UIButton.Configuration.gray()
-        config.title = settings.imageInsertionMode.displayName
+        config.title = title
         // 右边那个上下小箭头是个暗示：这玩意儿点得开
         config.image = UIImage(systemName: "chevron.up.chevron.down")
         config.imagePlacement = .trailing
@@ -701,9 +729,9 @@ final class SettingsViewController: UIViewController {
         button.contentHorizontalAlignment = .leading
         // 点按钮直接弹菜单（不用先长按）
         button.showsMenuAsPrimaryAction = true
-        button.menu = makeImageInsertionMenu()
-        button.accessibilityLabel = Row.imageInsertionMode.accessibilityLabel
-        return makeCell(row: .imageInsertionMode, control: button)
+        button.menu = menu
+        button.accessibilityLabel = row.accessibilityLabel
+        return makeCell(row: row, control: button)
     }
 
     /// 「存哪儿」那几项组成的菜单，当前选中的那一项打勾
@@ -721,6 +749,20 @@ final class SettingsViewController: UIViewController {
                 guard let self else { return }
                 self.settings.setImageInsertionMode(mode)
                 // 按钮上的文字和菜单里的对勾都要跟着换，整表刷新最省事（总共没几行）
+                self.tableView.reloadData()
+            }
+        }
+        return UIMenu(children: actions)
+    }
+
+    /// 「文件名怎么起」那三项组成的菜单，当前选中的那一项打勾
+    private func makeImageNameMenu() -> UIMenu {
+        let current = settings.imageNameMode
+        let actions = ImageNameMode.allCases.map { mode in
+            UIAction(title: mode.displayName,
+                     state: mode == current ? .on : .off) { [weak self] _ in
+                guard let self else { return }
+                self.settings.setImageNameMode(mode)
                 self.tableView.reloadData()
             }
         }
@@ -854,6 +896,8 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
             return makeImageInsertionModeCell()
         case .imageCustomFolderPath:
             return makeImageFolderCell()
+        case .imageNameMode:
+            return makeImageNameModeCell()
         case .bodyFontSize, .lineHeightMultiple, .paragraphSpacing, .paragraphIndentCharacters,
              .bodyContentWidth,
              .outlineWidthRatio, .outlineWidthPoints,
