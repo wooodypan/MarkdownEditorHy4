@@ -8,7 +8,7 @@
 //  1. 灰底盖住代码正文，上下各留够一个 padding —— 不许切进正文；
 //  2. 灰底不碰首尾围栏行（` ```swift ` / ` ``` `）的文字。
 //
-//  这两条都靠「围栏行的段落样式自带一个 padding 的段间距」保证（见 MarkdownTheme.codeFenceParagraphStyle），所以对任何字号 / 行高 / 段距都成立，不需要在算矩形的时候再做夹取。
+//  这两条都靠「围栏行的段落样式在对内那一侧留两个 padding 的段间距」保证（见 MarkdownTheme.codeFenceOpenParagraphStyle），所以对任何字号 / 行高 / 段距都成立，不需要在算矩形的时候再做夹取。
 //
 
 import XCTest
@@ -76,8 +76,9 @@ final class CodeBlockBackgroundClearanceTests: XCTestCase {
     /// 核心用例：不管字号 / 行高 / **段落间距**怎么调，两条不变式都得成立。
     ///
     /// ### 段距这一维是必须扫的
-    /// 灰底的上下留白是「借」了首尾围栏行自己的段间距：段距默认 12 恰好是两个 padding，所以灰底上下各有 18pt 的留白，看着很正常。
-    /// 用户把段距调到 0 时，这点空隙跟着没了 —— 早先那版实现会去「跟围栏行的文字盒取大/小值」，结果夹出来的灰底**切进了正文**：报障原话是「最后一个大括号 `}` 的底部超出了背景大概 10% 的高度」，实测段距 0、正文 60pt 高时 `}` 正好戳出去 6pt = 10.0%。
+    /// 早先灰底的上下留白是「借」了首尾围栏行自己的段间距：段距默认 12，灰底上下各有 18pt 的留白，看着很正常。
+    /// 用户把段距调到 0 时，这点空隙跟着没了 —— 那时那版实现会去「跟围栏行的文字盒取大/小值」，结果夹出来的灰底**切进了正文**：报障原话是「最后一个大括号 `}` 的底部超出了背景大概 10% 的高度」，实测段距 0、正文 60pt 高时 `}` 正好戳出去 6pt = 10.0%。
+    /// 现在灰底按「代码正文那个 fragment 的框 ± padding」算，段距**不再掺和**；围栏行在对内那一侧固定留两个 padding，撑住「灰底不碰围栏行」那条不变式。
     func testBackgroundNeverCutsCodeTextNorTouchesFenceLines() throws {
         let combinations: [(fontSize: CGFloat, lineHeight: CGFloat, spacing: CGFloat)] = [
             (17, 1.0, 0), (17, 1.0, 4), (17, 1.0, 8), (17, 1.0, 12), (17, 1.0, 40),
@@ -118,21 +119,24 @@ final class CodeBlockBackgroundClearanceTests: XCTestCase {
         }
     }
 
-    /// 段距是**默认值**（12）时，灰底的位置必须和这次修复之前完全一致 —— 这次只该动「段距小于一个 padding」的场景，默认观感一格都不许动。
-    /// 这条同时把「默认主题下正文自己的段间距也算进灰底留白」这个原有行为钉住
-    func testDefaultSettingsClearanceUnchanged() throws {
+    /// 灰底正好贴着代码正文外扩一个 padding：上下都是「文字盒 ± padding」，不再掺进段距。
+    ///
+    /// ### 为什么现在只剩一个 padding（以前是两个 padding + 段距）
+    /// 代码正文的段距归零之后（行与行之间只剩自然行距，见 `MarkdownCodeBlockSpacingTests`），
+    /// fragment 的框就紧贴着文字了 —— 灰底 = 那个框 ± padding，于是上下各留一个 padding。
+    /// 多出来的那段留白由围栏行在对内那一侧的段间距给（也是两个 padding），所以灰底照样碰不到 ` ``` `。
+    func testBackgroundSitsOnePaddingOutsideCodeText() throws {
         let tv = makeEditor()
-        let spacing = tv.renderer.theme.paragraphSpacing
-        XCTAssertEqual(spacing, 12, accuracy: 0.01, "默认段落间距应为 12，下面的容差是按它算的")
+        XCTAssertEqual(tv.renderer.theme.paragraphSpacing, 12, accuracy: 0.01, "默认段落间距应为 12")
 
         let boxes = lineBoxes(in: tv)
         let frame = try XCTUnwrap(tv.computeCodeBlockFrames().frames.first?.frame)
         let padding = tv.renderer.theme.codeBlockVerticalPadding
 
-        XCTAssertEqual(frame.minY, boxes[1].top - spacing - padding, accuracy: 0.5,
-                       "默认设置下灰底顶 = 首行代码文字顶 - 段距 - padding（原有行为）")
-        XCTAssertEqual(frame.maxY, boxes[boxes.count - 2].bottom + spacing + padding, accuracy: 0.5,
-                       "默认设置下灰底底 = 末行代码文字底 + 段距 + padding（原有行为）")
+        XCTAssertEqual(frame.minY, boxes[1].top - padding, accuracy: 0.5,
+                       "默认设置下灰底顶 = 首行代码文字顶 - padding")
+        XCTAssertEqual(frame.maxY, boxes[boxes.count - 2].bottom + padding, accuracy: 0.5,
+                       "默认设置下灰底底 = 末行代码文字底 + padding")
     }
 
     /// 空代码块（开围栏紧接着闭围栏）依旧不铺背景 —— 顺带守住改动没在这儿画出个怪框

@@ -245,7 +245,7 @@ struct MarkdownTheme {
         // 正文色先算出来，下面引用正文色要直接复用它（默认「引用文字和正文一样黑」）
         let text = UIColor(red: 0.27, green: 0.27, blue: 0.28, alpha: 1.00)
         // 语法标记的弱化灰，有序列表序号默认也用它（想单独调改 `orderedListMarkerColor`）
-        let marker = UIColor(red: 0.9, green: 0.9, blue: 0.9, alpha: 1.00)
+        let marker = UIColor(red: 0.96, green: 0.96, blue: 0.96, alpha: 1.00)
 
         return MarkdownTheme(
             bodyFont: body,
@@ -266,7 +266,7 @@ struct MarkdownTheme {
             separatorColor: .separator,
             bulletDiameter: 12,
             listIndent: 22,
-            quoteIndent: 16,
+            quoteIndent: 5,
             paragraphSpacing: 12,
             headingSpacing: 14,
             codeBlockCornerRadius: 8,
@@ -443,29 +443,48 @@ struct MarkdownTheme {
         return style
     }
 
-    /// 代码块**正文**段落：文字相对背景矩形往里缩一点，右边也留出对称的间距
-    func codeParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
-        codeStyle(indent: indent, minimumSpacing: 0)
-    }
-
-    /// 代码块**首尾围栏行**（` ```swift ` 和 ` ``` `）段落：和正文那套只差一点 —— 段前/段后间距有个下限，至少留出 `codeBlockVerticalPadding`。
+    /// 代码块**正文**段落：文字相对背景矩形往里缩一点，右边也留出对称的间距。
     ///
-    /// ### 为什么围栏行要单独一套
-    /// 灰底矩形是按「代码正文的排版盒 ± padding」算的，而那个 padding 其实**借**了围栏行自己的段间距：段距默认 12 正好是 padding × 2（纯属巧合），灰底上下各空 18pt，看着很正常；用户一旦把段距调小，这点空隙跟着缩水，灰底就会**切进正文**—— 段距调到 0 时最后一个 `}` 的底部戳出灰底 6pt，正好是灰底高度的 10%。
-    /// 给围栏行兜一个下限之后，这段空隙从「用户调多少就是多少」变成「结构上必然够」，灰底也就**不需要再算**「要不要躲开围栏行」了。
-    func codeFenceParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
-        codeStyle(indent: indent, minimumSpacing: codeBlockVerticalPadding)
+    /// ### 段距为什么是 0（代码块里每一行都是一个独立段落，别照抄正文那套）
+    /// 代码正文每行都以 `\n` 结尾，而在 TextKit 里 `\n` 就是**段落分隔符** —— 所以代码的每一行都是独立段落，段前段后各吃一份 `paragraphSpacing`，实测行与行之间空出 24pt（12+12），比正文里软换行的行距大好几倍，看着很散。
+    /// 这里把段距归零，行与行就只剩字体的自然行距，和「一段长文本折行」一个观感。
+    func codeParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
+        codeStyle(indent: indent, spacingBefore: 0, spacingAfter: 0)
     }
 
-    /// 代码块段落样式的公共部分。
-    /// - parameter minimumSpacing: 段前/段后间距的**下限**，用户调的段距比它大就听用户的
-    private func codeStyle(indent: CGFloat, minimumSpacing: CGFloat) -> NSParagraphStyle {
+    /// 代码块**开围栏行**（` ```swift `）段落：**上面**是正文（留正常段距），**下面**是代码（只留灰底要的那点 padding）。
+    ///
+    /// ### 为什么两条围栏行要分成两套（不能共用一个样式）
+    /// 一个段落样式只有「段前 / 段后」两个数，而围栏行夹在「外面的正文」和「里面的代码」中间，两个方向想要的间距不一样：
+    /// 对外要正常段距（代码块和上下文分开），对内只要灰底 padding 那么点（贴着灰底，紧凑）。
+    /// 共用一个样式就只能两头一起松、或一起紧 —— 一起紧的话代码块会贴住上下文，一起松的话代码块里又空得能再塞一行。
+    ///
+    /// ### 对内为什么是两个 `codeBlockVerticalPadding`（不能更小）
+    /// 灰底矩形是按「代码正文那个 fragment 的框 ± padding」算出来的（见 computeCodeBlockFrames），而 fragment 的框**不含**段前间距 —— 所以「围栏行底」到「灰底顶」的距离 = 对内间距 − padding。
+    /// 对内只留一个 padding 的话这两个值相等，``` 那几个字符正好压在灰底边缘上（实测会压进去 1pt，有测试守着）。
+    /// 留两个 padding，灰底和围栏行之间就还有一个 padding 的间隙。
+    func codeFenceOpenParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
+        codeStyle(indent: indent,
+                  spacingBefore: max(paragraphSpacing, codeBlockVerticalPadding),
+                  spacingAfter: codeBlockVerticalPadding * 2)
+    }
+
+    /// 代码块**闭围栏行**（` ``` `）段落：**上面**是代码（只留灰底要的 padding），**下面**是正文（留正常段距）。
+    /// 和开围栏行正好反过来，理由见那里。
+    func codeFenceCloseParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
+        codeStyle(indent: indent,
+                  spacingBefore: codeBlockVerticalPadding * 2,
+                  spacingAfter: max(paragraphSpacing, codeBlockVerticalPadding))
+    }
+
+    /// 代码块段落样式的公共部分
+    private func codeStyle(indent: CGFloat, spacingBefore: CGFloat, spacingAfter: CGFloat) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.headIndent = indent + codeBlockTextInset
         style.firstLineHeadIndent = indent + codeBlockTextInset
         style.tailIndent = -codeBlockTextInset
-        style.paragraphSpacingBefore = max(paragraphSpacing, minimumSpacing)
-        style.paragraphSpacing = max(paragraphSpacing, minimumSpacing)
+        style.paragraphSpacingBefore = spacingBefore
+        style.paragraphSpacing = spacingAfter
         applyLineHeight(to: style)
         return style
     }

@@ -1829,18 +1829,19 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         // 等首帧那条「结果不稳定就重试」的链路收敛
         RunLoop.main.run(until: Date().addingTimeInterval(0.6))
 
-        let offsetY: CGFloat = 1500
-        tv.contentOffset = CGPoint(x: 0, y: offsetY)
-        tv.layoutIfNeeded()
-
-        // ⚠️ 必须用**实际**滚动量：文档总高只有 1700 出头，滚 1500 会被系统夹到底部
-        // （实测夹到 813）。拿写死的 1500 去算期望值，测出来的是「UITextView 会夹滚动」
-        // 而不是「背景没跟上」，白白红了很久
-        let actualOffset = tv.contentOffset.y
-        XCTAssertGreaterThan(actualOffset, 100, "这个用例要真的滚起来才有意义")
-
         let (frames, _) = tv.computeCodeBlockFrames()
         XCTAssertEqual(frames.count, 2)
+
+        // ⚠️ 滚动量要按**第二个代码块的位置**算，别写死一个数：
+        // 文档高度会随排版变（比如代码块的行距一收紧，整篇就短一截），
+        // 写死的 1500 可能把要观察的那个块整个滚出视野，那时「背景没画出来」是环境变了，不是背景没跟上。
+        // 另外滚动会被系统夹到底部，所以下面一律用**实际**滚动量算期望值（拿写死的数去算，
+        // 测出来的是「UITextView 会夹滚动」而不是「背景没跟上」，白白红了很久）。
+        tv.contentOffset = CGPoint(x: 0, y: frames.last!.frame.midY - tv.bounds.height / 2)
+        tv.layoutIfNeeded()
+
+        let actualOffset = tv.contentOffset.y
+        XCTAssertGreaterThan(actualOffset, 100, "这个用例要真的滚起来才有意义")
 
         // 滚动停下之后的重算是异步的，轮询等它落位（最多等 3 秒）
         var placed: [CGRect] = []

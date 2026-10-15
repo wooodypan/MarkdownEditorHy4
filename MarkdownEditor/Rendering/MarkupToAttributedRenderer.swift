@@ -665,11 +665,90 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         // 这样 UI 层才能算出「外层竖条贯穿整块、内层竖条只到内层结束」两种范围。
         out.addAttributesIfAbsent([.markdownQuoteChain: newChain])
 
+        // 「同一段话里的那些行」要挤回到自然行距 —— 排在补漏（把每一行行首的 `>` 补齐）之后：整行统一给一个样式，TextKit 才不会取到两份互相打架的段落样式。
+        tightenQuoteWrappedLines(in: &out, blockQuote: blockQuote)
+
         // ⚠️ 引用内容那层淡底色（开关 `theme.showsQuoteBackground`）**不在这里画**，由 UI 层按矩形铺（见 `positionQuoteDecorations`）。
         // 原因是它要「从竖条一直铺到行尾」：富文本的 `.backgroundColor` 只跟着**文字**走，行尾那段空白铺不到，看着就是一块块断开的色斑。
 
         return out
     }
+
+    /// 把引用块里「同一段话折出来的那些行」下面的段距去掉，让相邻两行只剩自然行距。
+    ///
+    /// ### 守的是哪个现象
+    /// 引用的每一行都以 `>` 开头，行与行之间那个 `\n` 在 TextKit 里就是**段落分隔符** —— 于是「一段话写到换行就换个 `>` 接着写」看着是一段，排版上却是好几个段落，行与行之间凭空多吃一份 `paragraphSpacing`（默认 12），比正文里同一段折行的行距松一大截，整块引用看着散成一节一节。
+    ///
+    /// ### 「段内折行」和「段落边界」怎么分
+    /// 光看渲染出来的字符分不出来：两种换行都只是一个 `\n`（软换行节点经常拿不到源码范围，那个 `\n` 常常是补漏步骤用源码原文补进来的，`visitSoftBreak` 的注释里写了这个坑）。
+    /// 所以这里改问 AST：一个 `\n` 只有在**它前面那个字符**和**下一行正文的头一个字符**落在同一个 Paragraph 里时才算段内折行。引用里用来分段的那个空行（一行只有一个 `>`）找不到「下一行的正文」，自然被排除 —— 那份段距留着。
+    ///
+    /// ### 为什么这里才改样式（不在 `visitParagraph` 里改）
+    /// 补漏会把每一行行首的 `>` 补进来，而 TextKit 一个段落只认一个段落样式（多份并存时取谁是不定的），等 `>` 到位之后再整行统一改才稳。
+    private func tightenQuoteWrappedLines(in out: inout RenderedFragment, blockQuote: BlockQuote) {
+        let paragraphs = paragraphSourceRanges(in: blockQuote)
+        guard !paragraphs.isEmpty, out.text.length > 1 else { return }
+        let rendered = out.text.string as NSString
+
+        for index in 0..<out.text.length {
+            guard rendered.character(at: index) == Self.lineFeed,
+                  index > 0, index + 1 < out.text.length else { continue }
+            guard let before = sourceOffset(at: index - 1, in: out),
+                  let owner = paragraphs.first(where: { NSLocationInRange(before, $0) }) else { continue }
+            // 下一行的正文头一个字符：行首那几个 `>` 和空格是补漏补进来的，它们不属于任何 Paragraph
+            guard let next = paragraphOfLineBody(after: index, in: out, paragraphs: paragraphs) else { continue }
+            guard NSEqualRanges(owner, next) else { continue }
+
+            let line = rendered.paragraphRange(for: NSRange(location: index, length: 0))
+            guard line.length > 0 else { continue }
+            // 只认「正文那套段距」：图片、公式那些块级内容自己有一整套间距，它们的间距不该被这里顺手改掉
+            guard let style = out.text.attribute(.paragraphStyle, at: line.location, effectiveRange: nil) as? NSParagraphStyle,
+                  style.paragraphSpacing == theme.paragraphSpacing,
+                  let tightened = style.mutableCopy() as? NSMutableParagraphStyle else { continue }
+            tightened.paragraphSpacing = 0
+            out.setAttributes([.paragraphStyle: tightened], range: line)
+        }
+    }
+
+    /// 引用块里所有 Paragraph 的源码范围（块内偏移）。
+    ///
+    /// 嵌套引用不往里走 —— 它里面的行由它自己的出口那一趟负责，外一层重复算只是把同一行改两遍。
+    private func paragraphSourceRanges(in root: Markup) -> [NSRange] {
+        var out: [NSRange] = []
+        for child in root.children {
+            guard !(child is BlockQuote) else { continue }
+            if let paragraph = child as? Paragraph, let range = localRange(of: paragraph) { out.append(range) }
+            out.append(contentsOf: paragraphSourceRanges(in: child))
+        }
+        return out
+    }
+
+    /// 某个渲染字符位对应的源码偏移（纯装饰字符不在源码里，返回 nil）
+    private func sourceOffset(at index: Int, in fragment: RenderedFragment) -> Int? {
+        guard index >= 0, index < fragment.mappings.count else { return nil }
+        let mapping = fragment.mappings[index]
+        return mapping.isDecoration ? nil : mapping.sourceStart
+    }
+
+    /// 顺着某一行的正文，找到它属于哪个 Paragraph —— 行首那几个 `>` 和空格要跳过去才摸得到正文。
+    ///
+    /// 找不到（那一行只有一个 `>`，也就是引用里用来分段的空行）就返回 nil。
+    private func paragraphOfLineBody(after newlineIndex: Int,
+                                     in fragment: RenderedFragment,
+                                     paragraphs: [NSRange]) -> NSRange? {
+        let rendered = fragment.text.string as NSString
+        var index = newlineIndex + 1
+        while index < fragment.mappings.count, rendered.character(at: index) != Self.lineFeed {
+            if let offset = sourceOffset(at: index, in: fragment),
+               let owner = paragraphs.first(where: { NSLocationInRange(offset, $0) }) {
+                return owner
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    private static let lineFeed = unichar(0x0A)
 
     func visitCodeBlock(_ codeBlock: CodeBlock) -> RenderedFragment {
         let codeStyle = theme.codeParagraphStyle(indent: indent)
@@ -705,13 +784,15 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         }
 
         // 首尾的 ``` 由补漏步骤补进来。
-        // ⚠️ 补漏补的**只有**首尾这两条围栏行（代码正文是 sourceSliced 来的，不在补漏范围内），所以这里给的段落样式就是「围栏行专用」那套 —— 它的段前/段后间距有下限，保证围栏行和代码正文之间永远留得出灰底要的 padding，详见 MarkdownTheme.codeFenceParagraphStyle
+        // ⚠️ 补漏补的**只有**首尾这两条围栏行（代码正文是 sourceSliced 来的，不在补漏范围内），所以这里给的段落样式就是「围栏行专用」那套
         var orphanAttributes = theme.markerAttributes
-        orphanAttributes[.paragraphStyle] = theme.codeFenceParagraphStyle(indent: indent)
+        orphanAttributes[.paragraphStyle] = theme.codeFenceOpenParagraphStyle(indent: indent)
         out = out.reconciled(withSource: source,
                              in: localRange(of: codeBlock),
                              orphanAttributes: orphanAttributes)
         out.addAttributesIfAbsent([.paragraphStyle: codeStyle])
+        // 开 / 闭两条围栏行的段距是「分方向」的（对外留段距、对内只留灰底 padding），而补漏只能给一个统一样式 —— 所以这里再按「哪几行是围栏」各设一次
+        applyFenceParagraphStyles(to: &out, indent: indent)
 
         // 打上「这是一个代码块」的标记（**含**首尾的 ``` 行，这样首尾围栏也在同一段里，
         // UI 层算矩形时能精确认出哪两行是围栏、把它们从背景里抠掉——背景只罩代码正文）。
@@ -729,6 +810,48 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                 language: codeBlock.language,
                                 codeSourceStart: codeSourceStart)
         return out
+    }
+
+    /// 给代码块首尾两条围栏行补上「分方向」的段落样式（开围栏在上面、闭围栏在下面）。
+    ///
+    /// ### 为什么补漏之后还要再来一遍
+    /// 补漏（`reconciled`）给所有孤儿字符用的是**同一份** `orphanAttributes`，而开 / 闭围栏的段前 / 段后间距是反着的（对外留正常段距、对内只留灰底要的那点 padding，见 `MarkdownTheme.codeFenceOpenParagraphStyle`）。
+    /// 好在代码块的渲染串就是块源码本身（`sourceSliced` + 补漏保证一字不差），所以按**源码里的行**就能定位这两行。
+    private func applyFenceParagraphStyles(to out: inout RenderedFragment, indent: CGFloat) {
+        let rendered = out.text.string as NSString
+        let blockSource = source as NSString
+        guard rendered.length > 0, blockSource.length > 0 else { return }
+
+        // 开围栏：源码第一行（```lang）。渲染串就是这个块的源码本身，所以**源码里的行范围可以直接当渲染串的范围用**
+        let opening = blockSource.lineRange(for: NSRange(location: 0, length: 0))
+        applyFenceStyle(theme.codeFenceOpenParagraphStyle(indent: indent),
+                        to: &out, sourceLine: opening, renderedLength: rendered.length)
+
+        // 闭围栏：源码**最后一个非空行**。
+        // ⚠️ 块源码常常以换行结尾（后面还跟着空行），直接取最后一行会拿到一个空行 —— 得先把尾巴上的换行跳过去
+        var end = blockSource.length
+        while end > 0, blockSource.substring(with: NSRange(location: end - 1, length: 1)) == "\n" { end -= 1 }
+        guard end > 0 else { return }
+        let closing = blockSource.lineRange(for: NSRange(location: end - 1, length: 0))
+        // 只有一行（开围栏就是最后一行）、或末尾没有 ```（未闭合的代码块，最后一行是代码正文）—— 这两种都不动
+        guard closing.location > 0 else { return }
+        let closingText = blockSource.substring(with: closing).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard closingText.hasPrefix("```") else { return }
+
+        applyFenceStyle(theme.codeFenceCloseParagraphStyle(indent: indent),
+                        to: &out, sourceLine: closing, renderedLength: rendered.length)
+    }
+
+    /// 把围栏行的段落样式写进渲染串（范围按源码里的那一行，落在外面就夹到边界内）
+    private func applyFenceStyle(_ style: NSParagraphStyle,
+                                 to out: inout RenderedFragment,
+                                 sourceLine: NSRange,
+                                 renderedLength: Int) {
+        guard sourceLine.location < renderedLength else { return }
+        let length = min(NSMaxRange(sourceLine), renderedLength) - sourceLine.location
+        guard length > 0 else { return }
+        out.setAttributes([.paragraphStyle: style],
+                          range: NSRange(location: sourceLine.location, length: length))
     }
 
     /// 给一段代码正文上语法色（不动文字、不动映射，**只改颜色属性**）。
