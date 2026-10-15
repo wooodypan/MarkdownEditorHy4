@@ -9,7 +9,9 @@
 //  永远不要指望从 attributed string 反推源码，一律查 `MarkdownDocumentStore` 的源码映射表。
 //
 
+import ImageIO
 import UIKit
+import UniformTypeIdentifiers
 
 /// 剪贴板控制器。
 final class MarkdownPasteboardController {
@@ -25,6 +27,21 @@ final class MarkdownPasteboardController {
     /// - parameter pasteboard: 要读的那个剪贴板
     /// - returns: 转出来的源码；`nil` = 这一步不接管，粘贴继续走纯文本那条路
     var richTextConverter: ((UIPasteboard) -> String?)?
+
+    /// App 层注入的「图片存到哪儿、markdown 里写什么路径」。默认 `nil`（= 用本类自带的默认方式）。
+    ///
+    /// ### 为什么又是一个回调
+    /// 和上面 `richTextConverter` 完全同一个理由：`MarkdownEditor/` 这一层将来要单独开源，
+    /// 它不该认识 App 的设置页，也不该知道「笔记旁边有没有一个 assets 文件夹」这种规矩 ——
+    /// 「存哪儿」是 App 层用户选出来的，所以只留一个口子由 App 接管。
+    ///
+    /// ### 不注入时走什么
+    /// 存到 `Documents/attachments/<内容 md5>.<后缀>`，markdown 里写 `attachments/<内容 md5>.<后缀>` ——
+    /// 组件单独拿去用（没有 App 的设置页）时，粘贴图片照样能用。
+    ///
+    /// - parameter data: 图片的**原始字节**（剪贴板里是什么格式就是什么格式，我们不做转码）
+    /// - returns: markdown 里要写的图片路径（相对路径 / 绝对路径都行）；`nil` = 这次没存下，粘贴不再由本类接管
+    var imageFileWriter: ((Data) -> String?)?
 
     /// ### 为什么这里要显式写 `nonisolated deinit`（很重要，别删）
     /// 原因和 `MarkdownBlock` 里那段注释完全一样：app target 开了
@@ -77,25 +94,25 @@ final class MarkdownPasteboardController {
     // MARK: 粘贴
 
     /// 剪贴板里是图片时，存成本地文件并插入 `![](路径)` 源码。
+    ///
+    /// 文件叫什么名字由 `MarkdownImageFileStore` 定（内容哈希 + 真实格式的后缀），
+    /// 存到哪儿由 `imageFileWriter` 定（App 层按设置页的选择给）。
+    ///
     /// - returns: `true` 表示已处理
     @discardableResult
     func handlePasteImage() -> Bool {
-        guard let textView, let image = UIPasteboard.general.image else { return false }
-        guard let directory = attachmentsDirectory() else { return false }
+        guard let textView else { return false }
+        // 「是不是图」这件事交给 `pasteboardImageData` 自己判断：它取不到图就返回 nil，
+        // 那就是这次不接管，粘贴继续往下走别的路子（纯文本 / 富文本那条）
+        guard let data = pasteboardImageData() else { return false }
 
-        let fileName = "pasted-\(UUID().uuidString).png"
-        let fileURL = directory.appendingPathComponent(fileName)
-        guard let data = image.pngData() else { return false }
-
-        do {
-            try data.write(to: fileURL)
-        } catch {
-            return false
-        }
+        // App 没注入就用自己的默认存法，保证组件单独也能用
+        let writer = imageFileWriter ?? Self.defaultImageFileWriter
+        guard let path = writer(data) else { return false }
 
         // 图片插入同样走「可撤销」那条路：图片源码渲染出来是一个附件字符，
         // 和源码长度差得更远，交给系统记撤销会残留一串字符
-        textView.insertMarkdownSourceUndoably("![粘贴的图片](attachments/\(fileName))")
+        textView.insertMarkdownSourceUndoably("![粘贴的图片](\(path))")
         return true
     }
 
@@ -125,13 +142,126 @@ final class MarkdownPasteboardController {
         return text
     }
 
-    /// 图片存放目录：`Documents/attachments`
-    private func attachmentsDirectory() -> URL? {
+    /// 剪贴板里那张图的**原始字节**。
+    ///
+    /// ### 为什么要绕开 `UIPasteboard.general.image` 去翻剪贴板
+    /// 那个属性给的是一张**解好码的 `UIImage`**，要是写完再 `pngData()`，就等于把图片重新编码了一遍：
+    /// 复制来的 JPEG 会变成大好几倍的 PNG，动图（GIF）的后续帧也在解码那一步就没了。
+    /// 所以只要有可能，就原样取出字节。
+    ///
+    /// ### 顺序为什么是这四步
+    /// 从 Finder 里 ⌘C 复制一张图，剪贴板里放的**不是图片本身，而是文件地址** ——
+    /// 所以第 ① 步先按地址去读原文件；剪贴板里另外十几种格式（PNG / TIFF / BMP…）都是系统现转的，
+    /// 只有原文件那一份才是没动过的。地址读不到（沙箱没给权限等情况）再退而求其次，
+    /// 按类型挨个问剪贴板要（② ③），最后才自己编码（④）。
+    private func pasteboardImageData() -> Data? {
+        let pasteboard = UIPasteboard.general
+
+        // ① 剪贴板里是「文件地址」→ 直接读原文件
+        let fileURL = pasteboardFileURL(pasteboard)
+        if let fileURL, let data = readImageFile(at: fileURL) { return data }
+
+        // ② 按「最可能拿到原始格式」的顺序，逐个类型问剪贴板要数据
+        for type in candidateImageTypes(hintedBy: fileURL) {
+            if let data = pasteboard.data(forPasteboardType: type), isImageData(data) { return data }
+        }
+
+        // ③ 还有些 App 会把图片放在很冷门的自定义类型里（`dyn.…`）。前面都没命中的话，
+        //    把剩下的条目挨个试一遍 —— 这一遍同样得用 `isImageData` 把关
+        for item in pasteboard.items {
+            for (_, value) in item {
+                guard let data = value as? Data, isImageData(data) else { continue }
+                return data
+            }
+        }
+
+        // ④ 实在取不到原始字节（有些 App 只往剪贴板里放一份解好码的图）再退回自己编码。
+        //    这一条路上拿到的永远是 PNG，扩展名也就会跟着算成 png，这是没办法的事
+        return pasteboard.image?.pngData()
+    }
+
+    /// 这份数据到底是不是图片。
+    ///
+    /// ### ⚠️ 为什么不能只判断 `CGImageSourceCreateWithData(...) != nil`（这个坑真吃过，2026-10-15）
+    /// 那个函数是**懒解析**的：对**任何**非空数据都会先给你一个 source，你不动内容它就不报错。
+    /// 实测把一段 `file:///…` 的纯文本喂给它，照样返回非 nil（`CGImageSourceGetType` 才是 nil）。
+    /// 于是「翻剪贴板找图片」实际变成了「翻剪贴板找第一条非空数据」——
+    /// 从 Finder 复制图片时第一条偏偏就是那串文件地址，结果 `.png` 里写进去的是一行路径文本：
+    /// 文件在、名字对、大小也对不上图片，怎么点都打不开。
+    /// 所以必须再问一句 `CGImageSourceGetType`：它答不出格式，就说明这根本不是图片。
+    private func isImageData(_ data: Data) -> Bool {
+        guard !data.isEmpty, let source = CGImageSourceCreateWithData(data as CFData, nil) else { return false }
+        return CGImageSourceGetType(source) != nil
+    }
+
+    /// 剪贴板里那个「文件地址」（`public.file-url`）。
+    ///
+    /// `public.file-url` 是 `public.url` 的子类型，所以 `url` 属性一般就够用；
+    /// 但个别情况下它只以原始数据的形式出现，那就自己把那串地址解出来。
+    private func pasteboardFileURL(_ pasteboard: UIPasteboard) -> URL? {
+        if let url = pasteboard.url, url.isFileURL { return url }
+        guard let raw = pasteboard.data(forPasteboardType: UTType.fileURL.identifier),
+              let text = String(data: raw, encoding: .utf8),
+              let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              url.isFileURL else { return nil }
+        return url
+    }
+
+    /// 按地址把原文件读出来。读不到（沙箱没给访问权限、文件已删、是网络地址…）返回 `nil`，让调用方接着走别的路。
+    private func readImageFile(at url: URL) -> Data? {
+        // 别急着读：用户复制的可能是个几十 MB 的压缩包，先问一句「你是什么」——
+        // 系统认得出它跟图片无关就直接跳过，省掉一次整文件读盘。
+        // 认不出来（没后缀的图）时 `contentType` 是 nil，那就老老实实读一次再看内容
+        let declared = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
+        if let declared, !declared.conforms(to: .image) { return nil }
+
+        // 沙盒里从剪贴板拿到的地址未必带访问权限：按规矩问一句。拿不到也只是读不了，不会更糟
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url), isImageData(data) else { return nil }
+        return data
+    }
+
+    /// 「接下来按什么顺序问剪贴板要图片」。
+    ///
+    /// 手上知道原文件是什么格式时（②那条路拿到了地址），先要那个格式 ——
+    /// 这是唯一有希望拿到「原封不动那份字节」的一种问法，也免得把原图是 JPEG 的硬转成 PNG（体积能差好几倍）。
+    private func candidateImageTypes(hintedBy fileURL: URL?) -> [String] {
+        var types: [String] = []
+        if let ext = fileURL?.pathExtension, !ext.isEmpty, let hint = UTType(filenameExtension: ext)?.identifier {
+            types.append(hint)
+        }
+        types.append(contentsOf: Self.preferredImageTypes)
+        return types
+    }
+
+    /// 常见的图片类型，按「截图 / 网页里的图 / 手机相册照片」这几种最常见的情形排。
+    ///
+    /// 这里写成系统 UTI 字符串而不是 `UTType` 常量：剪贴板协议里用的就是这串名字，
+    /// 而常量是随 SDK 版本时有时无的（比如 `UTType.icns` 在有些版本上根本没有），
+    /// 拼错了编译期就报错、还会连累别的代码，不如直接写字面量实在。
+    private static let preferredImageTypes = [
+        "public.png",
+        "public.jpeg",
+        "public.heic",
+        "public.heif",
+        "com.compuserve.gif",
+        "public.tiff",
+        "com.microsoft.bmp",
+        "public.avif",
+    ]
+
+    /// 没有 App 注入时用的默认存法：`Documents/attachments/<内容 md5>.<后缀>`。
+    ///
+    /// ⚠️ 标 `nonisolated` 是因为要把它**当成函数值**塞进 `imageFileWriter`（那个属性是普通函数类型）：
+    /// 不标的话它跟着全项目默认隔离在主线程，赋值时编译器会警告「在非隔离上下文里引用主线程隔离的方法」。
+    /// 它本身就只碰文件、不碰 UI，标了没有任何副作用。
+    private nonisolated static func defaultImageFileWriter(_ data: Data) -> String? {
         guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return nil
         }
         let directory = documents.appendingPathComponent("attachments", isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
+        guard let name = MarkdownImageFileStore.store(data, in: directory) else { return nil }
+        return "attachments/\(name)"
     }
 }

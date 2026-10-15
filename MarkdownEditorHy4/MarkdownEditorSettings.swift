@@ -73,6 +73,48 @@ enum ImageWidthMode: String, Codable, CaseIterable {
     }
 }
 
+/// 粘贴 / 插入图片时，图片文件存到哪儿。
+///
+/// 四个选项是**互斥**的，用户在设置页上单选。正文里写什么路径由这一项决定（见 `ImageAssetStore`）：
+/// - 「当前文件夹」写文件名；
+/// - 「assets」写 `assets/名字`；
+/// - 「同名文件夹」写 `笔记名/名字`；
+/// - 「指定路径」写完整路径 —— 图片在这个位置之外，相对路径没法表达。
+enum ImageInsertionMode: String, Codable, CaseIterable {
+    /// 和笔记摆在同一层目录（`./`）
+    case currentFolder
+    /// 笔记旁边的 `./assets` 子目录
+    case assetsFolder
+    /// 和笔记同名的目录（`游记.md` → `游记/`）
+    case documentFolder
+    /// 用户自己挑的一个固定目录。⚠️ 只有 Mac 上能选，见 `selectableCases`
+    case customFolder
+
+    /// 设置页菜单上显示的名字
+    var displayName: String {
+        switch self {
+        case .currentFolder: return "复制到当前文件夹（./）"
+        case .assetsFolder: return "复制到 ./assets 文件夹"
+        case .documentFolder: return "复制到与笔记同名的文件夹"
+        case .customFolder: return "复制到指定路径…"
+        }
+    }
+
+    /// 这个平台上能选哪几项。
+    ///
+    /// ### 为什么 iPhone / iPad 上不放「指定路径」
+    /// 选目录靠的是系统的文件夹选择框，它在 Mac 上有；iPhone / iPad 上要走「文件」App 那一套，
+    /// 用户很可能挑到一个自己以后再也找不到的地方（图片存进去了、正文里是一条长路径，看着像丢了）。
+    /// 与其给个容易踩坑的入口，不如这一项在手机 / 平板上干脆不出现。
+    static var selectableCases: [ImageInsertionMode] {
+        #if targetEnvironment(macCatalyst)
+        return allCases
+        #else
+        return allCases.filter { $0 != .customFolder }
+        #endif
+    }
+}
+
 /// 编辑器的用户配置。
 ///
 /// ### 颜色主题存在这里的是什么
@@ -174,6 +216,14 @@ final class MarkdownEditorSettings {
         static let imageWidthPoints = Double(theme.image.maxWidthPoints)
         /// 图片最大高度默认 **420 点**（从主题读，不在这里写第二份数字）
         static let imageMaxHeight = Double(theme.image.maxHeight)
+
+        /// 图片存到哪儿，默认「笔记旁边的 ./assets」。
+        ///
+        /// 挑这一项当默认的理由：图片和正文分开摆，笔记目录一眼看过去还是清清爽爽的一排 `.md`；
+        /// 而「当前文件夹」会把目录塞满图片，「指定路径」又要用户先做一次选择、没选之前存不了
+        static let imageInsertionMode: ImageInsertionMode = .assetsFolder
+        /// 「指定路径」那个文件夹默认**没有** —— 用户没选过就是 nil
+        static let imageCustomFolderPath: String? = nil
     }
 
     /// 各项数值的合法范围。
@@ -286,6 +336,10 @@ final class MarkdownEditorSettings {
         /// 颜色主题那一组（都写成可选 + 字符串，理由同前）
         var colorTheme: String?
         var customThemeFileName: String?
+        /// 插入图片那一组。模式存字符串的理由和上面几个模式一样
+        var imageInsertionMode: String?
+        /// 「指定路径」那个文件夹的完整路径
+        var imageCustomFolderPath: String?
     }
 
     // MARK: 配置项
@@ -465,6 +519,48 @@ final class MarkdownEditorSettings {
     /// 只防「一张长图撑爆屏幕」，正常大小的图根本碰不到这个上限。
     /// 跟窗口高度无关：用户几乎不会去动这个值，不值得为它每次拉窗口都重排整篇文档。
     private(set) var imageMaxHeight: Double
+
+    // MARK: 插入图片
+
+    /// 粘贴 / 插入的图片存到哪儿。默认「笔记旁边的 ./assets」。四种选择的区别见 `ImageInsertionMode`
+    private(set) var imageInsertionMode: ImageInsertionMode
+
+    /// 「复制到指定路径」那一项用的文件夹的**完整路径**。`nil` = 用户还没选过。
+    ///
+    /// ### 为什么存路径字符串就够了、不用书签
+    /// 本 App 没有开启沙盒（工程里没有 `.entitlements`），用户挑的目录一直都能读写。
+    /// ⚠️ 哪天给 App 打开沙盒，这里就得改存 security-scoped bookmark ——
+    /// 沙盒下光有路径，重启之后是写不进去的。
+    private(set) var imageCustomFolderPath: String?
+
+    /// 「指定路径」那个文件夹，转成 `URL` 给落盘用。没选过、或者存的是空串时返回 `nil`
+    var imageCustomFolderURL: URL? {
+        guard let imageCustomFolderPath, !imageCustomFolderPath.isEmpty else { return nil }
+        return URL(fileURLWithPath: imageCustomFolderPath, isDirectory: true)
+    }
+
+    /// 改「插入的图片存到哪儿」。
+    ///
+    /// ### 这里为什么不发「配置变了」广播
+    /// 别的几组设置都发，是因为它们会改变**屏幕上已经有的内容**（字号、配色、图片尺寸…），
+    /// 发的目的是让打开着的文档重排一遍。这一项只管**下一次**插入的图存哪儿，
+    /// 屏幕上那篇一个字都不用动 —— 广播出去只会白重排一次整篇文档（大文档上肉眼可见地卡一下）。
+    func setImageInsertionMode(_ value: ImageInsertionMode) {
+        guard value != imageInsertionMode else { return }
+        imageInsertionMode = value
+        save()
+    }
+
+    /// 改「指定路径」那个文件夹（传 `nil` = 清掉）
+    ///
+    /// 不发广播的理由同上一条：它只影响下一次插入。
+    func setImageCustomFolderPath(_ value: String?) {
+        // 空串当成「没选」处理，免得界面上显示一个空的按钮、又判断不出到底选没选
+        let normalized = (value?.isEmpty ?? true) ? nil : value
+        guard normalized != imageCustomFolderPath else { return }
+        imageCustomFolderPath = normalized
+        save()
+    }
 
     /// 改「是否记住滚动位置」。值没变就什么都不做（不发通知、不写盘）
     func setRemembersScrollPosition(_ value: Bool) {
@@ -743,6 +839,8 @@ final class MarkdownEditorSettings {
         self.imageWidthRatio = Default.imageWidthRatio
         self.imageWidthPoints = Default.imageWidthPoints
         self.imageMaxHeight = Default.imageMaxHeight
+        self.imageInsertionMode = Default.imageInsertionMode
+        self.imageCustomFolderPath = Default.imageCustomFolderPath
         self.colorTheme = Default.colorTheme
         self.customThemeFileName = Default.customThemeFileName
         load()
@@ -822,6 +920,14 @@ final class MarkdownEditorSettings {
         if let value = payload.imageMaxHeight {
             imageMaxHeight = clamp(value, to: Limits.imageMaxHeight)
         }
+        // 和别的模式一样：认不出来的名字只让这一项退回默认，不连累别的设置
+        if let raw = payload.imageInsertionMode, let value = ImageInsertionMode(rawValue: raw) {
+            imageInsertionMode = value
+        }
+        // 路径不需要夹范围；空串当成「没选过」
+        if let value = payload.imageCustomFolderPath, !value.isEmpty {
+            imageCustomFolderPath = value
+        }
         // 认不出来的主题名（老版本存的、或者手改坏了）只让这一项退回默认
         if let raw = payload.colorTheme, let value = MarkdownColorTheme(rawValue: raw) {
             colorTheme = value
@@ -857,7 +963,9 @@ final class MarkdownEditorSettings {
                               imageWidthPoints: imageWidthPoints,
                               imageMaxHeight: imageMaxHeight,
                               colorTheme: colorTheme.rawValue,
-                              customThemeFileName: customThemeFileName)
+                              customThemeFileName: customThemeFileName,
+                              imageInsertionMode: imageInsertionMode.rawValue,
+                              imageCustomFolderPath: imageCustomFolderPath)
         guard let data = try? JSONEncoder().encode(payload) else { return }
         do {
             // 目录可能还不存在（第一次跑），先建出来

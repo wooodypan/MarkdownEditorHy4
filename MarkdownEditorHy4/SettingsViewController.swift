@@ -2,7 +2,7 @@
 //  SettingsViewController.swift
 //  MarkdownEditorHy4
 //
-//  简易设置页：正文排版 + 阅读位置 + 大纲面板 + 表格列宽 + 图片尺寸，后面还会往里加
+//  简易设置页：正文排版 + 阅读位置 + 大纲面板 + 表格列宽 + 图片尺寸 + 插入图片 + 剪贴板，后面还会往里加
 //
 //  这一页改了之后要「当场生效」的那几项（字号、行高、段间距、首行缩进、表格列宽），
 //  是由内容页监听 `MarkdownEditorSettings.didChangeNotification` 后重新渲染实现的，
@@ -12,6 +12,7 @@
 //
 
 import UIKit
+import UniformTypeIdentifiers
 
 /// 设置页。
 ///
@@ -42,6 +43,8 @@ final class SettingsViewController: UIViewController {
         case tableLayout
         /// 图片画多大
         case imageSize
+        /// 粘贴 / 插入的图片存到哪儿
+        case imageInsertion
         /// 粘贴剪贴板内容时的处理
         case clipboard
 
@@ -52,6 +55,7 @@ final class SettingsViewController: UIViewController {
             case .outlineSize: return "大纲面板"
             case .tableLayout: return "表格列宽"
             case .imageSize: return "图片尺寸"
+            case .imageInsertion: return "插入图片"
             case .clipboard: return "剪贴板"
             }
         }
@@ -78,6 +82,15 @@ final class SettingsViewController: UIViewController {
                 // 顺序就是界面上从上到下的顺序：先选「宽度怎么算」，再调两个数值，
                 // 最后是「最多占多高」
                 return [.imageWidthMode, .imageWidthRatio, .imageWidthPoints, .imageMaxHeight]
+            case .imageInsertion:
+                // 「存哪儿」在上面：它是这一组的主题。
+                // 「指定路径那个文件夹」跟在后面 —— 只有选中「复制到指定路径」时它才有意义，
+                // 而且只有 Mac 上才有这一项（理由见 `ImageInsertionMode.selectableCases`）
+                #if targetEnvironment(macCatalyst)
+                return [.imageInsertionMode, .imageCustomFolderPath]
+                #else
+                return [.imageInsertionMode]
+                #endif
             case .clipboard:
                 return [.pastesHTMLAsMarkdown]
             }
@@ -132,6 +145,10 @@ final class SettingsViewController: UIViewController {
         case imageWidthPoints
         /// 图片最大高度（点）
         case imageMaxHeight
+        /// 插入的图片存到哪个文件夹（四个选项选一个）
+        case imageInsertionMode
+        /// 「复制到指定路径」用的那个文件夹（只有 Mac 上有这一行）
+        case imageCustomFolderPath
         /// 粘贴网页复制来的富文本时，要不要先转成 markdown 源码
         case pastesHTMLAsMarkdown
 
@@ -180,6 +197,10 @@ final class SettingsViewController: UIViewController {
                 return "固定宽度"
             case .imageMaxHeight:
                 return "最大高度"
+            case .imageInsertionMode:
+                return "图片存放位置"
+            case .imageCustomFolderPath:
+                return "指定路径的文件夹"
             case .pastesHTMLAsMarkdown:
                 return "粘贴网页内容时转成 Markdown"
             }
@@ -284,6 +305,17 @@ final class SettingsViewController: UIViewController {
             case .imageMaxHeight:
                 return "图片最高能画多少点，防止一张长图撑爆屏幕。"
                     + "这是个固定值，跟窗口多高没关系；比它矮的图按原尺寸显示，不会被拉高。"
+            case .imageInsertionMode:
+                return "粘贴进来的图片会先存成一份文件，正文里写的是这个文件的路径。"
+                    + "四个选项的区别只有「文件放哪儿」：和笔记放一起（./）、放进笔记旁边的 assets 文件夹、"
+                    + "放进和笔记同名的文件夹（笔记叫「游记.md」就是「游记/」）、"
+                    + "或者放进你指定的一个固定文件夹（只有 Mac 上能选）。"
+                    + "文件名按图片内容算出来，同一张图重复粘贴不会存成两份。"
+            case .imageCustomFolderPath:
+                return "点一下选一个文件夹，「复制到指定路径」就是往这儿存。"
+                    + "正文里记的是完整路径（图片在笔记目录之外，相对路径表达不了），"
+                    + "所以这个文件夹以后最好别删、也别挪窝 ——"
+                    + "真挪走了，插入图片时会自动改存到 ./assets，并在状态栏告诉你一声。"
             case .pastesHTMLAsMarkdown:
                 return "打开：从网页、Word、备忘录复制内容再粘贴，粘进来的是 markdown 源码 ——"
                     + "标题、列表、表格、链接、图片都转成对应的 markdown 写法，而不是一堆标签。"
@@ -558,7 +590,8 @@ final class SettingsViewController: UIViewController {
             settings.setImageMaxHeight(stepped)
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
              .showsQuoteBackground,
-             .outlineWidthMode, .outlineHeightMode, .imageWidthMode:
+             .outlineWidthMode, .outlineHeightMode, .imageWidthMode,
+             .imageInsertionMode, .imageCustomFolderPath:
             // 这几行挂的是开关 / 分段控件，不是滑块，回调不会从这儿进来。
             // ⚠️ 这里**故意不写 `default:`**：穷举之后，以后往 `Row` 里加一行滑块，
             // 编译器会直接报「switch must be exhaustive」逼你回来接上 ——
@@ -649,6 +682,87 @@ final class SettingsViewController: UIViewController {
         return makeCell(row: .imageWidthMode, control: control)
     }
 
+    /// 「插入的图片存到哪儿」：一个按钮，点一下弹带对勾的菜单。
+    ///
+    /// ### 为什么这儿不用分段控件（上面几个「二选一」用的那种）
+    /// 这里有四个选项，名字还都不短（「复制到与笔记同名的文件夹」）——
+    /// 四个平铺在一行里必被截成「复制…」，用户根本分不出哪个是哪个。
+    /// 菜单是系统设置里处理「多项选一」的通用做法：点开一列、选中的打勾、一眼看全。
+    private func makeImageInsertionModeCell() -> UITableViewCell {
+        let button = UIButton(type: .system)
+        var config = UIButton.Configuration.gray()
+        config.title = settings.imageInsertionMode.displayName
+        // 右边那个上下小箭头是个暗示：这玩意儿点得开
+        config.image = UIImage(systemName: "chevron.up.chevron.down")
+        config.imagePlacement = .trailing
+        config.imagePadding = 8
+        config.cornerStyle = .medium
+        button.configuration = config
+        button.contentHorizontalAlignment = .leading
+        // 点按钮直接弹菜单（不用先长按）
+        button.showsMenuAsPrimaryAction = true
+        button.menu = makeImageInsertionMenu()
+        button.accessibilityLabel = Row.imageInsertionMode.accessibilityLabel
+        return makeCell(row: .imageInsertionMode, control: button)
+    }
+
+    /// 「存哪儿」那几项组成的菜单，当前选中的那一项打勾
+    private func makeImageInsertionMenu() -> UIMenu {
+        let current = settings.imageInsertionMode
+        var modes = ImageInsertionMode.selectableCases
+        // 当前这一项必须出现在菜单里 —— 否则按钮上写着 A、菜单里翻不到 A，用户会以为设置坏了。
+        // 正常情况下它本来就在，只有「配置是在另一种设备上设的」（比如 Mac 上选了「指定路径」，
+        // 配置文件同步到 iPhone）才会缺，补在最后
+        if !modes.contains(current) { modes.append(current) }
+
+        let actions = modes.map { mode in
+            UIAction(title: mode.displayName,
+                     state: mode == current ? .on : .off) { [weak self] _ in
+                guard let self else { return }
+                self.settings.setImageInsertionMode(mode)
+                // 按钮上的文字和菜单里的对勾都要跟着换，整表刷新最省事（总共没几行）
+                self.tableView.reloadData()
+            }
+        }
+        return UIMenu(children: actions)
+    }
+
+    /// 「指定路径」那个文件夹：一个按钮，按钮上显示当前路径，点一下弹系统的文件夹选择框。
+    ///
+    /// ⚠️ 只有 Mac 上有这一行 —— 理由见 `ImageInsertionMode.selectableCases`
+    private func makeImageFolderCell() -> UITableViewCell {
+        let button = UIButton(type: .system)
+        var config = UIButton.Configuration.gray()
+        let path = settings.imageCustomFolderPath
+        config.title = (path?.isEmpty == false) ? path : "选择文件夹…"
+        config.image = UIImage(systemName: "folder")
+        config.imagePlacement = .leading
+        config.imagePadding = 8
+        config.cornerStyle = .medium
+        // 路径可能很长，从中间截断：开头留着磁盘 / 用户名，结尾留着文件夹名，中间那截最不重要
+        config.titleLineBreakMode = .byTruncatingMiddle
+        button.configuration = config
+        button.contentHorizontalAlignment = .leading
+        button.addTarget(self, action: #selector(chooseImageFolder), for: .touchUpInside)
+        button.accessibilityLabel = Row.imageCustomFolderPath.accessibilityLabel
+        return makeCell(row: .imageCustomFolderPath, control: button)
+    }
+
+    /// 弹系统的文件夹选择框。
+    ///
+    /// ### 用的是和导出同一块面板
+    /// `UIDocumentPickerViewController(forOpeningContentTypes:asCopy:)` ——
+    /// 导出落盘（`DocumentExporter.presentExportPicker`）用的就是这一块，
+    /// 在 Mac 上呈现为原生的文件夹选择对话框：左边一列「位置」，右边列文件夹，选完点「打开」。
+    /// 这里只是把「导出到某个文件」换成「打开某个文件夹」：`asCopy` 传 `false`，
+    /// 因为我们要的是那个文件夹本身的地址，不是它的副本。
+    @objc private func chooseImageFolder() {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+        picker.allowsMultipleSelection = false
+        picker.delegate = self
+        present(picker, animated: true)
+    }
+
     /// 数值行：左边滑块，右边当前值。
     ///
     /// 当前这一项在当前模式下不生效时，滑块置灰 —— 光看文字说明还不够直观，
@@ -736,6 +850,10 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
             return makeHeightModeCell()
         case .imageWidthMode:
             return makeImageWidthModeCell()
+        case .imageInsertionMode:
+            return makeImageInsertionModeCell()
+        case .imageCustomFolderPath:
+            return makeImageFolderCell()
         case .bodyFontSize, .lineHeightMultiple, .paragraphSpacing, .paragraphIndentCharacters,
              .bodyContentWidth,
              .outlineWidthRatio, .outlineWidthPoints,
@@ -782,5 +900,20 @@ extension SettingsViewController: UITableViewDataSource, UITableViewDelegate {
 
     private func section(at index: Int) -> Section? {
         Section.allCases.indices.contains(index) ? Section.allCases[index] : nil
+    }
+}
+
+// MARK: - 文件夹选择框的回调
+
+extension SettingsViewController: UIDocumentPickerDelegate {
+
+    /// 用户挑好了一个文件夹：把路径记进配置，顺手把按钮上的文字换成新路径。
+    ///
+    /// ⚠️ 用户点了「取消」时这个方法不会被调用 —— 什么都不做就是「保持原来的路径」，
+    /// 正是我们要的行为，不用额外处理。
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard let url = urls.first else { return }
+        settings.setImageCustomFolderPath(url.path)
+        tableView.reloadData()
     }
 }
