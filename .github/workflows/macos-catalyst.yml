@@ -1,36 +1,61 @@
-# 把 Mac Catalyst 版编译出来，压成一个可以直接分发的 zip。
+# 把 Mac Catalyst 版编译出来，压成可以直接分发的 zip。
+#
+# 一次出三个包（三个任务并行编译，互不影响）：
+#   MarkdownEditorHy4-universal.zip  = arm64 + x86_64 合体，谁都能装，体积最大
+#   MarkdownEditorHy4-arm64.zip      = 只给 Apple 芯片的 Mac（M1 及以后）
+#   MarkdownEditorHy4-x86_64.zip     = 只给 Intel 芯片的 Mac
+#
+# 为什么要分开出：合体的包每个架构各带一份完整代码，体积差不多是单架构的两倍。
+# 发给明确知道自己是什么芯片的人时，单架构包能小一半。
 #
 # 为什么全程不需要证书和 Secrets：
 #   这里用的是 ad-hoc 签名（CODE_SIGN_IDENTITY="-"），也就是「本机临时签一下」，
 #   完全不涉及 Apple 开发者账号。代价只有一个 —— 别人下载后第一次打开会被 Gatekeeper
 #   拦一下，右键 →「打开」放行一次就行。
 #
-# 什么时候会跑：推 main、打 v* 标签、以及在 Actions 页面手动点按钮。
+# 什么时候会跑：只在推 v* 标签时跑（推 main 不跑，省得白等几分钟）。
+#              另外可以在 Actions 页面手动点按钮试（见文件末尾「手动试」说明）。
 
 name: 构建 Mac Catalyst 版
 
 on:
   push:
-    branches: [main]
+    # 只认标签，不认分支：推 main 不会触发。
     tags: ["v*"]
-  pull_request:
-    branches: [main]
+  # 保留手动触发：Actions 页面选这个 workflow → Run workflow。
+  # 手动跑不会发 Release（Release 那一步只在标签上跑），只出 Actions 里的 artifact。
   workflow_dispatch:
 
-# 同一个分支连续推送时，把上一轮还没跑完的取消掉，省时间。
+# 同一个标签连续推送时，把上一轮还没跑完的取消掉，省时间。
 concurrency:
   group: catalyst-${{ github.ref }}
   cancel-in-progress: true
 
-# 打标签那一步要创建 Release，所以需要写权限。
+# 最后那一步要创建 Release，所以需要写权限。
 permissions:
   contents: write
 
 jobs:
   build:
     # macos-26 是 GitHub 现在最新的 macOS runner 镜像（macos-latest 也指向它）。
-    # 选它是因为里面装的是 Xcode 26.x，跟工程的 Swift 6.2 语言模式对得上。
+    # 选它是因为里面装的是 Xcode 26.x，跟工程的 Swift 版本对得上。
     runs-on: macos-26
+
+    strategy:
+      # 一个变体编失败不要连累另外两个 —— 三个都编完再看结果，
+      # 比「第一个挂了就全停」更容易看出到底是哪个架构有问题。
+      fail-fast: false
+      matrix:
+        include:
+          - name: Universal
+            archs: "arm64 x86_64"
+            suffix: universal
+          - name: Arm64
+            archs: "arm64"
+            suffix: arm64
+          - name: x86_64
+            archs: "x86_64"
+            suffix: x86_64
 
     steps:
       - name: 取代码
@@ -60,19 +85,21 @@ jobs:
       - name: 缓存 Swift 包依赖
         # 工程里有 5 个 SPM 依赖，不缓存的话每跑一次都要重新下载。
         # key 里带上两个 Package.resolved 的哈希：依赖版本一变，缓存自动失效重建。
+        # restore-keys 是兜底：哈希对不上时，也先捞最近一次同前缀的缓存来用。
         uses: actions/cache@v4
         with:
           path: build/SourcePackages
           key: spm-${{ hashFiles('Package.resolved', 'MarkdownEditorHy4.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: spm-
 
-      - name: 编译
+      - name: 编译（${{ matrix.name }}）
         run: |
           xcodebuild \
             -project MarkdownEditorHy4.xcodeproj \
             -scheme MarkdownEditorHy4 \
             -configuration Release \
             -destination 'generic/platform=macOS,variant=Mac Catalyst' \
-            ARCHS="arm64 x86_64" \
+            ARCHS="${{ matrix.archs }}" \
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
@@ -81,12 +108,12 @@ jobs:
 
       - name: 自检产物
         # 两道检查，都是之前踩过坑的地方：
-        # 1. 架构是不是真的 arm64 + x86_64（只出一个架构的话 Intel Mac 装不上）；
+        # 1. 架构对不对 —— 单架构包就该只有那一个架构，多出别的说明 ARCHS 没生效；
         # 2. 沙盒 entitlement 有没有真的签进去 —— 之前 Release 少配了这一项，
         #    结果 App 一启动就去读真实的 ~/Documents，被系统弹权限框。
         run: |
           APP="build/Build/Products/Release-maccatalyst/MarkdownEditorHy4.app"
-          echo "=== 架构 ==="
+          echo "=== 本变体应该是：[ ${{ matrix.archs }} ] ==="
           lipo -archs "$APP/Contents/MacOS/MarkdownEditorHy4"
           echo "=== 签名权限 ==="
           codesign -d --entitlements - "$APP" 2>/dev/null | grep -E "\[Key\]|\[Bool\]"
@@ -96,22 +123,41 @@ jobs:
         # 别人解压出来直接就是能双击运行的 .app，不会缺文件。
         run: |
           cd build/Build/Products/Release-maccatalyst
-          ditto -c -k --sequesterRsrc --keepParent MarkdownEditorHy4.app MarkdownEditorHy4.zip
+          ditto -c -k --sequesterRsrc --keepParent MarkdownEditorHy4.app MarkdownEditorHy4-${{ matrix.suffix }}.zip
+          ls -lh MarkdownEditorHy4-${{ matrix.suffix }}.zip
 
       - name: 传成构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: MarkdownEditorHy4-Catalyst
-          path: build/Build/Products/Release-maccatalyst/MarkdownEditorHy4.zip
+          name: MarkdownEditorHy4-${{ matrix.suffix }}
+          path: build/Build/Products/Release-maccatalyst/MarkdownEditorHy4-${{ matrix.suffix }}.zip
           if-no-files-found: error
 
-      - name: 打标签时顺便发一个 Release
-        # 只在推 v1.0.0 这类标签时才跑；平时推 main 只留上面那个 artifact。
-        # 这样在仓库的 Releases 页面能直接下到 zip，不用翻 Actions 记录（artifact 会过期）。
-        if: startsWith(github.ref, 'refs/tags/')
+  release:
+    # 只在推 v1.0.0 这类标签时才跑；在 Actions 页面手动触发时不会跑。
+    # 三个包一起挂到同一个 Release 上，仓库 Releases 页面就能直接下。
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    # 这一步只是收文件 + 调 GitHub 接口，不编译，随便找个便宜的系统跑就行。
+    runs-on: ubuntu-latest
+    steps:
+      - name: 把三个架构的包都收下来
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          # 三个 artifact 合并平铺到 dist/ 一个目录里，方便下一行用通配符全传上去。
+          merge-multiple: true
+
+      - name: 发 Release
+        # 这个任务没有 checkout 代码（不需要），gh 就没法从当前目录猜出仓库是谁，
+        # 所以显式把仓库名告诉它，否则会报「not a git repository」。
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          ZIP=build/Build/Products/Release-maccatalyst/MarkdownEditorHy4.zip
-          gh release create "$GITHUB_REF_NAME" --generate-notes "$ZIP" \
-            || gh release upload "$GITHUB_REF_NAME" --clobber "$ZIP"
+          ls -lh dist
+          gh release create "$GITHUB_REF_NAME" --generate-notes dist/*.zip \
+            || gh release upload "$GITHUB_REF_NAME" --clobber dist/*.zip
+
+# 手动试：Actions 页面左侧选中本 workflow → 右上 Run workflow → 选分支或标签。
+# 在分支上手动跑只会出 artifact（不会发 Release）；想验证发 Release 就打个标签推上来。
