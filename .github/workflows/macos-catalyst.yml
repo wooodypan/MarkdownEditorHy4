@@ -1,0 +1,117 @@
+# 把 Mac Catalyst 版编译出来，压成一个可以直接分发的 zip。
+#
+# 为什么全程不需要证书和 Secrets：
+#   这里用的是 ad-hoc 签名（CODE_SIGN_IDENTITY="-"），也就是「本机临时签一下」，
+#   完全不涉及 Apple 开发者账号。代价只有一个 —— 别人下载后第一次打开会被 Gatekeeper
+#   拦一下，右键 →「打开」放行一次就行。
+#
+# 什么时候会跑：推 main、打 v* 标签、以及在 Actions 页面手动点按钮。
+
+name: 构建 Mac Catalyst 版
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一个分支连续推送时，把上一轮还没跑完的取消掉，省时间。
+concurrency:
+  group: catalyst-${{ github.ref }}
+  cancel-in-progress: true
+
+# 打标签那一步要创建 Release，所以需要写权限。
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # macos-26 是 GitHub 现在最新的 macOS runner 镜像（macos-latest 也指向它）。
+    # 选它是因为里面装的是 Xcode 26.x，跟工程的 Swift 6.2 语言模式对得上。
+    runs-on: macos-26
+
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 挑一个装了的最新的 Xcode
+        # GitHub 的 macOS 镜像是并排装好几个 Xcode 的（比如 macos-26 上就有 26.0.1～26.6），
+        # 默认那个不一定是最新的。这里按版本号排序取最大的，将来镜像刷新了也不用回来改。
+        #
+        # 三处讲究：
+        #   1. 只认带版本号的目录名（Xcode_26.6.app 这种），不认不带号的 Xcode.app；
+        #   2. 排掉名字里带 beta / rc 的预览版 —— 镜像公告里已经在预告 Xcode 27 的
+        #      公开预览版（现在还没装进去），哪天装上了它版本号最大、会被选中，
+        #      而预览版编出来的包可能只认更新的系统，不该拿来发版；
+        #   3. 万一一个带版本号的都没匹配到（镜像换了命名方式），退回用 Xcode.app 这个默认的。
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -viE 'beta|rc' | sort -V | tail -1)
+          if [ -z "$LATEST" ]; then
+            LATEST=/Applications/Xcode.app
+            echo "没找到带版本号的 Xcode，退回默认的：$LATEST"
+          else
+            echo "选中：$LATEST"
+          fi
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
+
+      - name: 缓存 Swift 包依赖
+        # 工程里有 5 个 SPM 依赖，不缓存的话每跑一次都要重新下载。
+        # key 里带上两个 Package.resolved 的哈希：依赖版本一变，缓存自动失效重建。
+        uses: actions/cache@v4
+        with:
+          path: build/SourcePackages
+          key: spm-${{ hashFiles('Package.resolved', 'MarkdownEditorHy4.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+
+      - name: 编译
+        run: |
+          xcodebuild \
+            -project MarkdownEditorHy4.xcodeproj \
+            -scheme MarkdownEditorHy4 \
+            -configuration Release \
+            -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            -derivedDataPath build \
+            build
+
+      - name: 自检产物
+        # 两道检查，都是之前踩过坑的地方：
+        # 1. 架构是不是真的 arm64 + x86_64（只出一个架构的话 Intel Mac 装不上）；
+        # 2. 沙盒 entitlement 有没有真的签进去 —— 之前 Release 少配了这一项，
+        #    结果 App 一启动就去读真实的 ~/Documents，被系统弹权限框。
+        run: |
+          APP="build/Build/Products/Release-maccatalyst/MarkdownEditorHy4.app"
+          echo "=== 架构 ==="
+          lipo -archs "$APP/Contents/MacOS/MarkdownEditorHy4"
+          echo "=== 签名权限 ==="
+          codesign -d --entitlements - "$APP" 2>/dev/null | grep -E "\[Key\]|\[Bool\]"
+
+      - name: 压成 zip
+        # 用 ditto 而不是 zip 命令：它能保住 App 包里的符号链接和扩展属性，
+        # 别人解压出来直接就是能双击运行的 .app，不会缺文件。
+        run: |
+          cd build/Build/Products/Release-maccatalyst
+          ditto -c -k --sequesterRsrc --keepParent MarkdownEditorHy4.app MarkdownEditorHy4.zip
+
+      - name: 传成构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: MarkdownEditorHy4-Catalyst
+          path: build/Build/Products/Release-maccatalyst/MarkdownEditorHy4.zip
+          if-no-files-found: error
+
+      - name: 打标签时顺便发一个 Release
+        # 只在推 v1.0.0 这类标签时才跑；平时推 main 只留上面那个 artifact。
+        # 这样在仓库的 Releases 页面能直接下到 zip，不用翻 Actions 记录（artifact 会过期）。
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ZIP=build/Build/Products/Release-maccatalyst/MarkdownEditorHy4.zip
+          gh release create "$GITHUB_REF_NAME" --generate-notes "$ZIP" \
+            || gh release upload "$GITHUB_REF_NAME" --clobber "$ZIP"
