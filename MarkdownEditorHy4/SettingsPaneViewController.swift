@@ -147,6 +147,8 @@ final class SettingsPaneViewController: UIViewController {
             settings.setParagraphIndentCharacters(stepped)
         case .bodyContentWidth:
             settings.setBodyContentWidth(stepped)
+        case .bulletDiameter:
+            settings.setBulletDiameter(stepped)
         case .outlineWidthRatio:
             settings.setOutlineWidthRatio(stepped)
         case .outlineWidthPoints:
@@ -458,7 +460,7 @@ extension SettingsPaneViewController: UITableViewDataSource, UITableViewDelegate
         case .imageNameMode:
             return makeImageNameModeCell()
         case .bodyFontSize, .lineHeightMultiple, .paragraphSpacing, .paragraphIndentCharacters,
-             .bodyContentWidth,
+             .bodyContentWidth, .bulletDiameter,
              .outlineWidthRatio, .outlineWidthPoints,
              .outlineHeightRatio, .outlineMaximumHeight, .outlineBackgroundOpacity,
              .tableMinColumnWidth, .tableMaxColumnWidth,

@@ -217,8 +217,23 @@ struct MarkdownHTMLRenderer: MarkupVisitor {
     }
 
     /// 源码里手写的行内 HTML（`<span style="...">` 之类）→ **转义成纯文本**。
+    ///
+    /// ### 唯一的例外是 `<u>` / `</u>`
+    /// 编辑器自己的 ⌘U 就是往源码里写这对标签（markdown 没有下划线语法，理由见 `toggleUnderlineMarkdown`），编辑区里它画成下划线，导出的 HTML 要是变成 `&lt;u&gt;` 那四个字，用户看到的就是「编辑器里有线、导出来一堆符号」。
+    ///
+    /// ### 白名单为什么只放这两个**固定的字符串**
+    /// 放行的是「整段文本正好等于 `<u>` 或 `</u>`」这一种情形，不是放行 `u` 这个标签名 —— 带属性的写法（`<u onclick=...>`）照样被转义掉。
+    /// 它俩既不带属性也不带事件，没有可下手的地方，而「按整串比较」这个判据简单到不可能写错，比解析标签再过滤属性稳当得多。
     mutating func visitInlineHTML(_ inlineHTML: InlineHTML) -> String {
-        Self.escape(inlineHTML.rawHTML)
+        let raw = inlineHTML.rawHTML
+        guard Self.isUnderlineTag(raw) else { return Self.escape(raw) }
+        return raw
+    }
+
+    /// 是不是白名单里那两个下划线标签（大小写不敏感、不带任何属性）
+    private static func isUnderlineTag(_ raw: String) -> Bool {
+        let lowered = raw.lowercased()
+        return lowered == "<u>" || lowered == "</u>"
     }
 
     /// 源码里手写的整块 HTML（`<div>`、`<table>` 这类）→ 转义后放进一个保留换行的盒子。

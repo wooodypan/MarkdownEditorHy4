@@ -68,6 +68,11 @@ struct MarkdownTheme {
     /// 当前那一个命中的底色（比其它命中更重，好让用户看清「现在在第几个」）
     var searchCurrentMatchBackground: UIColor = UIColor.systemOrange.withAlphaComponent(0.85)
 
+    /// `<u>…</u>` 那对标签之间的文字画什么线。默认单线（也就是最常见的那条细线）。
+    var underlineStyle: NSUnderlineStyle = .single
+    /// `<u>…</u>` 那条线的颜色。`nil` = 跟随文字颜色（见 `underlineAttributes()` 的说明）。
+    var underlineColor: UIColor? = nil
+
     // MARK: 尺寸
 
     /// 无序列表左侧圆点直径
@@ -264,7 +269,7 @@ struct MarkdownTheme {
             quoteTextColor: text,
             bulletColor: UIColor(red: 0.26, green: 0.72, blue: 0.51, alpha: 1.00),
             separatorColor: .separator,
-            bulletDiameter: 12,
+            bulletDiameter: 8,
             listIndent: 22,
             quoteIndent: 5,
             paragraphSpacing: 12,
@@ -385,6 +390,17 @@ struct MarkdownTheme {
     /// 链接正文
     var linkAttributes: [NSAttributedString.Key: Any] {
         [.foregroundColor: linkColor]
+    }
+
+    /// `<u>…</u>` 里那段文字的属性：只挂一条下划线，字体和颜色一概不动。
+    ///
+    /// ### 下划线颜色为什么写成可选（nil = 跟着文字颜色走）
+    /// 大多数时候下划线就该和它底下那行字同色 —— 正文是黑色就画黑线，链接是蓝色就画蓝线，这也是系统默认的行为。
+    /// 留成可选是为了「想让线比字淡一点」这种需求，没有这个需求时别填，省掉一处要跟着正文色同步的地方。
+    func underlineAttributes() -> [NSAttributedString.Key: Any] {
+        var attrs: [NSAttributedString.Key: Any] = [.underlineStyle: underlineStyle.rawValue]
+        if let color = underlineColor { attrs[.underlineColor] = color }
+        return attrs
     }
 
     /// 有序列表的序号（`1.` / `10.`）属性。

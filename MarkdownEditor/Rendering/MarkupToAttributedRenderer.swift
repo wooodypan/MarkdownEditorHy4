@@ -89,6 +89,11 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     private var listDepth = 0
     /// 当前所处的引用嵌套链（每进一层 BlockQuote 追加一项，见 QuoteChain 的注释）
     private var quoteChain: QuoteChain = QuoteChain(ids: [])
+    /// 当前是不是在 `<u>…</u>` 这一对标签**中间**（进开标签置真、碰上闭标签置假）。
+    ///
+    /// 只有这个开关为真时渲染出来的文字才挂下划线 —— 标签本身是 `visitInlineHTML` 用「标记样式」画的，不走这里，所以 `<u>` 和 `</u>` 这两个词自己不会有下划线。
+    /// ⚠️ 每渲染一个新块都要归零（见 `beginBlock`）：源码里只写了一个孤零零的 `<u>`、后面忘了闭，不能让下划线一路淌到下一个块去。
+    private var isInsideInlineUnderline = false
     /// 本次渲染的块在整篇文档里的起始偏移（给引用链 ID 加盐，见 render 的注释）
     private var blockOrigin: Int = 0
 
@@ -158,6 +163,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         self.isInsideListItem = false
         self.listDepth = 0
         self.quoteChain = QuoteChain(ids: [])
+        self.isInsideInlineUnderline = false
     }
 
     private func endBlock() {
@@ -168,6 +174,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         isInsideListItem = false
         listDepth = 0
         quoteChain = QuoteChain(ids: [])
+        isInsideInlineUnderline = false
         blockOrigin = 0
     }
 
@@ -393,11 +400,39 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         return count
     }
 
+    /// 内联 HTML（`<u>` / `</u>` / `<br>` 这类）。
+    ///
+    /// ### `<u>…</u>` 这一对为什么要单独认
+    /// markdown 自己没有下划线语法，编辑器按通行的写法用内联 HTML 的 `<u>` 来记（理由见 `toggleUnderlineMarkdown` 的注释）。
+    /// 标签本身照旧按「语法标记」弱化显示 —— 源码里确实写着这几个字符，藏起来就不叫「所见即所得」了；
+    /// 但**标签之间的文字**要挂上下划线，不然用户按了 ⌘U，屏幕上一点反应都没有，看着像快捷键失灵。
+    ///
+    /// ### 开关怎么起作用
+    /// 开标签把 `isInsideInlineUnderline` 打开、闭标签关掉；中间那段文字是在**之后的**兄弟节点里渲染的，它们统一从 `bodyAttributes` 取属性，那里看到开关就顺手加一条线。标签自己走的是 `markerAttributes`，不受影响。
+    ///
+    /// ### 只认干干净净的 `<u>` / `</u>`
+    /// 带属性的写法（`<u class="x">`）一律不认：它到底想表达什么得先解析属性才说得清，而这里是渲染，不该顺手干解析的活。
     func visitInlineHTML(_ inlineHTML: InlineHTML) -> RenderedFragment {
+        let raw = inlineHTML.rawHTML
+        if Self.isUnderlineOpenTag(raw) {
+            isInsideInlineUnderline = true
+        } else if Self.isUnderlineCloseTag(raw) {
+            isInsideInlineUnderline = false
+        }
         if let range = localRange(of: inlineHTML) {
             return .sourceSliced(sourceText(in: range), sourceStart: range.location, attributes: theme.markerAttributes)
         }
-        return .decoration(inlineHTML.rawHTML, attributes: theme.markerAttributes)
+        return .decoration(raw, attributes: theme.markerAttributes)
+    }
+
+    /// `raw` 是不是 `<u>` 这个开标签（大小写不敏感、不带任何属性）
+    private static func isUnderlineOpenTag(_ raw: String) -> Bool {
+        raw.lowercased() == "<u>"
+    }
+
+    /// `raw` 是不是 `</u>` 这个闭标签（大小写不敏感、不带任何属性）
+    private static func isUnderlineCloseTag(_ raw: String) -> Bool {
+        raw.lowercased() == "</u>"
     }
 
     // MARK: 行内容器节点
@@ -1320,8 +1355,13 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     private func popFont() { if fontStack.count > 1 { fontStack.removeLast() } }
 
     /// 当前正文属性（字体跟着嵌套层级走）
+    ///
+    /// 在 `<u>…</u>` 里面时额外挂一条下划线 —— 开关见 `visitInlineHTML` 的注释。
+    /// 用 `merge` 而不是直接塞字典字面量：下划线那两个键（线型 / 线的颜色）是**追加**的，字体和文字颜色一律不动，用户给正文配的样式该怎么显示还怎么显示。
     private var bodyAttributes: [NSAttributedString.Key: Any] {
-        [.font: currentFont, .foregroundColor: currentTextColor]
+        var attrs: [NSAttributedString.Key: Any] = [.font: currentFont, .foregroundColor: currentTextColor]
+        if isInsideInlineUnderline { attrs.merge(theme.underlineAttributes()) { _, new in new } }
+        return attrs
     }
 
     /// 把 AST 节点的源码范围换算成「块内偏移」

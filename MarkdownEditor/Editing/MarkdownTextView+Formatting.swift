@@ -82,8 +82,31 @@ extension MarkdownTextView {
             UIKeyCommand(title: "引用",
                          action: #selector(quoteCommand),
                          input: "q",
-                         modifierFlags: [.command, .alternate])
+                         modifierFlags: [.command, .alternate]),
+            moveLineKeyCommand(title: "上移当前行",
+                               action: #selector(moveLineUpCommand),
+                               input: UIKeyCommand.inputUpArrow),
+            moveLineKeyCommand(title: "下移当前行",
+                               action: #selector(moveLineDownCommand),
+                               input: UIKeyCommand.inputDownArrow)
         ]
+    }
+
+    /// 造一条 ⌥↑ / ⌥↓ 的快捷键。
+    ///
+    /// ### 为什么要专门开一个工厂方法（Mac 上按了没反应，就是栽在这儿）
+    /// macOS 的文本系统老早就把 ⌥↑ / ⌥↓ 定义成「跳到上一段 / 下一段」，它是**系统自带的文本编辑命令**，排在 `UIKeyCommand` 这条通道的前面 —— 事件先被它当「移动光标」处理掉，我们的命令永远轮不到，真机上的表现就是「按了毫无反应」（iPad 外接键盘没有这套系统绑定，那边一直是好的）。
+    ///
+    /// `wantsPriorityOverSystemBehavior = true` 正是为这种冲突准备的：它的头文件注释写的就是「快捷键和焦点 / 文本编辑这类系统命令撞车时，要不要优先执行我们的」，默认 `false`。
+    /// 打开之后 ⌥↑ / ⌥↓ 归我们，系统的段落跳转让位。
+    ///
+    /// ⚠️ 值默认是 `false`，而 `UIKeyCommand(input:...)` 这个构造器里没有这个参数，只能在造出来之后单独赋一次，所以两条命令都从这里出，别再手写 `UIKeyCommand(...)`。
+    private static func moveLineKeyCommand(title: String,
+                                           action: Selector,
+                                           input: String) -> UIKeyCommand {
+        let command = UIKeyCommand(title: title, action: action, input: input, modifierFlags: .alternate)
+        command.wantsPriorityOverSystemBehavior = true
+        return command
     }
 
     // MARK: 快捷键对应的动作
@@ -94,6 +117,8 @@ extension MarkdownTextView {
     @objc private func insertLinkCommand() { insertLinkMarkdown() }
     @objc private func codeBlockCommand() { toggleCodeBlockMarkdown() }
     @objc private func quoteCommand() { toggleQuoteMarkdown() }
+    @objc private func moveLineUpCommand() { moveCurrentLineUp() }
+    @objc private func moveLineDownCommand() { moveCurrentLineDown() }
 
     /// ⌘1~⌘6 / ⌘0 都走这里：数字写在 `UIKeyCommand.input` 里，这里读出来当标题级别。
     @objc private func headingCommand(_ sender: UIKeyCommand) {
@@ -294,6 +319,92 @@ extension MarkdownTextView {
             replaceSourceRange(lines.range, with: newText)
         }
         placeCaret(atSource: lines.range.location + (newText as NSString).length)
+    }
+
+    // MARK: - 整行搬家（⌥↑ / ⌥↓）
+
+    /// ⌥↑：把光标所在的这一行和**上面**那一行换个位置。
+    ///
+    /// - returns: 有没有真的搬成（已经在首行、只读…… 搬不动就是 false —— 按键那一层靠它决定要不要把这次按键还给系统，见 `performMoveLineIfMatched`）
+    @discardableResult
+    func moveCurrentLineUp() -> Bool { moveCurrentLine(by: -1) }
+
+    /// ⌥↓：把光标所在的这一行和**下面**那一行换个位置。
+    ///
+    /// - returns: 有没有真的搬成（同 `moveCurrentLineUp`）
+    @discardableResult
+    func moveCurrentLineDown() -> Bool { moveCurrentLine(by: 1) }
+
+    /// 把光标所在的这一行往上 / 往下挪一行。
+    ///
+    /// ### 为什么要自己写，而不是交给系统
+    /// 系统给 ⌥↑ / ⌥↓ 的默认含义是「跳到上一段 / 下一段」，动的是光标。这里要的是 VS Code 那一套「整行搬家」，动的是源码 —— 光标跟着这一行走、停在第几列也不变。
+    ///
+    /// ### 换行符为什么不能跟着内容一起搬
+    /// 每一行末尾那个换行属于**这一行自己占的槽位**，交换的是两行的内容，槽位不动。
+    /// 文档最后一行常常压根没有换行（`- 3` 后面就是文件结尾），末尾那个换行要是跟着内容一起搬，就会拼出 `- 3- 2` 这种两行粘在一起的结果。
+    ///
+    /// ### 为什么只搬光标那一行，而不是选中的好几行
+    /// 选中多行时挪哪几行、光标怎么放，各家的规矩都不一样；这一版先把「当前行」这一件事做对，多行搬家留到真有人提再说。
+    ///
+    /// - parameter delta: `-1` = 和上一行交换，`1` = 和下一行交换
+    /// - returns: 有没有真的搬成
+    @discardableResult
+    func moveCurrentLine(by delta: Int) -> Bool {
+        // 只读时直接说「没搬成」：`applyEdit` 那道总闸虽然也会拦，但那会儿已经晚了 —— 按键那一层要看的是「这次按键该不该还给系统」，搬不动就该还回去
+        guard markedTextRange == nil, delta == -1 || delta == 1, !isReadOnly else { return false }
+        let source = sourceText
+        guard source.length > 0 else { return false }
+
+        let caret = min(max(0, selectedSourceRange.location), source.length)
+        // 光标停在行尾那个换行上时，`lineRange` 会把下一行也算进来 —— 退一个字符，量到的才是「光标所在那一行」
+        let probe = min(caret, source.length - 1)
+        let lineRange = source.lineRange(for: NSRange(location: probe, length: 0))
+
+        let neighborRange: NSRange
+        if delta < 0 {
+            // 已经在第一行：上面没有行可换
+            guard lineRange.location > 0 else { return false }
+            neighborRange = source.lineRange(for: NSRange(location: lineRange.location - 1, length: 0))
+        } else {
+            // 已经在最后一行：下面没有行可换
+            let nextStart = NSMaxRange(lineRange)
+            guard nextStart < source.length else { return false }
+            neighborRange = source.lineRange(for: NSRange(location: nextStart, length: 0))
+        }
+
+        let (lineBody, lineBreak) = Self.splitTrailingNewline(source.substring(with: lineRange))
+        let (neighborBody, neighborBreak) = Self.splitTrailingNewline(source.substring(with: neighborRange))
+
+        // 两行中间那个换行：谁有就用谁的（两个都有时取本行的，反正都是换行符）
+        let between = lineBreak.isEmpty ? neighborBreak : lineBreak
+        // 收尾那个换行跟着「原来排在后面那一行」：上移时本行在后，下移时邻行在后
+        let trailing = delta < 0 ? lineBreak : neighborBreak
+        let swapped = delta < 0
+            ? lineBody + between + neighborBody + trailing
+            : neighborBody + between + lineBody + trailing
+
+        let union = NSRange(location: min(lineRange.location, neighborRange.location),
+                            length: lineRange.length + neighborRange.length)
+        // 光标跟着这一行走：行换了，第几列不变
+        let column = max(0, min(caret - lineRange.location, (lineBody as NSString).length))
+        let head = delta < 0
+            ? 0
+            : (neighborBody as NSString).length + (between as NSString).length
+
+        performUndoableModelEdit(actionName: delta < 0 ? "上移当前行" : "下移当前行") {
+            replaceSourceRange(union, with: swapped)
+        }
+        placeCaret(atSource: union.location + head + column)
+        return true
+    }
+
+    /// 把一行文本拆成「正文」和「末尾那个换行」；这一行没有换行时后半段是空串。
+    private static func splitTrailingNewline(_ line: String) -> (body: String, newline: String) {
+        if line.hasSuffix("\r\n") { return (String(line.dropLast(2)), "\r\n") }
+        if line.hasSuffix("\n") { return (String(line.dropLast()), "\n") }
+        if line.hasSuffix("\r") { return (String(line.dropLast()), "\r") }
+        return (line, "")
     }
 
     // MARK: - 行内标记（粗体 / 斜体 / 下划线共用一套）

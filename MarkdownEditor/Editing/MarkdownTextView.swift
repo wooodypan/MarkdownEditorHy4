@@ -790,6 +790,8 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         //
         // 为什么不能只靠 `needsCodeBlockRefresh = true`：装饰层平时只挂在 `layoutSubviews` 里刷新，而我们用的是 TextKit 2 的 `performEditingTransaction` 改文本 —— 它会让 TextKit 的排版失效，但**不保证**系统会给 textView 排一次布局。实测：删掉文档里最后一个任务项后，渲染文本里座位已经没了，屏幕上那个复选框按钮却一直留在原地，要等下一次滚动（那时才走 layout）才消失。
         setNeedsLayout()
+        // ⚠️ 量坐标之前必须先走这一步：刚改完文本，TextKit 只是记了「待会儿要重排」，此刻问它 fragment 在哪儿，答的是回车之前的旧坐标（详见 flushPendingTextKitLayout 的注释）
+        flushPendingTextKitLayout()
         // 只重算视野附近那一圈：一次编辑改动的是改动点附近，屏幕外的块位置没变、沿用缓存即可。
         // 以前这里走的是整篇重算（还带最多 30 轮 60ms 重试），长文档上每敲一个字都要把全文重排一遍。
         updateCodeBlockDecorationsIfNeeded(nearViewportOnly: true)
@@ -885,6 +887,25 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     override func toggleItalics(_ sender: Any?) { toggleItalicMarkdown() }
     /// 同 `toggleBoldface`：⌘U → `<u>下划线</u>`
     override func toggleUnderline(_ sender: Any?) { toggleUnderlineMarkdown() }
+
+    /// ⌥↑ / ⌥↓ 的**兜底**：`UIKeyCommand` 那条路万一没接住，这里再拦一道。
+    ///
+    /// ### 为什么还要兜一层
+    /// `markdownKeyCommands` 里那两条已经开了 `wantsPriorityOverSystemBehavior`（理由写在那儿）。
+    /// 但「系统把 ⌥↑ 当成文本编辑命令」这件事发生的位置比 `UIKeyCommand` 更早，不同 macOS 版本上这个开关的生效范围也不一样 —— 万一它没兜住，用户看到的就是「按了没反应」。
+    /// `pressesBegan` 是按键真正落到响应者手里的那一站，比它更早的只有 AppKit 那一层（Catalyst 里 `NSEvent` 编译期不可见，要拿只能运行时按名字找，代价大得多）。
+    ///
+    /// ### 为什么「搬成了才吞」
+    /// 搬不动（已经在首行 / 只读）时照样调 `super`，把按键还给系统 —— 用户按下去至少还有系统那套「跳到上一段」，而不是一个死键。
+    ///
+    /// ⚠️ 只会少走一次 `super`，不会重复搬：`UIKeyCommand` 命中时 UIKit 根本不会把这次按键往下派发，所以两条路是「谁先接住算谁的」，不会各搬一次。
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses {
+            guard let key = press.key, performMoveLineIfMatched(key) else { continue }
+            return
+        }
+        super.pressesBegan(presses, with: event)
+    }
 
     // MARK: - MarkdownAttachmentHost
 

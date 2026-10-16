@@ -236,6 +236,8 @@ final class MarkdownEditorSettings {
         static let paragraphIndentCharacters: Double = 0
         /// 行宽默认「不限」—— 就是量程上限那个值，正文照旧铺满窗口宽度
         static let bodyContentWidth = Limits.bodyContentWidth.upperBound
+        /// 无序列表圆点的直径默认 = 主题里那个值（改主题就跟着变，不在这里写第二份数字）
+        static let bulletDiameter = Double(theme.bulletDiameter)
 
         /// 颜色主题默认「默认」：一套都不覆盖，全部用 `MarkdownTheme` 自带的颜色
         static let colorTheme = MarkdownColorTheme.default
@@ -303,6 +305,11 @@ final class MarkdownEditorSettings {
         /// 正文栏宽上限的合法范围（点）。
         /// ⚠️ 拖到**上限值**表示「不限」—— 见 `MarkdownEditorSettings.bodyContentWidthLimit`
         static let bodyContentWidth: ClosedRange<Double> = 320...1200
+        /// 无序列表圆点直径的合法范围（点）。
+        ///
+        /// 4 以下在高分屏上就是一个模糊的小点，16 已经和正文一个字差不多大、压过文字本身了。
+        /// ⚠️ 量程的**上下界一起**不能和别的行撞车（表格最小列宽 32...200、段落首行缩进 0...4 都已占用）—— 设置页的测试是按「量程」在视图树里找滑块的，两行的上下界都一样就分不出谁是谁。
+        static let bulletDiameter: ClosedRange<Double> = 4...16
 
         /// 图片宽度百分比的合法范围。20% 再小就看不清了，90% 基本就是满栏
         static let imageWidthRatio: ClosedRange<Double> = 0.2...0.9
@@ -363,6 +370,7 @@ final class MarkdownEditorSettings {
         var paragraphSpacing: Double?
         var paragraphIndentCharacters: Double?
         var bodyContentWidth: Double?
+        var bulletDiameter: Double?
         /// 图片尺寸那一组
         var imageWidthMode: String?
         var imageWidthRatio: Double?
@@ -511,6 +519,11 @@ final class MarkdownEditorSettings {
     /// 拖到最右端（量程上限）表示「不限宽」，真正的上限要看
     /// `bodyContentWidthLimit`（它会返回 `nil`）。
     private(set) var bodyContentWidth: Double
+
+    /// 无序列表左侧那个圆点画多大（点）。默认取主题里的值。
+    ///
+    /// 圆点是渲染时按这个直径画出来的图片附件，只改配置不动画面 —— 改完要整篇重渲染（和字号那一组一样）。
+    private(set) var bulletDiameter: Double
 
     /// 正文栏宽上限（点）。**`nil` = 不限**，正文铺满整个编辑器宽度。
     ///
@@ -782,6 +795,15 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「无序列表圆点的直径」（点）
+    func setBulletDiameter(_ value: Double) {
+        let clamped = clamp(value, to: Limits.bulletDiameter)
+        guard clamped != bulletDiameter else { return }
+        bulletDiameter = clamped
+        save()
+        postChange()
+    }
+
     // MARK: 改图片尺寸
 
     /// 改「图片最大宽度按什么算」
@@ -884,6 +906,7 @@ final class MarkdownEditorSettings {
         self.paragraphSpacing = Default.paragraphSpacing
         self.paragraphIndentCharacters = Default.paragraphIndentCharacters
         self.bodyContentWidth = Default.bodyContentWidth
+        self.bulletDiameter = Default.bulletDiameter
         self.imageWidthMode = Default.imageWidthMode
         self.imageWidthRatio = Default.imageWidthRatio
         self.imageWidthPoints = Default.imageWidthPoints
@@ -957,6 +980,9 @@ final class MarkdownEditorSettings {
         if let value = payload.bodyContentWidth {
             bodyContentWidth = clamp(value, to: Limits.bodyContentWidth)
         }
+        if let value = payload.bulletDiameter {
+            bulletDiameter = clamp(value, to: Limits.bulletDiameter)
+        }
         // 和上面那个模式一样存字符串：认不出来就只让这一项退回默认
         if let raw = payload.imageWidthMode, let value = ImageWidthMode(rawValue: raw) {
             imageWidthMode = value
@@ -1012,6 +1038,7 @@ final class MarkdownEditorSettings {
                               paragraphSpacing: paragraphSpacing,
                               paragraphIndentCharacters: paragraphIndentCharacters,
                               bodyContentWidth: bodyContentWidth,
+                              bulletDiameter: bulletDiameter,
                               imageWidthMode: imageWidthMode.rawValue,
                               imageWidthRatio: imageWidthRatio,
                               imageWidthPoints: imageWidthPoints,
@@ -1132,6 +1159,7 @@ extension MarkdownEditorSettings {
         // 用户选的是「缩几个字」，这里乘上字号换成点 ——
         // 字号调大以后「缩进两格」还是两格，不会变成一格半
         theme.paragraphIndent = CGFloat(paragraphIndentCharacters) * theme.bodyFont.pointSize
+        theme.bulletDiameter = CGFloat(bulletDiameter)
     }
 
     /// 把「图片尺寸」这一组的配置写进编辑器主题。

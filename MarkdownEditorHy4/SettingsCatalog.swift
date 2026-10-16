@@ -65,7 +65,7 @@ enum SettingsSection: Int, CaseIterable {
     /// 从前所有分组摊在同一页里，一眼能看到有什么；拆成「目录 + 面板」之后，光看「大纲面板」四个字不知道里头能改什么，所以这里说一句。
     var summary: String {
         switch self {
-        case .typography: return "字号、行高、段落间距、首行缩进、行宽上限"
+        case .typography: return "字号、行高、段落间距、首行缩进、行宽上限、列表圆点大小"
         case .reading: return "行号、引用底色、记住上次读到哪儿"
         case .outlineSize: return "面板的宽度、高度、背景不透明度"
         case .tableLayout: return "表格列的最小 / 最大宽度"
@@ -82,7 +82,7 @@ enum SettingsSection: Int, CaseIterable {
             // 顺序就是界面上从上到下的顺序：
             // 先定字号，再定行与行、段与段、段首，最后是整行的宽度
             return [.bodyFontSize, .lineHeightMultiple, .paragraphSpacing,
-                    .paragraphIndentCharacters, .bodyContentWidth]
+                    .paragraphIndentCharacters, .bodyContentWidth, .bulletDiameter]
         case .reading:
             // 行号放最上面：它是「一眼能看出开关有没有生效」的那一项
             return [.showsLineNumbers, .remembersScrollPosition, .showsQuoteBackground]
@@ -127,6 +127,8 @@ enum SettingsRow: Int, CaseIterable {
     case paragraphIndentCharacters
     /// 正文栏宽上限（点），拖到最右端 = 不限
     case bodyContentWidth
+    /// 无序列表圆点的直径（点）
+    case bulletDiameter
     // 阅读与显示
     /// 正文左边要不要显示行号
     case showsLineNumbers
@@ -182,6 +184,8 @@ enum SettingsRow: Int, CaseIterable {
             return "段落首行缩进"
         case .bodyContentWidth:
             return "行宽上限"
+        case .bulletDiameter:
+            return "列表圆点大小"
         case .showsLineNumbers:
             return "显示行号"
         case .showsQuoteBackground:
@@ -262,6 +266,10 @@ enum SettingsRow: Int, CaseIterable {
             return "一行最多排多宽。窗口比它宽时正文居中、两边留白"
                 + "（一行拉太长，读到行尾容易串行）；拖到最右边显示「不限」，"
                 + "正文就铺满整个窗口。"
+        case .bulletDiameter:
+            return "无序列表每一行前面那个圆点画多大（点的直径）。"
+                + "调小是清秀的一点，调大更接近正文一个字的大小；有序列表的序号是文字，"
+                + "跟着字号走，不受这一项影响。"
         case .showsLineNumbers:
             return "打开：正文左边多出一条装订线，按**屏幕上看到的行**编号。"
                 + "写长文、对着文档讨论「第几行」时有用；关掉则一点地方都不占。"
@@ -361,6 +369,7 @@ enum SettingsRow: Int, CaseIterable {
         case .paragraphIndentCharacters:
             return MarkdownEditorSettings.Limits.paragraphIndentCharacters
         case .bodyContentWidth: return MarkdownEditorSettings.Limits.bodyContentWidth
+        case .bulletDiameter: return MarkdownEditorSettings.Limits.bulletDiameter
         case .outlineWidthRatio: return MarkdownEditorSettings.Limits.outlineWidthRatio
         case .outlineWidthPoints: return MarkdownEditorSettings.Limits.outlineWidthPoints
         case .outlineHeightRatio: return MarkdownEditorSettings.Limits.outlineHeightRatio
@@ -384,6 +393,8 @@ enum SettingsRow: Int, CaseIterable {
         case .paragraphSpacing: return 2
         case .paragraphIndentCharacters: return 0.5
         case .bodyContentWidth: return 20
+        // 圆点直径一档 1 点：量程只有 4~16，一档 2 点就只剩 6 个位置可选
+        case .bulletDiameter: return 1
         // 一档 1%：宽度的量程只有 15%~50%，跟 5% 一档比，1% 一档才够用
         case .outlineWidthRatio: return 0.01
         case .outlineWidthPoints: return 10
@@ -421,6 +432,7 @@ enum SettingsRow: Int, CaseIterable {
         case .paragraphSpacing: return settings.paragraphSpacing
         case .paragraphIndentCharacters: return settings.paragraphIndentCharacters
         case .bodyContentWidth: return settings.bodyContentWidth
+        case .bulletDiameter: return settings.bulletDiameter
         case .outlineWidthRatio: return settings.outlineWidthRatio
         case .outlineWidthPoints: return settings.outlineWidthPoints
         case .outlineHeightRatio: return settings.outlineHeightRatio
@@ -460,6 +472,8 @@ enum SettingsRow: Int, CaseIterable {
         case .outlineWidthRatio, .outlineHeightRatio, .outlineBackgroundOpacity:
             return "\(Int((value * 100).rounded()))%"
         case .outlineWidthPoints, .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
+            return "\(Int(value.rounded())) pt"
+        case .bulletDiameter:
             return "\(Int(value.rounded())) pt"
         case .imageWidthRatio:
             return "\(Int((value * 100).rounded()))%"

@@ -151,6 +151,22 @@ extension MarkdownTextView {
             && abs(lhs.width - rhs.width) <= 0.5 && abs(lhs.height - rhs.height) <= 0.5
     }
 
+    /// 逼 TextKit 当场把「视野这一片」重新排完 —— 改完文本、量装饰坐标之前必须先走它。
+    ///
+    /// ### 守的是哪个现象
+    /// 在代码块上面按一下回车，整块内容往下挪了一行，可灰底先赖在原地不动，过了几百毫秒才「啪」地跳下去；引用竖条、复选框一样。
+    ///
+    /// ### 为什么会赖在原地
+    /// TextKit 2 改完文本只是先记一笔「这块待会儿要重排」，并**不会**立刻真的重排。
+    /// 这时候去问 fragment 的矩形，哪怕传了 `.ensuresLayout`，拿回来的还是改之前的旧坐标，装饰就照旧坐标贴在老地方，一直要等 0.3 秒后那次整篇重算（`scheduleDecorationSettle`）才归位。
+    ///
+    /// ### 为什么挑 `layoutViewport()`（三个候选都实测过，坐标当场就能对上）
+    /// `invalidateLayout(for:)` 只作废不重排，量出来照样是旧的，等于白做；`layoutIfNeeded()` 能生效，但它会把整篇重算那一趟也带起来，而打字这条路径刻意只要视野附近。
+    /// `layoutViewport()` 正是 TextKit 自己在布局那一轮里干的事，只排视口这一片，代价最小。
+    func flushPendingTextKitLayout() {
+        textLayoutManager?.textViewportLayoutController.layoutViewport()
+    }
+
     /// 每次布局时决定：是「重算矩形」还是「只平移」。
     /// 只有文本内容或宽度变了才需要重算，纯滚动走平移分支。
     /// （代码块背景和引用竖条共用同一套判断，两者都靠 fragment 矩形吃饭）
@@ -509,6 +525,8 @@ extension MarkdownTextView {
         var missingLayout = false
         // key: 引用层 ID → (嵌套深度, 已合并的文档坐标矩形)
         var barsByID: [Int: (level: Int, rect: CGRect)] = [:]
+        // 这一轮因为「整段都在视野外」而跳过的层 ID：最后一步要靠它把上一轮的矩形补回来（详见第 4 步）
+        var skippedIDs: Set<Int> = []
 
         for (range, chain) in marked {
             // 这一段文字参与的所有引用层都在视野外 → 整段沿用上一轮结果
@@ -516,6 +534,7 @@ extension MarkdownTextView {
                 guard let cached = quoteBarFrames.first(where: { $0.id == id }) else { return false }
                 return !cached.frame.intersects(band)
             }) {
+                skippedIDs.formUnion(chain.ids)
                 continue
             }
 
@@ -566,10 +585,19 @@ extension MarkdownTextView {
         // 4) x 按嵌套深度错开，输出按 (level, id) 排序：
         //    前后两轮的稳定性比对、以及测试断言都依赖顺序稳定。
         //    ⚠️ 只重算视野附近时（`band != nil`）要先拿上一轮结果打底：
-        //    视野外的层这一轮压根没算，不从缓存补回来的话它们会从界面上直接消失
+        //    视野外的层这一轮压根没算，不从缓存补回来的话它们会从界面上直接消失。
+        //
+        //    ### 只补 `skippedIDs`，绝不能「上一轮有、这一轮没有就补」（踩过这个坑）
+        //    引用层的 ID 是「该层 BlockQuote 在源码里的起始位置」。
+        //    在引用块上方敲一个回车，它后面所有块的起始位置都后移，重渲染之后同一个引用块拿到的是**新 ID**。
+        //    于是这一轮算出来的是新 ID（新位置），而上一轮那条旧 ID 的记录变成「这一轮没有」。
+        //    一补就补出一个赖在原地的旧矩形，屏幕上同时出现两块引用底色：新的跟手，旧的要等 0.3 秒后才消失。
+        //    用户看到的就是「引用块背景残留在原位置几百毫秒后才更新」。
+        //    （旧的那块为什么能拖到 0.3 秒后：那次是整篇重算，`band == nil`，压根不走这个补齐分支。）
+        //    改成只补「明确因视野外而跳过」的之后，旧 ID 压根不在这一轮的 marked 里，进不了 skippedIDs，残留当场就没了。
         var merged = barsByID
         if band != nil {
-            for bar in quoteBarFrames where merged[bar.id] == nil {
+            for bar in quoteBarFrames where merged[bar.id] == nil && skippedIDs.contains(bar.id) {
                 merged[bar.id] = (level: bar.level,
                                   rect: CGRect(x: bar.frame.minX,
                                                y: bar.frame.minY,
