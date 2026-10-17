@@ -67,7 +67,11 @@ enum SettingsSection: Int, CaseIterable {
         switch self {
         case .typography: return "字号、行高、段落间距、首行缩进、行宽上限、列表圆点大小"
         case .reading: return "行号、引用底色、记住上次读到哪儿"
-        case .outlineSize: return "面板的宽度、高度、背景不透明度"
+        case .outlineSize:
+            // iPhone 上「正文让位」那一行不存在，摘要里也就别提，否则点进去发现少一项
+            return SettingsRow.outlineReservesSpace.isAvailableOnCurrentDevice
+                ? "展开时正文是否让出右侧空间，面板的宽度、高度、背景不透明度"
+                : "面板的宽度、高度、背景不透明度"
         case .tableLayout: return "表格列的最小 / 最大宽度"
         case .imageSize: return "图片画多大：宽度怎么算、最大高度"
         case .imageInsertion: return "粘贴进来的图片存到哪儿、文件叫什么名字"
@@ -87,11 +91,17 @@ enum SettingsSection: Int, CaseIterable {
             // 行号放最上面：它是「一眼能看出开关有没有生效」的那一项
             return [.showsLineNumbers, .remembersScrollPosition, .showsQuoteBackground]
         case .outlineSize:
-            // 顺序就是界面上从上到下的顺序：宽度（怎么算 + 两个数值）、再高度（同样三行）、最后是背景多透。
+            // 顺序就是界面上从上到下的顺序：先是一个开关（要不要给正文让地方），
+            // 再宽度（怎么算 + 两个数值）、高度（同样三行）、最后是背景多透。
             // 两种模式的说明都要跟模式联动，所以每一组里「怎么算」放最上面
-            return [.outlineWidthMode, .outlineWidthRatio, .outlineWidthPoints,
-                    .outlineHeightMode, .outlineHeightRatio, .outlineMaximumHeight,
-                    .outlineBackgroundOpacity]
+            //
+            // ⚠️ iPhone 上没有「正文让位」这回事（屏幕太窄，让完只剩一条缝），
+            // 所以那个开关在那边整行都不出现 —— 留一个拨了没反应的开关只会让人以为自己弄坏了
+            let items: [SettingsRow] = [.outlineReservesSpace,
+                                        .outlineWidthMode, .outlineWidthRatio, .outlineWidthPoints,
+                                        .outlineHeightMode, .outlineHeightRatio, .outlineMaximumHeight,
+                                        .outlineBackgroundOpacity]
+            return items.filter(\.isAvailableOnCurrentDevice)
         case .tableLayout:
             return [.tableMinColumnWidth, .tableMaxColumnWidth]
         case .imageSize:
@@ -135,6 +145,9 @@ enum SettingsRow: Int, CaseIterable {
     case remembersScrollPosition
     /// 引用块的内容要不要铺一层淡背景（竖条颜色的 10% 透明度）
     case showsQuoteBackground
+    // 大纲面板：留白
+    /// 大纲展开时，正文要不要往左让出它那块宽度
+    case outlineReservesSpace
     // 大纲面板：宽度
     /// 面板宽度按什么算（百分比 / 固定点数）
     case outlineWidthMode
@@ -171,6 +184,24 @@ enum SettingsRow: Int, CaseIterable {
     /// 粘贴网页复制来的富文本时，要不要先转成 markdown 源码
     case pastesHTMLAsMarkdown
 
+    /// 这一行在**当前设备**上有没有意义（没有就整行不出现）。
+    ///
+    /// 现在只有一项不总是有意义：「大纲展开时正文右侧留白」—— iPhone 屏幕太窄，
+    /// 让完那一块正文只剩一条缝，那边固定不让，开关也就不必显示。
+    /// 判断本身收在 `MarkdownEditorSettings.supportsReservingSpaceForOutline`，
+    /// 免得设置页和编辑器各判一套、哪天判岔了变成「开关在、拨了不动」。
+    ///
+    /// ⚠️ 只在 `#if targetEnvironment(macCatalyst)` 下才有的行（比如「指定文件夹」）
+    /// 不用进这里，那几个已经在 `rows` 里按编译条件分好了
+    var isAvailableOnCurrentDevice: Bool {
+        switch self {
+        case .outlineReservesSpace:
+            return MarkdownEditorSettings.supportsReservingSpaceForOutline
+        default:
+            return true
+        }
+    }
+
     /// 主标题
     var title: String {
         switch self {
@@ -192,6 +223,8 @@ enum SettingsRow: Int, CaseIterable {
             return "引用内容加底色"
         case .remembersScrollPosition:
             return "记住上次阅读位置"
+        case .outlineReservesSpace:
+            return "大纲展开时正文右侧留白"
         case .outlineWidthMode:
             return "宽度怎么算"
         case .outlineWidthRatio:
@@ -283,6 +316,11 @@ enum SettingsRow: Int, CaseIterable {
                 + "从竖条一直铺到行尾，引用看着像一整块色条；关闭：只有一条竖条，和正文一样干净。"
                 + "ⓘ 底色和竖条同色，跟着主题里的「引用竖条」颜色走；"
                 + "它铺在文字下面，框选引用文字时系统的蓝色高亮照样盖得住。"
+        case .outlineReservesSpace:
+            return "打开：大纲展开时，正文右边让出和面板一样宽的一块，字不会被面板卡片压住 ——"
+                + "代价是每行能排的字变少。"
+                + "关闭：正文始终铺满整个窗口，大纲摊开时会盖住右边那部分字。"
+                + "大纲收起成右上角那个小方块时不受影响，正文照旧用满宽度。"
         case .outlineWidthMode:
             return "「按百分比」：宽度跟着窗口走，窗口拉宽面板也变宽；"
                 + "「固定宽度」：永远是你指定的点数，跟窗口无关。"
@@ -420,6 +458,7 @@ enum SettingsRow: Int, CaseIterable {
         case .remembersScrollPosition: return settings.remembersScrollPosition
         case .pastesHTMLAsMarkdown: return settings.pastesHTMLAsMarkdown
         case .showsQuoteBackground: return settings.showsQuoteBackground
+        case .outlineReservesSpace: return settings.reservesSpaceForOutline
         default: return false
         }
     }

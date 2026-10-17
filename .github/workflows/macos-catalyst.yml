@@ -13,7 +13,7 @@
 #   完全不涉及 Apple 开发者账号。代价只有一个 —— 别人下载后第一次打开会被 Gatekeeper
 #   拦一下，右键 →「打开」放行一次就行。
 #
-# 什么时候会跑：只在推 v* 标签时跑（推 main 不跑，省得白等几分钟）。
+# 什么时候会跑：只在推标签时跑（推 main 不跑，省得白等几分钟）。
 #              另外可以在 Actions 页面手动点按钮试（见文件末尾「手动试」说明）。
 
 name: 构建 Mac Catalyst 版
@@ -21,7 +21,9 @@ name: 构建 Mac Catalyst 版
 on:
   push:
     # 只认标签，不认分支：推 main 不会触发。
-    tags: ["v*"]
+    # 用 * 表示「标签名叫什么都算」，这样 v1.0.0 和 0.0.1 都能触发。
+    # （之前这里写的是 v*，只认 v 开头的标签，叫 0.0.1 的标签就一声不响地被忽略了。）
+    tags: ["*"]
   # 保留手动触发：Actions 页面选这个 workflow → Run workflow。
   # 手动跑不会发 Release（Release 那一步只在标签上跑），只出 Actions 里的 artifact。
   workflow_dispatch:

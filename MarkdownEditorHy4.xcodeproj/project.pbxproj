@@ -10,6 +10,8 @@
 		3B009116307E7764003589CF /* QuickLook.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3B009115307E7764003589CF /* QuickLook.framework */; };
 		3B009122307E7764003589CF /* MarkdownQuicklookHy4.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3B009113307E7764003589CF /* MarkdownQuicklookHy4.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3B1B7821305990CB0021A784 /* MultiTabController in Frameworks */ = {isa = PBXBuildFile; productRef = 3B1B7820305990CB0021A784 /* MultiTabController */; };
+		3B2D233230831226001454CC /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000006 /* Markdown */; };
+		3B2D24E5308326B4001454CC /* MermaidRender in Frameworks */ = {isa = PBXBuildFile; productRef = 3B2D24E4308326B4001454CC /* MermaidRender */; };
 		3B55D4993065740E001100BF /* SwiftMath in Frameworks */ = {isa = PBXBuildFile; productRef = 3B55D4983065740E001100BF /* SwiftMath */; };
 		3BBE6CD330755734001081E7 /* SwiftSoup in Frameworks */ = {isa = PBXBuildFile; productRef = 3BBE6CD230755734001081E7 /* SwiftSoup */; };
 		AA0000000000000000000004 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000003 /* Markdown */; };
@@ -69,22 +71,22 @@
 			);
 			target = 3B009112307E7764003589CF /* MarkdownQuicklookHy4 */;
 		};
-		AA0000000000000000000008 /* Exceptions for "MarkdownEditor" folder in "MarkdownQuicklookHy4" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Debugging/RulerOverlayView.swift,
-				Debugging/TextKitDebugOverlay.swift,
-				Debugging/TextKitDebugOverlay_Usage.swift,
-				Debugging/ViewBorders.swift,
-			);
-			target = 3B009112307E7764003589CF /* MarkdownQuicklookHy4 */;
-		};
 		3B41EA72304497FD00F4E5EA /* Exceptions for "MarkdownEditorHy4" folder in "MarkdownEditorHy4" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
 			target = 3B41EA49304497FB00F4E5EA /* MarkdownEditorHy4 */;
+		};
+		AA0000000000000000000008 /* Exceptions for "MarkdownEditor" folder in "MarkdownQuicklookHy4" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Debugging/RulerOverlayView.swift,
+				Debugging/TextKitDebugOverlay_Usage.swift,
+				Debugging/TextKitDebugOverlay.swift,
+				Debugging/ViewBorders.swift,
+			);
+			target = 3B009112307E7764003589CF /* MarkdownQuicklookHy4 */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -130,8 +132,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3B2D233230831226001454CC /* Markdown in Frameworks */,
 				3B009116307E7764003589CF /* QuickLook.framework in Frameworks */,
-				AA0000000000000000000007 /* Markdown in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -142,6 +144,7 @@
 				3B1B7821305990CB0021A784 /* MultiTabController in Frameworks */,
 				3BBE6CD330755734001081E7 /* SwiftSoup in Frameworks */,
 				AA0000000000000000000004 /* Markdown in Frameworks */,
+				3B2D24E5308326B4001454CC /* MermaidRender in Frameworks */,
 				3B55D4993065740E001100BF /* SwiftMath in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -246,6 +249,7 @@
 				3B1B7820305990CB0021A784 /* MultiTabController */,
 				3B55D4983065740E001100BF /* SwiftMath */,
 				3BBE6CD230755734001081E7 /* SwiftSoup */,
+				3B2D24E4308326B4001454CC /* MermaidRender */,
 			);
 			productName = MarkdownEditorHy4;
 			productReference = 3B41EA4A304497FB00F4E5EA /* MarkdownEditorHy4.app */;
@@ -336,6 +340,7 @@
 				3B1B781F305990CB0021A784 /* XCRemoteSwiftPackageReference "iOSDemoHub" */,
 				3B55D4973065740E001100BF /* XCRemoteSwiftPackageReference "SwiftMath" */,
 				3BBE6CD130755734001081E7 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
+				3B2D24E3308326B4001454CC /* XCRemoteSwiftPackageReference "MermaidKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3B41EA4B304497FB00F4E5EA /* Products */;
@@ -453,10 +458,10 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
@@ -486,10 +491,10 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
@@ -841,8 +846,18 @@
 			repositoryURL = "https://github.com/wooodypan/iOSDemoHub.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 1.0.1;
+				minimumVersion = 1.0.2;
 			};
+		};
+		3B2D24E3308326B4001454CC /* XCRemoteSwiftPackageReference "MermaidKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Panway/MermaidKit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.4.0;
+			};
+			traits = (
+			);
 		};
 		3B55D4973065740E001100BF /* XCRemoteSwiftPackageReference "SwiftMath" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -875,6 +890,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 3B1B781F305990CB0021A784 /* XCRemoteSwiftPackageReference "iOSDemoHub" */;
 			productName = MultiTabController;
+		};
+		3B2D24E4308326B4001454CC /* MermaidRender */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3B2D24E3308326B4001454CC /* XCRemoteSwiftPackageReference "MermaidKit" */;
+			productName = MermaidRender;
 		};
 		3B55D4983065740E001100BF /* SwiftMath */ = {
 			isa = XCSwiftPackageProductDependency;

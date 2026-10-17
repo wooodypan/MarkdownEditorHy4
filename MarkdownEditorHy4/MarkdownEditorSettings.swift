@@ -9,6 +9,8 @@
 //  **从渲染层主题里读**的（正文字号、行高、段间距），而主题里的字体是 `UIFont`。
 
 import UIKit
+// 「大纲留白」那一项要按设备判断生不生效（见 `MarkdownEditorSettings.supportsReservingSpaceForOutline`）
+import MultiTabController
 
 /// 大纲面板的**宽度**按什么算。
 ///
@@ -177,6 +179,21 @@ final class MarkdownEditorSettings {
     /// 监听方可以据此忽略掉不认识的实例（测试之间互不干扰）。
     static let didChangeNotification = Notification.Name("MarkdownEditorSettingsDidChange")
 
+    /// 「大纲展开时正文右侧留白」在**当前设备**上生不生效。
+    /// 设置页也拿它决定要不要显示那个开关（见 `SettingsSection.rows`）。
+    ///
+    /// ### 为什么 iPhone 上直接不给
+    /// iPhone 竖屏的可用宽度就三百来点，大纲卡片本身要占掉三成到一半；
+    /// 正文再让出这么一块，每行就剩两三个字 —— 与其给一个「拨了也读不舒服」的开关，
+    /// 不如固定不让，设置里也不显示（免得拨完发现没反应）。
+    ///
+    /// ### 怎么判断设备
+    /// 用库里的 `DeviceHelper.currentLayout`，**别自己写** `userInterfaceIdiom == .phone` ——
+    /// Mac Catalyst 的 idiom 也是 `.phone`，自己判会把 Mac 一起判成 iPhone。
+    static var supportsReservingSpaceForOutline: Bool {
+        DeviceHelper.currentLayout != .iPhone
+    }
+
     // MARK: 默认值
 
     private enum Default {
@@ -199,6 +216,12 @@ final class MarkdownEditorSettings {
         /// 「只读模式」默认**关闭**：默认是能正常编辑的。
         /// 打开之后能选能复制、也能移动光标，但改不动一个字（理由见 `MarkdownTextView.isReadOnly`）
         static let isReadOnly = false
+
+        /// 「大纲展开时正文右侧留白」默认**打开**：
+        /// 展开的大纲是一张浮在正文上面的卡片，正文让出它那块宽度，字才不会被卡片压住。
+        /// ⚠️ 收起成小方块时不让（理由见 `MarkdownDocumentViewController.outlineTrailingInset`）
+        /// ⚠️ iPhone 上这个默认值等于没写：那边固定不让（见 `supportsReservingSpaceForOutline`）
+        static let reservesSpaceForOutline = true
 
         /// 大纲面板的默认外观 —— 「宽度默认多少点」这一项**从它读**，免得同一个数字在配置层和组件层各写一份（改了一边忘了另一边）。
         /// 只构造一次，别在下面反复访问
@@ -350,6 +373,8 @@ final class MarkdownEditorSettings {
         var showsQuoteBackground: Bool?
         /// 只读模式：能选能复制但不能改
         var isReadOnly: Bool?
+        /// 大纲展开时，正文要不要往左让出它那块宽度
+        var reservesSpaceForOutline: Bool?
         /// 大纲宽度那一组。模式同样存字符串，理由见下面 `outlineHeightMode` 的注释
         var outlineWidthMode: String?
         var outlineWidthRatio: Double?
@@ -435,6 +460,25 @@ final class MarkdownEditorSettings {
     /// 入口在文档页右上角「⋯」菜单里那一条带勾的「只读模式」（`MarkdownDocumentViewController.readOnlyAction`），
     /// 这里是它**存盘**的地方 —— 关掉 App 再回来还是上次的形态。
     private(set) var isReadOnly: Bool
+
+    /// 大纲面板**展开**时，正文要不要往左让出它那一块宽度。默认 `true`（开）。
+    ///
+    /// ### 为什么要有这一项
+    /// 大纲是一张浮在正文上面的卡片（`MarkdownOutlineView`），展开后能盖住右边三成甚至一半的字。
+    /// 打开这一项，正文的右边距就跟着面板宽度走 —— 字不再被卡片压住，代价是每行能排的字变少。
+    /// 觉得「宁可让卡片盖着也要满宽读」的人可以关掉。
+    ///
+    /// ### 收起时不让
+    /// 收起态只是右上角一个小方块（46×36），只压住一个角，为它把整列正文挤窄不值当。
+    ///
+    /// ### iPhone 上不生效
+    /// 屏幕太窄，让完只剩一条缝。那边这个开关连设置页都不显示
+    /// （判断收在 `supportsReservingSpaceForOutline`，别在各处各写一遍）
+    ///
+    /// ### 只改布局，不改文字
+    /// 它动的是编辑器右边那条约束的 constant（见 `MarkdownDocumentViewController.updateEditorTrailingInset`），
+    /// 不碰任何字体 / 段落样式，所以不会重排富文本 —— 但宽度一变正文照样要重新折行，步骤在编辑器内部。
+    private(set) var reservesSpaceForOutline: Bool
 
     /// 大纲面板的宽度按什么算，默认「固定宽度」。
     /// 两种模式的详细解释见 `OutlineWidthMode`
@@ -669,6 +713,18 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「大纲展开时正文右侧留白」。
+    ///
+    /// 拨完当场生效：内容页收到通知后重算一次编辑器右边距（见 `applyOutlineAppearance`），
+    /// 正文立刻让开 / 贴回右边。走的是和别的开关同一条刷新路径 —— 顺带重排一遍文字，
+    /// 但宽度变了本来就得重新折行，这一次不算白花。
+    func setReservesSpaceForOutline(_ value: Bool) {
+        guard value != reservesSpaceForOutline else { return }
+        reservesSpaceForOutline = value
+        save()
+        postChange()
+    }
+
     /// 改「宽度按什么算」
     func setOutlineWidthMode(_ value: OutlineWidthMode) {
         guard value != outlineWidthMode else { return }
@@ -892,6 +948,7 @@ final class MarkdownEditorSettings {
         self.showsLineNumbers = Default.showsLineNumbers
         self.showsQuoteBackground = Default.showsQuoteBackground
         self.isReadOnly = Default.isReadOnly
+        self.reservesSpaceForOutline = Default.reservesSpaceForOutline
         self.outlineWidthMode = Default.outlineWidthMode
         self.outlineWidthRatio = Default.outlineWidthRatio
         self.outlineWidthPoints = Default.outlineWidthPoints
@@ -935,6 +992,7 @@ final class MarkdownEditorSettings {
         if let value = payload.showsLineNumbers { showsLineNumbers = value }
         if let value = payload.showsQuoteBackground { showsQuoteBackground = value }
         if let value = payload.isReadOnly { isReadOnly = value }
+        if let value = payload.reservesSpaceForOutline { reservesSpaceForOutline = value }
         // 宽度那一组：模式和高度一样存字符串，认不出来就只让这一项退回默认
         if let raw = payload.outlineWidthMode, let value = OutlineWidthMode(rawValue: raw) {
             outlineWidthMode = value
@@ -1024,6 +1082,7 @@ final class MarkdownEditorSettings {
                               showsLineNumbers: showsLineNumbers,
                               showsQuoteBackground: showsQuoteBackground,
                               isReadOnly: isReadOnly,
+                              reservesSpaceForOutline: reservesSpaceForOutline,
                               outlineWidthMode: outlineWidthMode.rawValue,
                               outlineWidthRatio: outlineWidthRatio,
                               outlineWidthPoints: outlineWidthPoints,

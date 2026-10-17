@@ -82,6 +82,11 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         onStatus: { [weak self] in self?.flashStatus($0) }
     )
     private var bottomConstraint: NSLayoutConstraint?
+    /// 正文右边那条约束。
+    ///
+    /// 单独留一根引用，是因为它的 constant 要跟着大纲面板变：面板展开时正文往左让出
+    /// 和面板一样宽的一块，字才不会被浮动的大纲卡片压住（见 `outlineTrailingInset`）
+    private var editorTrailingConstraint: NSLayoutConstraint?
 
     /// 当前这一页对应磁盘上的哪个文件 —— 也就是 ⌘S 要写回哪里。
     ///
@@ -163,6 +168,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         floatingEditButton.clampCenterIntoSuperview()
+        // 窗口尺寸变了 → 大纲面板的宽度也跟着变（它是按父视图宽度算的），
+        // 正文要让出的那一块得重新算一次。值没变时这里什么都不做
+        updateEditorTrailingInset()
     }
 
     // MARK: 界面搭建
@@ -176,6 +184,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 没有也照样能用 —— 编辑器组件本身不认识任何公式引擎，
         // 没注入的时候公式就按源码原文显示（这是给将来开源出去留的默认降级）
         editor.renderer.mathRenderer = SwiftMathRenderer.shared
+        // 装上图表渲染器：有这一行，```mermaid 围栏块才会被画成一张图。
+        // 没有也照样能用 —— 块会按普通代码块显示（灰底 + 源码原文），和公式那条降级是同一个设计：
+        // 编辑器组件只认 `MarkdownMermaidRenderer` 协议，不认识 MermaidKit 是谁
+        editor.renderer.mermaidRenderer = MermaidKitRenderer.shared
         // 装上「剪贴板富文本 → markdown」的转换器：有这一行，从网页复制内容再粘贴，粘进来的才是 markdown 源码（标题、列表、表格…），而不是一堆 HTML 标签。
         // 转不转由设置页那个开关说了算 —— 关掉时转换器返回 nil，粘贴就退回原来的纯文本。
         // 组件本身不认识 App 的转换器，只留了 `richTextConverter` 这么一个口子。
@@ -198,12 +210,15 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         view.addSubview(editor)
 
         bottomConstraint = editor.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        // 右边这条要先拿到手：它的 constant 会随大纲展开 / 收起改（见 updateEditorTrailingInset）
+        let trailing = editor.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        editorTrailingConstraint = trailing
         NSLayoutConstraint.activate([
             // 上边直接钉在菜单栏下面 —— 跟查找条无关，查找条出现 / 消失正文都不会动
             // （iPhone 上按钮在导航栏里，`contentTopAnchor` 给的是安全区上边）
             editor.topAnchor.constraint(equalTo: contentTopAnchor, constant: 2),
             editor.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            editor.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            trailing,
             bottomConstraint!
         ])
 
@@ -410,6 +425,12 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         outlineView.delegate = outlineCoordinator
         // 编辑器只拿到一个「事件出口」，它并不知道出口后面是协调者还是别的什么
         editor.outlineEventSink = outlineCoordinator
+
+        // 第四根线：面板收起 / 展开 → 正文右边距重算。
+        // 面板自己不认识正文，所以这条只能由这一层接（让多少也是这一层的事，见 `outlineTrailingInset`）
+        outlineView.onCollapseStateChanged = { [weak self] _ in
+            self?.updateEditorTrailingInset()
+        }
 
         // 默认收起：冷启动时右上角只留一个小方块（展开按钮），点它才展开整份目录。
         // 目录属于「想看的时候看一眼」的东西，默认摊开会一直占着正文右上角
@@ -747,6 +768,61 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         settings.applyOutlineBackground(to: &outlineView.appearance)
         // 宽高是算出来的（不算动画：拖滑块时不该一直有动画）
         outlineView.refreshAppearance()
+        // 宽度变了 → 正文要让出去的那块也得跟着变。
+        // 这一句同时是「设置页里那个留白开关」的落点：`settingsDidChange` 会走到这里
+        updateEditorTrailingInset()
+    }
+
+    /// 大纲展开时，正文右边要给出去多少（`0` = 一点都不让）。
+    ///
+    /// ### 算的是什么
+    /// 面板本身的宽度 + 它离屏幕右边那点留白（`edgeMargin`）+ 一点呼吸空间，
+    /// 这样正文的右边界正好落在卡片左边缘左边一点点，字不会被卡片压住。
+    ///
+    /// ### 收起时为什么不让
+    /// 收起态就是右上角那个 46×36 的小方块，只压住一个角；为它把整列正文挤窄不值当。
+    ///
+    /// ### 为什么要封顶
+    /// 面板宽度可以调到占屏幕的 80%（「按百分比」模式）。真照这个数让，窄屏上正文就只剩一条缝了，
+    /// 所以这里保底给正文留一半宽度：宁可让卡片盖住一点，也不能让正文没法读。
+    ///
+    /// ### 为什么还要再问一句设备
+    /// iPhone 竖屏才三百来点宽，上面那个「封顶一半」也救不回来 —— 让完每行只剩两三个字。
+    /// 所以这一项在 iPhone 上**固定不生效**（设置里也不显示那个开关，判断同在
+    /// `MarkdownEditorSettings.supportsReservingSpaceForOutline`）
+    private var outlineTrailingInset: CGFloat {
+        guard settings.reservesSpaceForOutline,
+              MarkdownEditorSettings.supportsReservingSpaceForOutline else { return 0 }
+        // 收起时 occupiedWidth 就是 0，下面那道判断会直接返回
+        let occupied = outlineView.occupiedWidth
+        guard occupied > 0, view.bounds.width > 0 else { return 0 }
+        let wanted = occupied + outlineView.appearance.edgeMargin + Self.outlineEditorGap
+        return min(wanted, view.bounds.width * Self.maximumOutlineShare)
+    }
+
+    /// 正文和面板之间再空出多少（点）。纯视觉：贴着卡片边缘排字会显得很挤
+    private static let outlineEditorGap: CGFloat = 8
+    /// 正文最多让出父视图宽度的这个比例（0.5 = 让人一半、自己留一半）
+    private static let maximumOutlineShare: CGFloat = 0.5
+
+    /// 把正文右边距改成「该给大纲让出多少」。
+    ///
+    /// ⚠️ 值没变就直接返回：这个方法会在**每次布局**里被调（`viewDidLayoutSubviews`），
+    /// 不判一下的话相当于每次布局都改一次约束，Auto Layout 会被拖着多跑一轮又一轮。
+    ///
+    /// ### 为什么不做动画（明明大纲卡片自己是动画收放的）
+    /// 编辑器一改宽度就会**整篇重排**（见 `MarkdownTextView.layoutSubviews` 里按 `renderedWidth` 重渲那一段）。
+    /// 把它塞进 `UIView.animate` 的话，Auto Layout 会在 0.22 秒里逐帧改宽度，等于每帧整篇重渲一遍 ——
+    /// 小文档看不出来，长文档直接卡成幻灯片。所以这里让正文「啪」地一下换到新宽度，
+    /// 只有大纲卡片自己滑过去；两条动画不同步，换来的是不掉帧。
+    private func updateEditorTrailingInset() {
+        guard let editorTrailingConstraint else { return }
+        let inset = outlineTrailingInset
+        // 约束上的值是负的（往左收），所以比较时取反
+        guard abs(-editorTrailingConstraint.constant - inset) > 0.5 else { return }
+        // 不在这儿催布局：这个方法多数时候是在布局过程中被调的（`viewDidLayoutSubviews`），
+        // 当场 `layoutIfNeeded()` 等于就地再跑一轮。设完 constant，系统下一拍自然会重排
+        editorTrailingConstraint.constant = -inset
     }
 
     // MARK: 记住「这份文档读到哪儿了」

@@ -341,4 +341,102 @@ final class MarkdownHTMLExporterTests: XCTestCase {
         XCTAssertFalse(readBack.usesThemeColors)
         XCTAssertTrue(readBack.inlinesLocalImages, "默认 false 的那一项，得能分清是「从没存过」还是「用户选了关」")
     }
+
+    // MARK: Mermaid 图
+
+    /// 假的图表引擎：不画图，只吐一段能一眼认出来的 SVG。
+    private func makeDiagramSVGStub(_ received: @escaping (MarkdownMermaidRequest) -> Void)
+        -> (MarkdownMermaidRequest) -> String? {
+        { request in
+            received(request)
+            return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"></svg>"
+        }
+    }
+
+    func testMermaidFenceBecomesInlineSVG() {
+        let markdown = "```mermaid\nflowchart TD\n  A --> B\n```\n"
+        let html = render(markdown, options: .init(style: .builtIn, diagramSVG: makeDiagramSVGStub { _ in }))
+        let body = mainContent(html)
+
+        XCTAssertTrue(body.contains("<div class=\"mermaid-diagram\">"),
+                      "画得出图就该内联矢量图")
+        XCTAssertTrue(body.contains("<svg"), "内联的是 SVG 本体")
+        XCTAssertFalse(body.contains("<pre><code"), "都已经画成图了，就不该再输出一份源码块")
+    }
+
+    func testMermaidFenceFallsBackToCodeBlockWithoutProvider() {
+        // 没接图表引擎（或者调用方就是不想要图）：退回代码块显示源码，和编辑器里同一个降级
+        let html = render("```mermaid\nflowchart TD\n  A --> B\n```\n", options: .init(style: .builtIn))
+        let body = mainContent(html)
+
+        XCTAssertTrue(body.contains("<pre><code class=\"language-mermaid\">"),
+                      "没有图表引擎时该按代码块输出源码原文")
+        XCTAssertFalse(body.contains("mermaid-diagram"), "不该凭空出现图")
+    }
+
+    func testMermaidFenceFallsBackWhenProviderReturnsNil() {
+        // 引擎在，但这段话画不出来（用户正敲半截）—— 一样退回源码
+        let html = render("```mermaid\nflowchart T\n```\n",
+                          options: .init(style: .builtIn, diagramSVG: { _ in nil }))
+        let body = mainContent(html)
+
+        XCTAssertTrue(body.contains("<pre><code class=\"language-mermaid\">"), "画不出来就显示源码")
+        XCTAssertFalse(body.contains("mermaid-diagram"))
+    }
+
+    func testProviderOnlySeesMermaidFences() {
+        var asked: [MarkdownMermaidRequest] = []
+        let markdown = """
+        ```swift
+        let a = 1
+        ```
+
+        ```mermaid
+        flowchart TD
+          A --> B
+        ```
+        """
+        let html = render(markdown, options: .init(style: .builtIn,
+                                                   diagramSVG: makeDiagramSVGStub { asked.append($0) }))
+        let body = mainContent(html)
+
+        XCTAssertEqual(asked.count, 1, "别的围栏语言不该去问图表引擎")
+        // 喂过去的是围栏**里面**的正文，不带 ``` 那两行
+        XCTAssertEqual(asked.first?.source, "flowchart TD\n  A --> B\n")
+        XCTAssertTrue(body.contains("<pre><code class=\"language-swift\">"), "Swift 代码块照旧")
+    }
+
+    func testProviderGetsPageColorsNotEditorTheme() {
+        var received: MarkdownMermaidRequest?
+        // 选「内置浅色」导出：页面是白底，图也必须按白底画 ——要是错拿了编辑器那套（可能是深色）主题的底色，导出的网页上就会贴一张深色底的图
+        _ = render("```mermaid\nflowchart TD\n  A --> B\n```\n",
+                   options: .init(style: .builtIn,
+                                  diagramSVG: makeDiagramSVGStub { received = $0 }))
+
+        XCTAssertEqual(received?.backgroundColor, MarkdownHTMLTokens.builtIn.pageBackground,
+                       "图要按**页面**底色画，不是编辑器主题的底色")
+        XCTAssertEqual(received?.textColor, MarkdownHTMLTokens.builtIn.text)
+        XCTAssertEqual(received?.fontSize, MarkdownHTMLTokens.builtIn.bodyFontSize)
+        XCTAssertEqual(received?.maxWidth, MarkdownHTMLTokens.contentWidth,
+                       "宽度取正文那一栏的宽度")
+    }
+
+    func testThemeStylePassesThemeBackgroundToProvider() {
+        var received: MarkdownMermaidRequest?
+        var theme = MarkdownTheme.default
+        theme.editorBackground = UIColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 1)
+        // 选「跟主题」导出时反过来：页面底色就是主题底色，图也得跟着
+        _ = render("```mermaid\nflowchart TD\n  A --> B\n```\n",
+                   options: .init(style: .currentTheme(theme),
+                                  diagramSVG: makeDiagramSVGStub { received = $0 }))
+
+        XCTAssertEqual(received?.backgroundColor, theme.editorBackground)
+    }
+
+    func testMermaidCSSConstrainsSVGWidth() {
+        // 内联的 <svg> 宽度是写死在属性里的，不夹一下窄屏上会横着撑破版面
+        let css = MarkdownHTMLTokens.builtIn.css()
+        XCTAssertTrue(css.contains(".mermaid-diagram svg"), "要有把 SVG 宽度夹到容器里的规则")
+        XCTAssertTrue(css.contains("max-width: 100%"))
+    }
 }

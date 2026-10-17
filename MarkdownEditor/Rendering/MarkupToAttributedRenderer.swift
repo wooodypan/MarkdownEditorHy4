@@ -65,6 +65,13 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     /// 公式是在「AST → 富文本」这一步变成图的，而这一步就是这里做的。）
     var mathRenderer: MarkdownMathRenderer?
 
+    /// Mermaid 图渲染器（`MarkdownMermaidRenderer`）。给 nil 就**不渲染** ——
+    /// ```mermaid 围栏块会按普通代码块显示（灰底 + 源码原文），功能降级但不会出错。
+    ///
+    /// 挂在这里的理由和 `mathRenderer` 一样（也详见 `MarkdownMermaidRenderer.swift` 里的说明）：
+    /// 图是在「AST → 富文本」这一步画出来的，而这一步就是这里做的。于是库本身保持零第三方依赖，想要图的宿主注入实现塞进来，不想要的人什么都不用做。
+    var mermaidRenderer: MarkdownMermaidRenderer?
+
     /// cmark 解析缓存：源码没变就把上次那棵 AST 直接还回来（换主题、改宽度这些重排路径全靠它省掉解析）。
     ///
     /// ### 为什么挂在这里
@@ -786,6 +793,13 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     private static let lineFeed = unichar(0x0A)
 
     func visitCodeBlock(_ codeBlock: CodeBlock) -> RenderedFragment {
+        // 先判断是不是 Mermaid 围栏块：是的话走「画成图」那条路。
+        // 画不出来时 `renderMermaidBlock` 返回 nil（引擎没注入 / 语法错 / 空源码 / 拿不到源码范围），那就往下走，按普通代码块渲染 —— 用户至少能看见自己写的源码。
+        if let mermaidRenderer,
+           let diagram = renderMermaidBlock(codeBlock, renderer: mermaidRenderer) {
+            return diagram
+        }
+
         let codeStyle = theme.codeParagraphStyle(indent: indent)
         let code = codeBlock.code
         var out = RenderedFragment.empty
@@ -844,6 +858,79 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                 code: code,
                                 language: codeBlock.language,
                                 codeSourceStart: codeSourceStart)
+        return out
+    }
+
+    // MARK: Mermaid 图
+
+    /// 把 Mermaid 围栏块渲染成「一张图 + 下面一段弱化源码」，和 `visitTable` 是同一套做法。
+    ///
+    /// ### 两种「源码」不是一回事，别混
+    /// - `codeBlock.code`：**不含**围栏那两行的正文，喂给渲染引擎（引擎不认识 ``` 那两行）
+    /// - `sourceText(in: range)`：**含**围栏的整段源码，给下面那段弱化源码用 ——
+    ///   「全选复制 === 源文件」这条不变式靠它成立
+    ///
+    /// ### 为什么拿不到图时是「显示源码」而不是「画个错误提示」
+    /// 这是编辑器，用户会边打边看：`flowchart T` 刚敲到一半，那一瞬间它必然是非法语法。
+    /// 这时弹一个红色报错框，用户每敲一个字符都会被闪一下。退化成源码原文最省心，和公式、和图片加载不出来时的处理保持一致。
+    ///
+    /// - returns: 画不出来就返回 `nil`，调用方会回退成普通代码块渲染
+    private func renderMermaidBlock(_ codeBlock: CodeBlock,
+                                   renderer: MarkdownMermaidRenderer) -> RenderedFragment? {
+        // ⚠️ 不要写 `codeBlock as? FencedCodeBlock` —— swift-markdown 里**没有这个类型**，围栏代码块就是 `CodeBlock` 本身，语言标识直接在 `codeBlock.language` 上（`String?`）。
+        // 项目里别处也是这么用的（见 `CodeBlockInfo(code:language:)` 那一行）。
+        // 认语言这件事和导出 HTML 那条路共用一份判据，见 `MarkdownMermaidLanguages`。
+        guard MarkdownMermaidLanguages.matches(codeBlock.language) else { return nil }
+
+        // 源码范围：拿不到（手工构造的 AST）就放弃，交给调用方走普通代码块那条路。
+        // ⚠️ 别写 `codeBlock.range` —— 那是 `Range<SourceLocation>?`，类型对不上；
+        // 项目里统一走 `localRange(of:)` 这个 helper（`visitTable` / `visitThematicBreak` 都这么取）。
+        guard let range = localRange(of: codeBlock) else { return nil }
+
+        let code = codeBlock.code
+        // 空围栏（写了 ```mermaid 就闭合）不画图：画出来是一张空图，不如让用户看着自己的源码
+        guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+
+        // 宽度和表格同一条算法
+        let maxWidth = max(120, containerWidth - indent - 16)
+        // 颜色给的是**主题里的真实颜色**（不是「是不是深色」这个布尔）：机身外观和文档配色是两件事，
+        // 由文档自己的配色说了算，图才会跟文档是一家人。怎么把这些色映射成引擎的外观槽位，是 App 层适配器的职责。
+        let request = MarkdownMermaidRequest(
+            source: code,
+            maxWidth: maxWidth,
+            textColor: theme.textColor,
+            backgroundColor: theme.editorBackground,
+            accentColor: theme.linkColor,
+            separatorColor: theme.separatorColor,
+            fontSize: theme.bodyFont.pointSize)
+
+        guard let image = renderer.image(for: request),
+              image.size.width > 0, image.size.height > 0 else { return nil }
+
+        let attachment = MermaidAttachment(image: image, maxWidth: maxWidth)
+        let style = theme.blockAttachmentParagraphStyle(indent: indent)
+
+        var out = RenderedFragment.empty
+        // 「N 个源码字符 → 1 个字符位」这个能力**现成就有**，不用给 `RenderedFragment` 加任何东西：
+        // `attachment(_:sourceStart:sourceLength:attributes:)` 的注释原文就是「只占 1 个字符位，但吃掉了源码里 `sourceLength` 个字符（比如整段 `![alt](url)`）」。
+        // 块级公式跨多行映射到 1 个字符位，本来就是同一个场景 —— 照抄它的调用形状即可。
+        out.append(.attachment(attachment,
+                               sourceStart: range.location,
+                               sourceLength: range.length,
+                               attributes: [.paragraphStyle: style, .font: theme.bodyFont]))
+
+        // 图下面弱化显示源码（含围栏两行），和 `visitTable` 一模一样：
+        // 光标能停进去改内容，复制时靠 `lastSourceEnd` 去重，整段只输出一次。
+        // 段落样式不能省 —— 源码有好几行，没有它的话缩进（列表里的图）和行距都不对。
+        //
+        // （`tableSourceAttributes` 是表格那边现成的「弱化源码」样式，图直接复用。
+        // 名字带 table 有点别扭，将来要么改名通用化，要么另加一个 `diagramSourceAttributes`。）
+        var sourceAttributes = theme.tableSourceAttributes
+        sourceAttributes[.paragraphStyle] = theme.paragraphStyle(indent: indent)
+        out.append(.decoration("\n", attributes: sourceAttributes))
+        out.append(.sourceHint(sourceText(in: range),
+                               sourceStart: range.location,
+                               attributes: sourceAttributes))
         return out
     }
 

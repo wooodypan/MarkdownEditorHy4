@@ -41,6 +41,14 @@ struct MarkdownHTMLTokens {
     /// 内置的 GitHub 风格配色。**跟编辑器当前用的主题无关**，任何时候导出都长一个样。
     static var builtIn: MarkdownHTMLTokens { MarkdownHTMLTokens() }
 
+    /// 正文那一栏实际有多宽（像素）。
+    ///
+    /// 和 `css()` 里 body 那两条（`max-width: 820px`、`padding: 32px 24px 96px` 左右各 24px）
+    /// 是同一个数，改那边记得改这边。
+    ///
+    /// 目前只有 Mermaid 的图拿它当排版提示用 —— 矢量图自己会跟着容器缩放，这个值只影响「引擎按多宽折行」这类布局选择，所以偏一点不会出错。
+    static let contentWidth: CGFloat = 820 - 24 * 2
+
     /// 按编辑器当前这套主题配色导出。
     ///
     /// ⚠️ 主题里的那些颜色可能是动态色（`UIColor.label`），也可能是半透明的（行内代码底色为了不盖住选中高亮刻意留了 alpha）——这两件事都由 `css()` 里那个 `flat(_:)` 兜着：先按当前外观解析，再叠到页面底色上摊成实色。
@@ -135,6 +143,9 @@ struct MarkdownHTMLTokens {
           border-left: 4px solid \(flat(quoteBar));
           color: \(flat(quoteText));
         }
+        .mermaid-diagram { margin: 0 0 1em; text-align: center; }
+        /* 图是内联的 <svg>，宽度按属性写死了 —— 不夹一下的话窄屏上会横着撑破版面 */
+        .mermaid-diagram svg { max-width: 100%; height: auto; }
         blockquote > :last-child { margin-bottom: 0; }
         ul, ol { padding-left: 1.7em; }
         li > ul, li > ol { margin-top: 0.4em; }

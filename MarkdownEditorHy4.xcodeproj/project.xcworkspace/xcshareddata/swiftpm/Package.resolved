@@ -1,13 +1,22 @@
 {
-  "originHash" : "70fb024cc42e244e8528aa398b9736eb031c2ffb00a59432b9d7c61d4aa0f96f",
+  "originHash" : "26d76958e327df8469b5fe21a4a8da87fd875d1629d2471f5ea5335a50ccf3ab",
   "pins" : [
     {
       "identity" : "iosdemohub",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/wooodypan/iOSDemoHub.git",
       "state" : {
-        "revision" : "bbd7ebe2f53d4644da723a4dd287623b35ef39b8",
-        "version" : "1.0.1"
+        "revision" : "fc5871fbdef64ff46d86bd6ac953b472356b33b7",
+        "version" : "1.0.2"
+      }
+    },
+    {
+      "identity" : "mermaidkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Panway/MermaidKit.git",
+      "state" : {
+        "revision" : "e883c095359f1557200b6fe6f8ef16e472cf1d19",
+        "version" : "2.4.0"
       }
     },
     {

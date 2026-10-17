@@ -193,6 +193,8 @@ final class DocumentExporter: NSObject {
         editor.renderer.theme = theme
         editor.applyThemeChrome()
         editor.imageBaseURL = baseDirectory
+        // 图表渲染器也要装上，否则导出长图里 ```mermaid 会退化成源码原文 ——和编辑页所见不一致，而「导出只有一份实现、两处产物必须一模一样」是这条链路的硬规矩
+        editor.renderer.mermaidRenderer = MermaidKitRenderer.shared
         // 宽度必须在 setMarkdown 之前给：内容按容器宽度排版，宽度为 0 的话什么都排不出来
         editor.frame = CGRect(x: 0, y: 0, width: max(width, 120), height: 100)
         editor.setMarkdown(markdown)
@@ -284,7 +286,10 @@ final class DocumentExporter: NSObject {
             options: MarkdownHTMLExporter.Options(
                 style: choice.usesThemeColors ? .currentTheme(theme()) : .builtIn,
                 inlinesLocalImages: inlinesLocalImages,
-                baseDirectory: source.fileURL?.deletingLastPathComponent()
+                baseDirectory: source.fileURL?.deletingLastPathComponent(),
+                // Mermaid 围栏块画成矢量图内联进去 —— 缩放不糊，也不依赖 JS。
+                // 颜色由导出方按**页面**那套配色拼好递进来（和编辑器主题是两回事：可以选内置浅色导出）
+                diagramSVG: { MermaidKitRenderer.shared.svg(for: $0) }
             )
         )
     }

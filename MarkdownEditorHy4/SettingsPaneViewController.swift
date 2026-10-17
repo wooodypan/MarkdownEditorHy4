@@ -95,6 +95,8 @@ final class SettingsPaneViewController: UIViewController {
             settings.setShowsLineNumbers(sender.isOn)
         case .showsQuoteBackground:
             settings.setShowsQuoteBackground(sender.isOn)
+        case .outlineReservesSpace:
+            settings.setReservesSpaceForOutline(sender.isOn)
         case .remembersScrollPosition:
             settings.setRemembersScrollPosition(sender.isOn)
         case .pastesHTMLAsMarkdown:
@@ -170,7 +172,7 @@ final class SettingsPaneViewController: UIViewController {
         case .imageMaxHeight:
             settings.setImageMaxHeight(stepped)
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
-             .showsQuoteBackground,
+             .showsQuoteBackground, .outlineReservesSpace,
              .outlineWidthMode, .outlineHeightMode, .imageWidthMode,
              .imageInsertionMode, .imageCustomFolderPath, .imageNameMode:
             // 这几行挂的是开关 / 分段控件 / 菜单按钮，不是滑块，回调不会从这儿进来。
@@ -445,7 +447,7 @@ extension SettingsPaneViewController: UITableViewDataSource, UITableViewDelegate
 
         switch row {
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
-             .showsQuoteBackground:
+             .showsQuoteBackground, .outlineReservesSpace:
             return makeToggleCell(for: row)
         case .outlineWidthMode:
             return makeOutlineWidthModeCell()

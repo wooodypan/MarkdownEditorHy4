@@ -131,6 +131,13 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 用户点击某一行的出口。实现方是 `OutlineCoordinator`
     weak var delegate: MarkdownOutlineViewDelegate?
 
+    /// 面板被收起 / 展开时通知外面一声（参数 `true` = 刚收起）。
+    ///
+    /// ### 为什么要有这个口子
+    /// 面板自己不认识正文，也就不知道该不该给正文让出右边那块地方 —— 它只报「我现在是收是展」，
+    /// 「让不让、让多少」由容器决定（见 `MarkdownDocumentViewController.outlineTrailingInset`）。
+    var onCollapseStateChanged: ((Bool) -> Void)?
+
     /// 外观参数，建好之后也能改（改完调一次 `refreshAppearance()`）
     var appearance: MarkdownOutlineAppearance
 
@@ -382,6 +389,9 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         // 标题的可用宽度成了负数，屏幕上一条标题都看不到（看着像「目录里什么都没有」）
         collectionView.collectionViewLayout.invalidateLayout()
         refreshPanelSize(animated: animated)
+        // 收起 / 展开改了「占掉多宽」，外面（正文的右边距）要跟着重算一次。
+        // 放在最后：这时 `isCollapsed` 和新宽度都已经定下来了，外面拿到的就是最终值
+        onCollapseStateChanged?(collapsed)
     }
 
     /// 外观参数被外部改过之后调一次，重新算宽高。
@@ -407,6 +417,16 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 面板当前的宽度。读的同样是**约束**的值，理由见上面 `panelHeight`。
     /// 单元测试用它断言两种宽度模式（固定点数 / 按父视图比例）各算出多宽
     var panelWidth: CGFloat { panelWidthConstraint.constant }
+
+    /// 面板此刻在父视图里**占掉**多宽 —— 收起时给 0。
+    ///
+    /// 给容器算「正文要不要往左让出右边那一块」用。
+    /// ⚠️ 这里走的是**算出来的** `effectiveWidth`，不是 `panelWidthConstraint`：
+    /// 后者要等面板自己的 `layoutSubviews` 跑过才是新值（拉窗口那一拍读到的是上一轮的宽度），
+    /// 而前者只依赖「父视图多宽 + 外观参数」，任何时候都算得准
+    var occupiedWidth: CGFloat {
+        isCollapsed ? 0 : effectiveWidth
+    }
 
     /// 卡片背景**实际用上**的不透明度。单元测试用它断言「配置里的值真的刷到视图上了」。
     ///

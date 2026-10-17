@@ -37,13 +37,19 @@ enum MarkdownHTMLExporter {
         var inlinesLocalImages: Bool
         /// 相对路径的图片相对谁解析（一般传文档所在目录；不知道文档在哪时传 nil，会退到 App 的 Documents 目录）
         var baseDirectory: URL?
+        /// Mermaid 围栏块怎么画成 SVG。不传就退回 `<pre><code>` 显示源码原文（和编辑器里没注入图表引擎时是同一个降级）。
+        ///
+        /// 参数由导出方拼好（页面底色、正文字号从 `MarkdownHTMLTokens` 来），实现方只管「源码进、`<svg>` 出」，所以接线是一行：`{ MermaidKitRenderer.shared.svg(for: $0) }`。
+        var diagramSVG: ((MarkdownMermaidRequest) -> String?)?
 
         init(style: StyleSource,
              inlinesLocalImages: Bool = false,
-             baseDirectory: URL? = nil) {
+             baseDirectory: URL? = nil,
+             diagramSVG: ((MarkdownMermaidRequest) -> String?)? = nil) {
             self.style = style
             self.inlinesLocalImages = inlinesLocalImages
             self.baseDirectory = baseDirectory
+            self.diagramSVG = diagramSVG
         }
     }
 
@@ -73,6 +79,8 @@ enum MarkdownHTMLExporter {
         var inlinedCount = 0
         var missed: [String] = []
 
+        let tokens = options.style.tokens
+
         var renderer = MarkdownHTMLRenderer()
         renderer.footnoteIDs = Set(notes.map(\.id))
         renderer.footnoteNumbers = Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0.index) })
@@ -86,11 +94,23 @@ enum MarkdownHTMLExporter {
                 return reference
             }
             : nil
+        // Mermaid 围栏块 → 矢量图。颜色取的是**页面**那套配色（不是编辑器主题）——导出 HTML 可以选「内置浅色」，那种情况下页面是白的，图也必须按白底画
+        if let diagramSVG = options.diagramSVG {
+            renderer.diagramSVG = { source in
+                diagramSVG(MarkdownMermaidRequest(source: source,
+                                                  maxWidth: MarkdownHTMLTokens.contentWidth,
+                                                  textColor: tokens.text,
+                                                  backgroundColor: tokens.pageBackground,
+                                                  accentColor: tokens.link,
+                                                  separatorColor: tokens.rule,
+                                                  fontSize: tokens.bodyFontSize))
+            }
+        }
 
         let body = renderer.visit(Document(parsing: bodySource))
         let footnotes = footnoteSection(notes, renderer: &renderer)
 
-        return Result(html: page(body: body, footnotes: footnotes, title: title, tokens: options.style.tokens),
+        return Result(html: page(body: body, footnotes: footnotes, title: title, tokens: tokens),
                       inlinedImages: inlinedCount,
                       missedImages: missed)
     }

@@ -28,6 +28,14 @@ struct MarkdownHTMLRenderer: MarkupVisitor {
     /// 图片地址怎么输出。给 `nil` 就照写；给了就用返回值当最终的 `src`（App 层用它把本地图编成 base64）。
     var imageSourceResolver: ((String) -> String)?
 
+    /// Mermaid 围栏块怎么变成 SVG：**源码进、`<svg>…</svg>` 出**。
+    ///
+    /// 给了就内联矢量图；返回 `nil` 或者干脆没给，就退回 `<pre><code>` 显示源码原文。
+    ///
+    /// ### 为什么是个闭包，而不是直接吃一个图表引擎对象
+    /// 和上面那条 `imageSourceResolver` 是同一个理由：渲染器是「遇到一个块问我一次」，它自己不知道页面底色是什么、正文有多宽 —— 那些只有导出方（`MarkdownHTMLExporter`）知道。
+    var diagramSVG: ((String) -> String?)?
+
     /// 脚注 ID → `#fn-xxx` 锚点后缀的换算（同一个 ID 必须算出同一个值，不然引用和定义对不上）
     static func fragment(forFootnote id: String) -> String {
         let allowed = id.map { character -> Character in
@@ -72,6 +80,14 @@ struct MarkdownHTMLRenderer: MarkupVisitor {
     }
 
     mutating func visitCodeBlock(_ codeBlock: CodeBlock) -> String {
+        // Mermaid 围栏块优先画成矢量图内联进来：产物是个独立文件、不依赖 JS，放大也不糊。
+        // 画不出来（没接图表引擎 / 语法错）就落到下面按代码块输出源码原文 —— 和编辑器里那条降级一致。
+        if let diagramSVG,
+           MarkdownMermaidLanguages.matches(codeBlock.language),
+           let svg = diagramSVG(codeBlock.code) {
+            return "<div class=\"mermaid-diagram\">\n\(svg)\n</div>\n"
+        }
+
         let language = codeBlock.language.map { " class=\"language-\(Self.escape($0))\"" } ?? ""
         return "<pre><code\(language)>\(Self.escape(codeBlock.code))</code></pre>\n"
     }
