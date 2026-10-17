@@ -66,7 +66,7 @@ enum SettingsSection: Int, CaseIterable {
     var summary: String {
         switch self {
         case .typography: return "字号、行高、段落间距、首行缩进、行宽上限、列表圆点大小"
-        case .reading: return "行号、引用底色、记住上次读到哪儿"
+        case .reading: return "行号、引用底色、行内代码反引号底色、记住上次读到哪儿"
         case .outlineSize:
             // iPhone 上「正文让位」那一行不存在，摘要里也就别提，否则点进去发现少一项
             return SettingsRow.outlineReservesSpace.isAvailableOnCurrentDevice
@@ -89,7 +89,8 @@ enum SettingsSection: Int, CaseIterable {
                     .paragraphIndentCharacters, .bodyContentWidth, .bulletDiameter]
         case .reading:
             // 行号放最上面：它是「一眼能看出开关有没有生效」的那一项
-            return [.showsLineNumbers, .remembersScrollPosition, .showsQuoteBackground]
+            return [.showsLineNumbers, .remembersScrollPosition, .showsQuoteBackground,
+                    .inlineCodeBacktickBackground]
         case .outlineSize:
             // 顺序就是界面上从上到下的顺序：先是一个开关（要不要给正文让地方），
             // 再宽度（怎么算 + 两个数值）、高度（同样三行）、最后是背景多透。
@@ -147,6 +148,8 @@ enum SettingsRow: Int, CaseIterable {
     case remembersScrollPosition
     /// 引用块的内容要不要铺一层淡背景（竖条颜色的 10% 透明度）
     case showsQuoteBackground
+    /// 行内代码两侧的**反引号**要不要跟着代码正文一起铺底色（默认不加）
+    case inlineCodeBacktickBackground
     // 大纲面板：留白
     /// 大纲展开时，正文要不要往左让出它那块宽度
     case outlineReservesSpace
@@ -227,6 +230,8 @@ enum SettingsRow: Int, CaseIterable {
             return "显示行号"
         case .showsQuoteBackground:
             return "引用内容加底色"
+        case .inlineCodeBacktickBackground:
+            return "行内代码反引号加底色"
         case .remembersScrollPosition:
             return "记住上次阅读位置"
         case .outlineReservesSpace:
@@ -326,6 +331,11 @@ enum SettingsRow: Int, CaseIterable {
                 + "从竖条一直铺到行尾，引用看着像一整块色条；关闭：只有一条竖条，和正文一样干净。"
                 + "ⓘ 底色和竖条同色，跟着主题里的「引用竖条」颜色走；"
                 + "它铺在文字下面，框选引用文字时系统的蓝色高亮照样盖得住。"
+        case .inlineCodeBacktickBackground:
+            return "关闭（默认）：行内代码的灰底只包住代码正文，两侧反引号留在灰块外边 ——"
+                + "反引号本来就是语法标记，让它退到背景里，读者一眼看到的是代码本身。"
+                + "打开：整段（含反引号）连成一块完整的灰底，和以前的显示一样。"
+                + "ⓘ 这一项只管「铺不铺」，灰底的颜色仍然在主题的「行内代码底色」里调。"
         case .outlineReservesSpace:
             return "打开：大纲展开时，正文右边让出和面板一样宽的一块，字不会被面板卡片压住 ——"
                 + "代价是每行能排的字变少。"
@@ -479,6 +489,7 @@ enum SettingsRow: Int, CaseIterable {
         case .remembersScrollPosition: return settings.remembersScrollPosition
         case .pastesHTMLAsMarkdown: return settings.pastesHTMLAsMarkdown
         case .showsQuoteBackground: return settings.showsQuoteBackground
+        case .inlineCodeBacktickBackground: return settings.showsInlineCodeBacktickBackground
         case .outlineReservesSpace: return settings.reservesSpaceForOutline
         default: return false
         }

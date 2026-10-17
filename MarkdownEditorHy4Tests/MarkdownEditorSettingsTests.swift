@@ -717,6 +717,45 @@ final class MarkdownEditorSettingsTests: XCTestCase {
                        "关掉取色器时那一色要立刻落地，不能等定时器")
     }
 
+    // MARK: - 行内代码反引号底色
+
+    /// 默认**不**给反引号铺底色；拨开之后要落盘，而且现拼给导出用的主题也得跟着变
+    func testInlineCodeBacktickBackgroundDefaultsOffAndPersists() {
+        let url = makeTempFileURL()
+        let settings = MarkdownEditorSettings(fileURL: url)
+        XCTAssertFalse(settings.showsInlineCodeBacktickBackground, "默认不该给反引号铺底色")
+        XCTAssertFalse(settings.currentTheme.inlineCodeBacktickHasBackground,
+                       "给导出用的现拼主题也要跟着这个开关")
+
+        settings.setShowsInlineCodeBacktickBackground(true)
+        XCTAssertTrue(MarkdownEditorSettings(fileURL: url).showsInlineCodeBacktickBackground,
+                      "拨过之后要存下来，重开 App 还是这个状态")
+        XCTAssertTrue(settings.currentTheme.inlineCodeBacktickHasBackground,
+                      "打开之后现拼主题也得是打开的，否则导出图里反引号还是没底色")
+    }
+
+    /// 设置页「阅读与显示」里有这一行，默认是关的；拨一下要写回配置
+    func testSettingsPageHasInlineCodeBacktickToggle() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let controller = SettingsPaneViewController(section: .reading, settings: settings)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 1600)
+        controller.view.layoutIfNeeded()
+
+        XCTAssertTrue(SettingsSection.reading.rows.contains(.inlineCodeBacktickBackground),
+                      "这一项该在「阅读与显示」里")
+
+        let toggle = try XCTUnwrap(
+            switchControl(in: controller.view, labeled: "行内代码反引号加底色"),
+            "找不到「行内代码反引号加底色」的开关"
+        )
+        XCTAssertFalse(toggle.isOn, "默认该是关的")
+
+        toggle.isOn = true
+        toggle.sendActions(for: .valueChanged)
+        XCTAssertTrue(settings.showsInlineCodeBacktickBackground, "拨开之后要写回配置")
+    }
+
     // MARK: - 图片尺寸：配置本身
 
     /// 需求给的默认：按百分比、50%、固定宽度 200px、最大高度 420pt

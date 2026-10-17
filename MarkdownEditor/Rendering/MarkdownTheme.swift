@@ -128,6 +128,14 @@ struct MarkdownTheme {
     /// 从竖条那条线一直铺到行尾；关掉就只剩竖条。
     var showsQuoteBackground: Bool = false
 
+    /// 行内代码**两侧的反引号**要不要跟着一起铺底色。
+    ///
+    /// - `false`（默认）：底色只包住代码正文，反引号留在灰块外面，看着就是「两个语法标记夹着一块代码」；
+    /// - `true`：整段（含反引号）是一块完整的灰底。
+    ///
+    /// 颜色仍然用 `inlineCodeBackground`，这里只管「铺不铺」。
+    var inlineCodeBacktickHasBackground: Bool = false
+
     /// 引用块内容区那层淡背景：就是把 `quoteBarColor` 的透明度压到 **10%**。
     ///
     /// ### 为什么必须是半透明
@@ -371,11 +379,19 @@ struct MarkdownTheme {
 
     /// 行内代码两侧的**反引号**。
     ///
-    /// 和正文只差一个前景色：字体仍是等宽体（换成正文字体会让反引号宽度跳一下、灰底一头宽一头窄），底色也照旧留着（这样整段行内代码还是一块完整的灰底，而不是中间断成三截）。
+    /// 和正文只差一个前景色：字体仍是等宽体（换成正文字体会让反引号宽度跳一下、灰底一头宽一头窄）。
+    ///
+    /// ### 底色默认**不铺**（`inlineCodeBacktickHasBackground == false`）
+    /// 灰块只包住代码正文，反引号落在底色外边 —— 它们本来就是语法标记，和 `#`、`- ` 一样该退到背景里。
+    /// 想要「整段一块完整灰底」的旧样子，把那个开关打开（设置页「阅读与显示 → 行内代码反引号加底色」）。
     var inlineCodeBacktickAttributes: [NSAttributedString.Key: Any] {
-        [.font: codeFont,
-         .foregroundColor: inlineCodeBacktickColor,
-         .backgroundColor: inlineCodeBackground]
+        var attributes: [NSAttributedString.Key: Any] = [.font: codeFont,
+                                                        .foregroundColor: inlineCodeBacktickColor]
+        // 不铺底色时连这个键都不写：写一个透明色虽然看着一样，但会让「有没有底色」这类判断变得含糊
+        if inlineCodeBacktickHasBackground {
+            attributes[.backgroundColor] = inlineCodeBackground
+        }
+        return attributes
     }
 
     /// 代码块正文。

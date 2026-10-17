@@ -122,6 +122,8 @@ final class SettingsPaneViewController: UIViewController {
             settings.setShowsLineNumbers(sender.isOn)
         case .showsQuoteBackground:
             settings.setShowsQuoteBackground(sender.isOn)
+        case .inlineCodeBacktickBackground:
+            settings.setShowsInlineCodeBacktickBackground(sender.isOn)
         case .outlineReservesSpace:
             settings.setReservesSpaceForOutline(sender.isOn)
         case .remembersScrollPosition:
@@ -202,6 +204,7 @@ final class SettingsPaneViewController: UIViewController {
             settings.setImageMaxHeight(stepped)
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
              .showsQuoteBackground, .outlineReservesSpace,
+             .inlineCodeBacktickBackground,
              .outlineWidthMode, .outlineHeightMode, .imageWidthMode,
              .imageInsertionMode, .imageCustomFolderPath, .imageNameMode,
              .tableSourceTextColor:
@@ -601,7 +604,7 @@ extension SettingsPaneViewController: UITableViewDataSource, UITableViewDelegate
 
         switch row {
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
-             .showsQuoteBackground, .outlineReservesSpace:
+             .showsQuoteBackground, .inlineCodeBacktickBackground, .outlineReservesSpace:
             return makeToggleCell(for: row)
         case .outlineWidthMode:
             return makeOutlineWidthModeCell()

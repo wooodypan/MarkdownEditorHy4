@@ -738,6 +738,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 「引用内容加底色」是**渲染期**读的开关，改完要整篇重渲染才见效 ——
         // 从设置页过来那条路会走到 `applyEditorStyle()`（里面有刷新），不用在这儿再排一遍
         editor.renderer.theme.showsQuoteBackground = settings.showsQuoteBackground
+        // 「行内代码反引号加底色」同理：底色是渲染时挂到字符上的，改完必须重渲染
+        editor.renderer.theme.inlineCodeBacktickHasBackground =
+            settings.showsInlineCodeBacktickBackground
         // 字号 / 链接色 / 底色存在 view 自己身上，不跟着富文本走，得手动搬一次
         editor.applyThemeChrome()
     }

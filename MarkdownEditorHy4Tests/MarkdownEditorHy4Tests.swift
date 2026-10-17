@@ -978,6 +978,56 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertGreaterThan(checked, 10, "应该检查到一批源码字符，实际只检查了 \(checked) 个")
     }
 
+    /// 行内代码两侧的反引号默认**不铺**底色（灰块只包住代码正文）；打开主题开关后才连成一块。
+    ///
+    /// 需求原话：「反引号默认不加背景色，并在设置里增加一项开关（默认关闭）」。
+    func testInlineCodeBacktickBackgroundIsOptional() {
+        let source = "前面 `code` 后面"
+
+        // 默认：反引号上没有 backgroundColor
+        let plainTheme = MarkdownTheme.default
+        XCTAssertFalse(plainTheme.inlineCodeBacktickHasBackground, "开关默认该是关的")
+
+        let plainStore = MarkdownDocumentStore(renderer: MarkupToAttributedRenderer(theme: plainTheme))
+        plainStore.load(markdown: source, containerWidth: 600)
+        let plainContent = plainStore.blocks[0].renderedContent
+        let plainBackticks = backtickBackgrounds(in: plainContent)
+        XCTAssertEqual(plainBackticks.count, 2, "这段源码里该有两个反引号")
+        XCTAssertTrue(plainBackticks.allSatisfy { $0 == nil }, "默认反引号不该有底色")
+
+        // 代码正文的灰底不能跟着一起关掉
+        let bodyRange = (plainContent.string as NSString).range(of: "code")
+        XCTAssertNotEqual(bodyRange.location, NSNotFound, "渲染结果里该有 `code` 这几个字")
+        for offset in bodyRange.location..<(bodyRange.location + bodyRange.length) {
+            XCTAssertNotNil(plainContent.attribute(.backgroundColor, at: offset, effectiveRange: nil),
+                            "代码正文的灰底不该跟着反引号一起关掉")
+        }
+
+        // 打开开关：反引号也要有底色，而且和正文是同一色
+        var onTheme = MarkdownTheme.default
+        onTheme.inlineCodeBacktickHasBackground = true
+        let onStore = MarkdownDocumentStore(renderer: MarkupToAttributedRenderer(theme: onTheme))
+        onStore.load(markdown: source, containerWidth: 600)
+        let onBackticks = backtickBackgrounds(in: onStore.blocks[0].renderedContent)
+        XCTAssertEqual(onBackticks.count, 2)
+        for color in onBackticks {
+            XCTAssertEqual(color.map { MarkdownHexColor.string(from: $0) },
+                           MarkdownHexColor.string(from: onTheme.inlineCodeBackground),
+                           "打开之后反引号的底色该和代码正文一致")
+        }
+    }
+
+    /// 取一段渲染结果里**所有反引号字符**的底色（没铺底色就是 `nil`）
+    private func backtickBackgrounds(in content: NSAttributedString) -> [UIColor?] {
+        let text = content.string as NSString
+        var colors: [UIColor?] = []
+        for offset in 0..<content.length
+        where text.substring(with: NSRange(location: offset, length: 1)) == "`" {
+            colors.append(content.attribute(.backgroundColor, at: offset, effectiveRange: nil) as? UIColor)
+        }
+        return colors
+    }
+
     /// 表格图必须排在源码前面，尺寸撑满容器、高度按内容算，并且真的画出了图片
     func testTableAttachmentSitsAboveSource() throws {
         let store = makeStore(tableSample)

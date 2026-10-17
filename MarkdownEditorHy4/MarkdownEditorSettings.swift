@@ -213,6 +213,10 @@ final class MarkdownEditorSettings {
         /// 铺底色会让页面多出一大块浅色，不是所有人都喜欢
         static let showsQuoteBackground = false
 
+        /// 「行内代码的反引号也铺底色」默认**关闭**：
+        /// 默认灰块只包住代码正文，反引号留在外面，一眼能分出「哪是语法、哪是内容」
+        static let showsInlineCodeBacktickBackground = false
+
         /// 「只读模式」默认**关闭**：默认是能正常编辑的。
         /// 打开之后能选能复制、也能移动光标，但改不动一个字（理由见 `MarkdownTextView.isReadOnly`）
         static let isReadOnly = false
@@ -386,6 +390,8 @@ final class MarkdownEditorSettings {
         var showsLineNumbers: Bool?
         /// 引用块的内容（竖条右边那一整片）要不要铺一层淡背景
         var showsQuoteBackground: Bool?
+        /// 行内代码两侧的反引号要不要跟着代码正文一起铺底色
+        var showsInlineCodeBacktickBackground: Bool?
         /// 只读模式：能选能复制但不能改
         var isReadOnly: Bool?
         /// 大纲展开时，正文要不要往左让出它那块宽度
@@ -469,6 +475,14 @@ final class MarkdownEditorSettings {
     ///
     /// ⚠️ 它是**渲染时**烙进富文本的，改完得把整篇重新渲染一遍才生效。
     private(set) var showsQuoteBackground: Bool
+
+    /// 行内代码两侧的反引号要不要跟着代码正文一起铺底色。默认 `false`（关）。
+    ///
+    /// 关着的时候灰块只包住代码正文，反引号留在灰块外边（它们本来就是语法标记）；
+    /// 打开之后整段是一块完整的灰底，和 2026-10-17 之前的样子一样。
+    ///
+    /// ⚠️ 它和颜色 / 字号一样是**渲染时**烙进富文本的，改完得整篇重新渲染才生效。
+    private(set) var showsInlineCodeBacktickBackground: Bool
 
     /// 只读模式。默认 `false`（关），也就是正常编辑。
     ///
@@ -747,6 +761,17 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「行内代码反引号加底色」。
+    ///
+    /// 底色是烙进富文本的 `.backgroundColor`（见 `MarkdownTheme.inlineCodeBacktickAttributes`），
+    /// 所以这里只能走「通知 → 内容页整篇重渲染」这条路，不能只改主题不动画面。
+    func setShowsInlineCodeBacktickBackground(_ value: Bool) {
+        guard value != showsInlineCodeBacktickBackground else { return }
+        showsInlineCodeBacktickBackground = value
+        save()
+        postChange()
+    }
+
     /// 改「只读模式」。拨了之后输入框还看得见光标、也还能选中复制，就是改不动内容
     func setIsReadOnly(_ value: Bool) {
         guard value != isReadOnly else { return }
@@ -1012,6 +1037,7 @@ final class MarkdownEditorSettings {
         self.pastesHTMLAsMarkdown = Default.pastesHTMLAsMarkdown
         self.showsLineNumbers = Default.showsLineNumbers
         self.showsQuoteBackground = Default.showsQuoteBackground
+        self.showsInlineCodeBacktickBackground = Default.showsInlineCodeBacktickBackground
         self.isReadOnly = Default.isReadOnly
         self.reservesSpaceForOutline = Default.reservesSpaceForOutline
         self.outlineWidthMode = Default.outlineWidthMode
@@ -1058,6 +1084,9 @@ final class MarkdownEditorSettings {
         if let value = payload.pastesHTMLAsMarkdown { pastesHTMLAsMarkdown = value }
         if let value = payload.showsLineNumbers { showsLineNumbers = value }
         if let value = payload.showsQuoteBackground { showsQuoteBackground = value }
+        if let value = payload.showsInlineCodeBacktickBackground {
+            showsInlineCodeBacktickBackground = value
+        }
         if let value = payload.isReadOnly { isReadOnly = value }
         if let value = payload.reservesSpaceForOutline { reservesSpaceForOutline = value }
         // 宽度那一组：模式和高度一样存字符串，认不出来就只让这一项退回默认
@@ -1156,6 +1185,7 @@ final class MarkdownEditorSettings {
                               pastesHTMLAsMarkdown: pastesHTMLAsMarkdown,
                               showsLineNumbers: showsLineNumbers,
                               showsQuoteBackground: showsQuoteBackground,
+                              showsInlineCodeBacktickBackground: showsInlineCodeBacktickBackground,
                               isReadOnly: isReadOnly,
                               reservesSpaceForOutline: reservesSpaceForOutline,
                               outlineWidthMode: outlineWidthMode.rawValue,
@@ -1404,6 +1434,9 @@ extension MarkdownEditorSettings {
         // 表格源码的样式放配色之后：它可能覆盖掉配色表里的那一色（理由见那个方法）
         applyTableSourceStyle(to: &theme)
         applyImageSize(to: &theme)
+        // 「行内代码反引号加底色」是个开关，不是颜色 / 尺寸，但同样得带上 ——
+        // 左栏「导出图片」是拿这套主题临时渲染一遍的，漏了它导出图里的反引号会和编辑页长得不一样
+        theme.inlineCodeBacktickHasBackground = showsInlineCodeBacktickBackground
         return theme
     }
 
