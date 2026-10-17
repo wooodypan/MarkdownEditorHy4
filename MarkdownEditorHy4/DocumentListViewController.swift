@@ -2,18 +2,21 @@
 //  DocumentListViewController.swift
 //  MarkdownEditorHy4
 //
-//  左栏：Documents 目录里的文件列表。点一份文件 → 右侧开一个 Tab 编辑它。
+//  左栏：文件列表。「文档」和「最近打开」两页由同一个类、不同的 `Source` 决定列什么。
 //
 
 import UIKit
 import MultiTabController
 
-/// 左侧栏 —— 列 Documents 目录里的文档。
+/// 左侧栏的文件列表。
 ///
-/// ### 它只负责「报告用户想打开哪一份」
-/// 点一份文件之后到底发生什么（iPhone 上 push 一页、iPad / Mac 上在右侧开 Tab），
-/// 由注入的 `router` 决定（`PPContentRouting`）。列表自己不关心设备环境，
-/// 这样同一份列表在三种形态下是同一份代码。
+/// ### 一个类，两页
+/// 「文档」和「最近打开」的差别只有**列的是哪一批文件**和**右键里能做什么**；
+/// 列表长什么样（标题 / 首行预览 / 修改日期）、单击双击怎么打开、搜索、排序、
+/// 右侧切换 Tab 时怎么跟着高亮，全都一样。写两份迟早会改漏一边，所以收成一个类：
+///
+/// - `.documents`：扫文档目录（`DocumentsWorkspace.documentURLs`），右键里是重命名 / 导出 / 删除；
+/// - `.recent`：列「打开过什么」（`RecentDocumentsStore`），右键里只有「从最近打开中移除」。
 ///
 /// ### 单击 / 双击的两种「打开」
 /// 跟 `MultiTabController` 的示例一致，对应它那套类 VS Code 的 Tab 策略：
@@ -22,19 +25,25 @@ import MultiTabController
 ///
 /// 所以「随手看看」用单击，「这份我要一直开着」用双击。
 ///
-/// ### 重命名 / 导出 / 删除
-/// **Mac 上对着某一行点右键**（iPad 上是长按）→ 菜单里选：
-/// - **重命名**：弹个输入框改文件名（内容不动，就地改个名字）；
-/// - **导出**：展开是图片 / HTML / PDF 三选一，和编辑页「⋯」菜单里那个「导出」是同一份实现；
-/// - **删除**：先弹一次确认框，删掉的文件在 Mac 上会进系统废纸篓（还能捞回来），手机上就是真删了。
-///
-/// iPhone 上没有右键，删除改成**往左滑**那一行（重命名 / 导出走长按，系统会把长按翻译成同一个菜单）。
-///
 /// ### 一行里显示什么
 /// 文件名 + 浅灰的**预览**（文档首行文字，一行放不下从尾巴省略）+ 文件的**修改日期**。
 /// 后两样是每次填 cell 时现读的（`DocumentsWorkspace.previewText` / `modificationDate`），
 /// 所以 Mac 上「在右栏改完按 ⌘S」，左栏这两行会跟着变 —— 存盘时也会发一条目录变更通知。
+///
+/// ### 搜索与排序
+/// 两页都有：顶上搜索框按文件名过滤（忽略大小写），导航条「⋯」里按修改时间 /
+/// 创建时间 / 标题排序（各有正反两种）。「最近」另外保留「按最近打开」这一种默认顺序。
 final class DocumentListViewController: UIViewController {
+
+    /// 这一页列什么
+    enum Source {
+        /// 文档目录里现在有什么
+        case documents
+        /// 打开过什么（记在缓存里的流水账，跟目录现在的样子无关）
+        case recent
+    }
+
+    private let source: Source
 
     /// 「打开一份文档」的出口。iPhone / iPad / Mac 三种环境注入不同实现
     var router: PPContentRouting?
@@ -43,33 +52,12 @@ final class DocumentListViewController: UIViewController {
     private let emptyLabel = UILabel()
     private let searchBar = UISearchBar()
 
-    /// 目录里现在有什么（排序 / 过滤之前的完整列表）
+    /// 这一页的完整数据（排序 / 过滤之前）。
+    /// 对「最近」来说它已经按打开时间倒序排好了（`RecentDocumentsStore.recentURLs`）
     private var allFiles: [URL] = []
 
     /// 当前**展示**的文件（已经过排序和搜索过滤）
     private var files: [URL] = []
-
-    // MARK: - 排序
-
-    /// 列表的排序方式。默认按标题升序，和 `DocumentsWorkspace.documentURLs` 原来的顺序一致
-    private enum SortOrder: Equatable {
-        case titleAscending
-        case titleDescending
-        case modifiedNewestFirst
-        case modifiedOldestFirst
-        case createdNewestFirst
-        case createdOldestFirst
-    }
-
-    private var sortOrder: SortOrder = .titleAscending
-
-    /// 导航条上「+」右边那颗「更多」按钮，点开是排序菜单
-    private lazy var moreBarButtonItem: UIBarButtonItem = {
-        let item = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"),
-                                   menu: makeSortMenu())
-        item.accessibilityLabel = "更多"
-        return item
-    }()
 
     // MARK: - 选中行高亮（与右侧选中的 Tab 联动）
 
@@ -78,7 +66,7 @@ final class DocumentListViewController: UIViewController {
 
     /// 这一页里有没有这条内容。右栏切换 Tab、联动高亮时用它判断该亮哪一页
     func containsItem(withID id: String) -> Bool {
-        files.contains { $0.path == id }
+        allFiles.contains { $0.path == id }
     }
 
     /// 设置 / 清除高亮行（传 `nil` 清除）。
@@ -117,7 +105,41 @@ final class DocumentListViewController: UIViewController {
         (cell as? DocumentListCell)?.setHighlighted(files[indexPath.row].path == highlightedItemID)
     }
 
-    /// 冷启动时那个「该不该自动打开第一份文档」只做一次
+    // MARK: - 排序
+
+    /// 列表的排序方式
+    private enum SortOrder: Equatable {
+        /// 「最近」页默认：按打开时间倒序（`allFiles` 本来的顺序）
+        case recentlyOpened
+        case titleAscending
+        case titleDescending
+        case modifiedNewestFirst
+        case modifiedOldestFirst
+        case createdNewestFirst
+        case createdOldestFirst
+    }
+
+    private var sortOrder: SortOrder
+
+    /// 导航条右侧的「更多」按钮（排序菜单），两页都有
+    private lazy var moreBarButtonItem: UIBarButtonItem = {
+        let item = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"),
+                                   menu: makeSortMenu())
+        item.accessibilityLabel = "更多"
+        return item
+    }()
+
+    /// 「最近」页导航条上的「清空」按钮
+    private lazy var clearBarButtonItem: UIBarButtonItem = {
+        let item = UIBarButtonItem(title: "清空",
+                                   style: .plain,
+                                   target: self,
+                                   action: #selector(clearAllTapped))
+        item.accessibilityLabel = "清空最近打开"
+        return item
+    }()
+
+    /// 冷启动时那个「该不该自动打开第一份文档」只做一次（只有「文档」页用）
     private var didOpenInitialDocument = false
 
     /// 真正动手「把一个文件删掉」的那一下。默认走 `DocumentsWorkspace.delete`
@@ -142,10 +164,14 @@ final class DocumentListViewController: UIViewController {
 
     // MARK: - 生命周期
 
-    init() {
+    /// - Parameter source: 列文档目录（默认）还是列「最近打开」
+    init(source: Source = .documents) {
+        self.source = source
+        // 「最近」默认保持「最近打开的排在前」这个本来的顺序
+        self.sortOrder = source == .recent ? .recentlyOpened : .titleAscending
         super.init(nibName: nil, bundle: nil)
         // ⚠️ 导航条按钮放在 init 里配，而不是 viewDidLoad：
-        // 这一页是挂在 PPTabBarController 里面的，外层导航条要拿它这颗「+」按钮
+        // 这一页是挂在 PPTabBarController 里面的，外层导航条要拿它的按钮
         // （理由见 WorkspaceCoordinator.syncNavigationItem），那时候它的 view 还没加载
         setupNavigationBar()
     }
@@ -156,7 +182,7 @@ final class DocumentListViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "文档"
+        title = source == .recent ? "最近打开" : "文档"
         view.backgroundColor = .systemBackground
 
         setupSearchBar()
@@ -170,15 +196,17 @@ final class DocumentListViewController: UIViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // 用户在「文件」App / Finder 里往这个目录丢了东西，切回来就能看到
+        // 切回来时重列一次：目录里 / 「最近」记录都可能已经变了
         reloadFiles()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // 只有「文档」页会在 iPad / Mac 上自动打开第一份。
         // 放在 viewDidAppear 而不是 viewDidLoad：这时候外层分栏容器的视图已经装好了，
         // 右侧的 Tab 宿主也已经就位，开 Tab 才是安全的（早于此时机开 Tab 会让
         // 宿主在「视图还没加载」的状态下插入条目）
+        guard source == .documents else { return }
         openInitialDocumentIfNeeded()
     }
 
@@ -225,23 +253,26 @@ final class DocumentListViewController: UIViewController {
         ])
     }
 
-    /// 目录真的为空时的说明文字（搜索没命中是另一段，见 `updateEmptyState`）
+    /// 本来就是空的时候的说明文字（搜索没命中是另一段，见 `updateEmptyState`）
     private var emptyDirectoryMessage: String {
-        #if targetEnvironment(macCatalyst)
-        return "这个目录里还没有文档\n\n用「文件 > 打开…」把硬盘上的 .md 打开，\n或者点右上角的「+」新建一份。"
-        #else
-        return "这个目录里还没有文档\n\n把 .md 文件放进「文件」App\n的 MarkdownEditorHy4 文件夹，\n或者点右上角的「+」新建一份。"
-        #endif
+        switch source {
+        case .documents:
+            // 开了 App 沙盒之后，这个文档目录藏在 App 自己的容器里，两个平台「把文件弄进来」
+            // 的办法也就不一样了：
+            // - Mac 上 Finder 里不方便直接拖到容器里，教用户走「文件 > 打开…」（⌘O）；
+            // - iPhone / iPad 上靠 Info.plist 的 `UIFileSharingEnabled` 把这个目录露在
+            //   「文件」App 里，直接往里丢就行。
+            #if targetEnvironment(macCatalyst)
+            return "这个目录里还没有文档\n\n用「文件 > 打开…」把硬盘上的 .md 打开，\n或者点右上角的「+」新建一份。"
+            #else
+            return "这个目录里还没有文档\n\n把 .md 文件放进「文件」App\n的 MarkdownEditorHy4 文件夹，\n或者点右上角的「+」新建一份。"
+            #endif
+        case .recent:
+            return "还没有打开过文档\n\n在「文档」那一页点一份，\n它就会出现在这里。"
+        }
     }
 
     /// 一份文件都没有时的说明文字 —— 空白列表很容易被当成「卡住了」
-    ///
-    /// ### 为什么两个平台要分开写
-    /// 开了 App 沙盒之后，这个文档目录藏在 App 自己的容器里，两个平台「把文件弄进来」
-    /// 的办法也就不一样了：
-    /// - Mac 上 Finder 里不方便直接拖到容器里，教用户走「文件 > 打开…」（⌘O）；
-    /// - iPhone / iPad 上靠 Info.plist 的 `UIFileSharingEnabled` 把这个目录露在
-    ///   「文件」App 里，直接往里丢就行。
     private func setupEmptyLabel() {
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         emptyLabel.text = emptyDirectoryMessage
@@ -261,12 +292,18 @@ final class DocumentListViewController: UIViewController {
     }
 
     private func setupNavigationBar() {
-        let addItem = UIBarButtonItem(barButtonSystemItem: .add,
-                                      target: self,
-                                      action: #selector(createNewDocument))
-        addItem.accessibilityLabel = "新建文档"
-        // rightBarButtonItems 里**第一个是最右边那颗**：这样「+」在左、「⋯」在右
-        navigationItem.rightBarButtonItems = [moreBarButtonItem, addItem]
+        switch source {
+        case .documents:
+            let addItem = UIBarButtonItem(barButtonSystemItem: .add,
+                                          target: self,
+                                          action: #selector(createNewDocument))
+            addItem.accessibilityLabel = "新建文档"
+            // rightBarButtonItems 里**第一个是最右边那颗**：这样「+」在左、「⋯」在右
+            navigationItem.rightBarButtonItems = [moreBarButtonItem, addItem]
+        case .recent:
+            // 同样让「⋯」在右、「清空」在左
+            navigationItem.rightBarButtonItems = [moreBarButtonItem, clearBarButtonItem]
+        }
     }
 
     /// 单击 / 双击两把手势。
@@ -290,13 +327,25 @@ final class DocumentListViewController: UIViewController {
     // MARK: - 数据
 
     private func reloadFiles() {
-        allFiles = DocumentsWorkspace.documentURLs()
-        // 高亮的那份如果已经不在目录里（被删 / 改名），别让状态一直挂着一个不存在的路径。
-        // 注意看的是 `allFiles` 而不是过滤后的 `files`：只是被搜索藏起来的行，
-        // 清空搜索后还该亮着
+        switch source {
+        case .documents:
+            allFiles = DocumentsWorkspace.documentURLs()
+        case .recent:
+            allFiles = RecentDocumentsStore.shared.recentURLs()
+        }
+
+        // 高亮的那份如果已经不在了（被删 / 改名 / 从记录里移除），别让状态一直挂着
+        // 一个不存在的路径。注意看的是 `allFiles` 而不是过滤后的 `files`：
+        // 只是被搜索藏起来的行，清空搜索后还该亮着
         if let id = highlightedItemID, !allFiles.contains(where: { $0.path == id }) {
             highlightedItemID = nil
         }
+
+        // 「清空」只在有记录时可点（找不找得到搜索结果跟这个无关）
+        if source == .recent {
+            clearBarButtonItem.isEnabled = !allFiles.isEmpty
+        }
+
         applySortAndFilter()
     }
 
@@ -317,6 +366,9 @@ final class DocumentListViewController: UIViewController {
     /// 按 `sortOrder` 排一份拷贝
     private func sorted(_ urls: [URL]) -> [URL] {
         switch sortOrder {
+        case .recentlyOpened:
+            // `allFiles` 本来就是按「最近打开」倒序的，过滤只保持原顺序，不用再排
+            return urls
         case .titleAscending:
             return urls.sorted { compareNames($0, $1) == .orderedAscending }
         case .titleDescending:
@@ -368,7 +420,7 @@ final class DocumentListViewController: UIViewController {
             .localizedStandardCompare(DocumentsWorkspace.displayName(for: rhs))
     }
 
-    /// 列表空了时该显示哪段说明：目录本来就空，还是搜索没命中
+    /// 列表空了时该显示哪段说明：本来就没有文件，还是搜索没命中
     private func updateEmptyState(query: String) {
         let isEmpty = files.isEmpty
         tableView.isHidden = isEmpty
@@ -382,7 +434,7 @@ final class DocumentListViewController: UIViewController {
     // MARK: - 排序菜单
 
     /// 「⋯」点开的排序菜单：修改时间 / 创建时间 / 标题，各自升序和降序。
-    /// 当前选中的那一项打勾。
+    /// 「最近」页多一项「按最近打开」，用来回到它本来的默认顺序。
     private func makeSortMenu() -> UIMenu {
         func action(_ title: String, _ order: SortOrder) -> UIAction {
             UIAction(title: title, state: sortOrder == order ? .on : .off) { [weak self] _ in
@@ -409,7 +461,19 @@ final class DocumentListViewController: UIViewController {
                                action("升序", .titleAscending),
                                action("降序", .titleDescending)
                            ])
-        return UIMenu(children: [modified, created, title])
+
+        let sections: [UIMenu]
+        switch source {
+        case .documents:
+            sections = [modified, created, title]
+        case .recent:
+            // 「最近」本来的顺序就是按打开时间倒序，换回来时用这一项
+            let recentlyOpened = UIMenu(title: "按最近打开",
+                                        image: UIImage(systemName: "clock.arrow.circlepath"),
+                                        children: [action("最近打开的排在前", .recentlyOpened)])
+            sections = [recentlyOpened, modified, created, title]
+        }
+        return UIMenu(children: sections)
     }
 
     private func applySortOrder(_ order: SortOrder) {
@@ -420,6 +484,8 @@ final class DocumentListViewController: UIViewController {
         applySortAndFilter()
     }
 
+    // MARK: - 通知
+
     /// 通知：目录变了 / 有人要新建 / 有外部文件要打开
     private func observeWorkspaceChanges() {
         let center = NotificationCenter.default
@@ -427,6 +493,9 @@ final class DocumentListViewController: UIViewController {
                            selector: #selector(workspaceDidChange),
                            name: DocumentsWorkspace.didChangeNotification,
                            object: nil)
+
+        // 下面两条只管「文档」页：「最近」不负责新建，也不接外部打开的文件
+        guard source == .documents else { return }
         center.addObserver(self,
                            selector: #selector(createNewDocument),
                            name: DocumentsWorkspace.newDocumentRequestedNotification,
@@ -443,13 +512,13 @@ final class DocumentListViewController: UIViewController {
 
     /// 有人（⌘O 打开面板、Finder 双击、后台传文件进来）送了一个文件路径 → 新开一个 Tab
     @objc private func documentOpenRequested(_ notification: Notification) {
-        guard let url = notification.object as? URL else { return }
+        guard source == .documents, let url = notification.object as? URL else { return }
         open(url, mode: .newTab)
     }
 
     // MARK: - 打开 / 新建
 
-    /// 冷启动时该不该自己开一份。
+    /// 冷启动时该不该自己开一份（只跟「文档」页有关）。
     ///
     /// - 用户是从 Finder 双击某个 .md 进来的 → 当然开那一份（走外部文件那条通知）；
     /// - iPad / Mac 上右侧本来就是空的，顺手把第一份打开，别让人对着空面板发呆；
@@ -469,7 +538,7 @@ final class DocumentListViewController: UIViewController {
     /// 把一份磁盘文件交给右侧编辑。
     ///
     /// 打开这件事（读内容、记一笔「最近打开」、送给路由）统一在 `DocumentOpening` 里做 ——
-    /// 「最近」那一页走的是同一条路，两边的行为必须对得上。
+    /// 「文档」和「最近」走的是同一条路，两边的行为必须对得上。
     private func open(_ url: URL, mode: PPContentOpenMode) {
         guard DocumentOpening.open(url, mode: mode, using: router) else {
             showAlert(title: "打不开文件",
@@ -480,10 +549,17 @@ final class DocumentListViewController: UIViewController {
         // 打开成功就把这一行点亮（VS Code 式）；iPad / Mac 上右侧切 Tab 时
         // 还会由 `onSelectedItemChanged` 再同步一次（幂等）
         setHighlightedItemID(url.path)
-        // 打开之后「最近」那一页的顺序会变，但那是它自己的事（它出现时会重列）
+
+        switch source {
+        case .documents:
+            break
+        case .recent:
+            // 打开过之后这份会重新排到最前面，列表顺序得跟着变
+            reloadFiles()
+        }
     }
 
-    /// 新建一份空白文档，并立刻在右侧开个新 Tab 编辑它。
+    /// 新建一份空白文档，并立刻在右侧开个新 Tab 编辑它（只有「文档」页有这颗按钮）。
     ///
     /// 文件是**先落到磁盘**的，所以左侧栏立刻就能看到 ——
     /// 不搞「内存里的草稿」那种中间态，⌘S 也就永远有地方写。
@@ -491,6 +567,7 @@ final class DocumentListViewController: UIViewController {
     /// 这会儿它还顶着「未命名」这个占位名；等用户在右栏第一次按 ⌘S，
     /// 编辑页会弹框请他起个正式名字（见 `MarkdownDocumentViewController.saveDocument`）。
     @objc private func createNewDocument() {
+        guard source == .documents else { return }
         do {
             let url = try DocumentsWorkspace.createEmptyDocument()
             NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
@@ -523,21 +600,29 @@ final class DocumentListViewController: UIViewController {
         return files[indexPath.row]
     }
 
-    // MARK: - 重命名 / 导出 / 删除
+    // MARK: - 右键菜单
 
-    /// 右键（iPad 上是长按）弹出来的那一组菜单项：重命名 / 导出 / 删除。
+    /// 右键（iPad 上是长按）弹出的那一组菜单项。
     ///
     /// 抽成单独的方法是为了能单测 —— 不然测试得先伪造一次右键事件才能看到菜单长什么样。
-    /// 菜单顶上的小标题用文件名：右键的时候正好再确认一眼点的是哪一份。
     func contextMenu(for url: URL) -> UIMenu {
-        UIMenu(title: DocumentsWorkspace.displayName(for: url),
-               children: [
-                   renameAction(for: url),
-                   // 「导出」是个子菜单（图片 / HTML / PDF），整块由 `DocumentExporter` 生成 ——编辑页那个菜单用的是同一个方法，所以两处的选项永远一致
-                   exporter.exportMenu { [weak self] in self?.exportSource(for: url) },
-                   deleteAction(for: url)
-               ])
+        switch source {
+        case .documents:
+            // 菜单顶上的小标题用文件名：右键的时候正好再确认一眼点的是哪一份
+            return UIMenu(title: DocumentsWorkspace.displayName(for: url),
+                          children: [
+                              renameAction(for: url),
+                              // 「导出」是个子菜单（图片 / HTML / PDF），整块由 `DocumentExporter` 生成 ——编辑页那个菜单用的是同一个方法，所以两处的选项永远一致
+                              exporter.exportMenu { [weak self] in self?.exportSource(for: url) },
+                              deleteAction(for: url)
+                          ])
+        case .recent:
+            // 「最近」里只动记录，不动文件
+            return removeMenu(for: url)
+        }
     }
+
+    // MARK: - 文档页：重命名 / 导出 / 删除
 
     /// 「重命名」那一项
     private func renameAction(for url: URL) -> UIAction {
@@ -555,8 +640,6 @@ final class DocumentListViewController: UIViewController {
             self?.confirmDelete(url)
         }
     }
-
-    // MARK: - 重命名
 
     /// 弹「给文档改个名字」的输入框。
     ///
@@ -638,8 +721,6 @@ final class DocumentListViewController: UIViewController {
         present(alert, animated: true)
     }
 
-    // MARK: - 导出
-
     /// 点「导出」时交给 `DocumentExporter` 的那份内容 —— 从磁盘上读。
     ///
     /// ### 和编辑页那条路的差别
@@ -660,8 +741,6 @@ final class DocumentListViewController: UIViewController {
                                     displayName: DocumentsWorkspace.displayName(for: url),
                                     fileURL: url)
     }
-
-    // MARK: - 删除
 
     /// 删之前先问一句。这是**不可逆**的操作（Mac 上还能从废纸篓捞，手机上就是没了）。
     ///
@@ -738,6 +817,51 @@ final class DocumentListViewController: UIViewController {
         return true
     }
 
+    // MARK: - 最近页：移除 / 清空
+
+    /// 右键（iPad 上长按）弹出的菜单。
+    ///
+    /// 抽成单独的方法是为了能单测 —— 不然测试得先伪造一次右键事件才能看到菜单长什么样。
+    func removeMenu(for url: URL) -> UIMenu {
+        let remove = UIAction(title: "从最近打开中移除",
+                              image: UIImage(systemName: "xmark.circle"),
+                              attributes: .destructive) { [weak self] _ in
+            self?.remove(url)
+        }
+        // 标题里就把「文件不会没」说清楚：这一页的删除只动记录，
+        // 用户最担心的恰恰是「我是不是把文件删了」
+        return UIMenu(title: "\(DocumentsWorkspace.displayName(for: url))\n（只从列表里去掉，文件还在）",
+                      children: [remove])
+    }
+
+    /// 从记录里去掉一份（**不动磁盘上的文件**，所以不用弹确认框——移错了再打开一次就回来了）
+    func remove(_ url: URL) {
+        RecentDocumentsStore.shared.remove(url)
+        reloadFiles()
+    }
+
+    /// 「清空」按钮：一次把全部记录抹掉，所以先问一句。
+    ///
+    /// 这里同样**不动任何文件**，确认框里得说明白，别把人吓着。
+    @objc private func clearAllTapped() {
+        guard source == .recent, !allFiles.isEmpty else { return }
+        let alert = UIAlertController(
+            title: "清空最近打开？",
+            message: "「最近打开」这一页会变成空的。\n\n这只是把记录清掉，文档目录里的文件一份都不会动。",
+            preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "清空", style: .destructive) { [weak self] _ in
+            self?.performClearAll()
+        })
+        present(alert, animated: true)
+    }
+
+    /// 确认框里点了「清空」之后真正要做的事（单独抽出来是为了能单测）
+    func performClearAll() {
+        RecentDocumentsStore.shared.removeAll()
+        reloadFiles()
+    }
+
     // MARK: - 小工具
 
     private static let cellIdentifier = "DocumentListCell"
@@ -773,12 +897,12 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: Self.cellIdentifier, for: indexPath)
-        let url = files[indexPath.row]
         // 上面注册的就是 DocumentListCell，这里一定转得成；真转不成说明那行注册被改坏了
         guard let documentCell = cell as? DocumentListCell else { return cell }
 
         // 第一行文件名**去掉扩展名**（这里所有文件都是 md，后缀只是噪音），
         // 第二行是文档首行的浅灰预览，第三行是修改日期
+        let url = files[indexPath.row]
         documentCell.configure(name: DocumentsWorkspace.displayName(for: url),
                                preview: DocumentsWorkspace.previewText(of: url),
                                date: DocumentsWorkspace.modificationDate(of: url))
@@ -813,24 +937,34 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
         }
     }
 
-    /// 手指往左滑也能删 —— iPhone / iPad 上没有右键，这是那边唯一的入口
+    /// 手指往左滑：文档页是删除，最近页是移除记录 —— iPhone / iPad 上没有右键，这是那边的入口
     func tableView(_ tableView: UITableView,
                    trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
         guard files.indices.contains(indexPath.row) else { return nil }
         let url = files[indexPath.row]
 
-        let action = UIContextualAction(style: .destructive, title: "删除") { [weak self] _, _, completion in
-            guard let self else {
-                completion(false)
-                return
+        let action: UIContextualAction
+        switch source {
+        case .documents:
+            action = UIContextualAction(style: .destructive, title: "删除") { [weak self] _, _, completion in
+                guard let self else {
+                    completion(false)
+                    return
+                }
+                // 要等用户点完确认框才知道到底删没删，所以 completion 得挂在确认结果上
+                self.confirmDelete(url) { didDelete in completion(didDelete) }
             }
-            // 要等用户点完确认框才知道到底删没删，所以 completion 得挂在确认结果上
-            self.confirmDelete(url) { didDelete in completion(didDelete) }
+            action.image = UIImage(systemName: "trash")
+        case .recent:
+            action = UIContextualAction(style: .destructive, title: "移除") { [weak self] _, _, completion in
+                self?.remove(url)
+                completion(true)
+            }
+            action.image = UIImage(systemName: "xmark.circle")
         }
-        action.image = UIImage(systemName: "trash")
 
         let configuration = UISwipeActionsConfiguration(actions: [action])
-        // 一滑到底就直接删太容易手滑（何况还要弹确认框），关掉
+        // 一滑到底就直接执行太容易手滑（文档页还要弹确认框），关掉
         configuration.performsFirstActionWithFullSwipe = false
         return configuration
     }

@@ -40,8 +40,8 @@ final class WorkspaceCoordinator {
     /// 左栏「文档」那一页。留成属性是为了让测试能直接拿到它
     let documentListViewController: DocumentListViewController
 
-    /// 左栏「最近打开」那一页
-    let recentDocumentsViewController: RecentDocumentsViewController
+    /// 左栏「最近打开」那一页（和「文档」页是同一个类，只是 `source` 不同）
+    let recentDocumentsViewController: DocumentListViewController
 
     /// 左栏那个标签页容器（装着上面两页）
     private let leftTabBar: PPTabBarController
@@ -58,7 +58,7 @@ final class WorkspaceCoordinator {
         let list = DocumentListViewController()
         documentListViewController = list
 
-        let recent = RecentDocumentsViewController()
+        let recent = DocumentListViewController(source: .recent)
         recentDocumentsViewController = recent
 
         let tabs: [UIViewController] = [list, recent]
