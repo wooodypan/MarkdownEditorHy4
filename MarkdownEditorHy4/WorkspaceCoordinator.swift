@@ -103,11 +103,22 @@ final class WorkspaceCoordinator {
                 // 传进去一个导航控制器会变成「往导航栈里 push 导航控制器」，
                 // 运行时报 `Pushing a navigation controller is not supported` 直接崩 ——
                 // 而且崩在启动那一刻，编译期完全看不出来。
-                return SplitContainerViewController(
+                let split = SplitContainerViewController(
                     leftViewController: tabBar,
                     router: router,
                     contentViewControllerProvider: makeContentViewController
                 )
+
+                // 右侧选中 Tab 变化（点 Tab / 打开内容 / 关 Tab 后自动切相邻）
+                // → 左侧两页同步高亮对应行，做出 VS Code 资源管理器那种「右边切哪个，左边亮哪个」。
+                // `item?.id` 就是文件路径（见 `DocumentOpening`），两页各自按路径找自己的行；
+                // 哪一页里没有这一行，就自然不亮。
+                split.detailHost.onSelectedItemChanged = { [weak list = list, weak recent = recent] item in
+                    let id = item?.id
+                    list?.setHighlightedItemID(id, scrollToSelection: true)
+                    recent?.setHighlightedItemID(id, scrollToSelection: true)
+                }
+                return split
             }
         )
 

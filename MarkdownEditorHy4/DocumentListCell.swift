@@ -31,6 +31,14 @@ final class DocumentListCell: UITableViewCell {
     /// 不这么做的话那一行会是一片空白，看着像布局坏了 —— 空白和「空文档」得能分得出来。
     static let emptyPreviewText = "空文档"
 
+    /// 选中行的灰底，模仿 VS Code 资源管理器：浅色下中性灰，深色下比背景亮一档。
+    /// 和 `MultiTabController` 示例里的 `pp_selectedRowBackground` 取同一组数值。
+    private static let highlightedBackgroundColor = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(white: 0.26, alpha: 1)
+            : UIColor(white: 0.90, alpha: 1)
+    }
+
     /// 日期怎么显示。
     ///
     /// 抽成 `static` 是为了**整个列表共用一份** —— `DateFormatter` 造一次挺贵，每个 cell 造一个会拖慢滚动。
@@ -74,6 +82,14 @@ final class DocumentListCell: UITableViewCell {
             dateLabel.text = nil
             dateLabel.isHidden = true
         }
+    }
+
+    /// 设置这一行是否处于「选中」状态（右侧正开着这份文档时）。
+    ///
+    /// ⚠️ cell 会被复用，所以每次 `cellForRowAt` 都要调一次，两种状态都得显式赋上，
+    /// 不能只在「选中」时设灰底 —— 否则滚回来时上一份文档的灰底还挂在别人身上。
+    func setHighlighted(_ isHighlighted: Bool) {
+        contentView.backgroundColor = isHighlighted ? Self.highlightedBackgroundColor : .clear
     }
 
     // MARK: - 界面

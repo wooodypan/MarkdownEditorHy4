@@ -33,14 +33,53 @@ final class RecentDocumentsViewController: UIViewController {
     /// 当前列出来的文件，按「最近打开」排在最前面
     private var files: [URL] = []
 
-    private static let cellIdentifier = "RecentDocumentCell"
+    // MARK: - 选中行高亮（与右侧选中的 Tab 联动）
 
-    /// 「3 分钟前」这种说法用它生成（系统会按语言习惯来，不用自己拼）
-    private static let relativeFormatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter
-    }()
+    /// 当前高亮行的内容 id —— 就是 `PPContentItem.id`，也就是文件路径（见 `DocumentOpening`）
+    private(set) var highlightedItemID: String?
+
+    /// 这一页里有没有这条内容。右栏切换 Tab、联动高亮时用它判断该亮哪一页
+    func containsItem(withID id: String) -> Bool {
+        files.contains { $0.path == id }
+    }
+
+    /// 设置 / 清除高亮行（传 `nil` 清除）。
+    ///
+    /// - Parameter scrollToSelection: 目标行不在屏幕内时要不要滚过去。
+    ///   自己点击时传 false（本来就在眼前）；右侧切 Tab 联动时传 true，更接近 VS Code。
+    func setHighlightedItemID(_ id: String?, scrollToSelection: Bool = false) {
+        guard id != highlightedItemID else { return }
+        highlightedItemID = id
+        // 视图还没加载时只记状态，首次 `cellForRowAt` 会按它上色
+        guard isViewLoaded else { return }
+        applyHighlight(scrollToSelection: scrollToSelection)
+    }
+
+    /// 把高亮状态套到当前可见的 cell 上；看不见的行等滚动出现时由 `cellForRowAt` 上色
+    private func applyHighlight(scrollToSelection: Bool) {
+        for cell in tableView.visibleCells {
+            guard let indexPath = tableView.indexPath(for: cell) else { continue }
+            updateHighlightAppearance(of: cell, at: indexPath)
+        }
+
+        guard scrollToSelection,
+              let indexPath = highlightedIndexPath(),
+              tableView.window != nil,
+              !(tableView.indexPathsForVisibleRows ?? []).contains(indexPath) else { return }
+        tableView.scrollToRow(at: indexPath, at: .middle, animated: true)
+    }
+
+    private func highlightedIndexPath() -> IndexPath? {
+        guard let id = highlightedItemID,
+              let row = files.firstIndex(where: { $0.path == id }) else { return nil }
+        return IndexPath(row: row, section: 0)
+    }
+
+    private func updateHighlightAppearance(of cell: UITableViewCell, at indexPath: IndexPath) {
+        (cell as? DocumentListCell)?.setHighlighted(files[indexPath.row].path == highlightedItemID)
+    }
+
+    private static let cellIdentifier = "RecentDocumentCell"
 
     // MARK: - 生命周期
 
@@ -81,8 +120,11 @@ final class RecentDocumentsViewController: UIViewController {
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.rowHeight = 46
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: Self.cellIdentifier)
+        // 和「文档」那一页一样：行高按三行字（标题 / 预览 / 修改日期）自动算，
+        // 字号跟着系统的「文字大小」变，写死数字会挤住字
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 76
+        tableView.register(DocumentListCell.self, forCellReuseIdentifier: Self.cellIdentifier)
         view.addSubview(tableView)
 
         NSLayoutConstraint.activate([
@@ -139,6 +181,10 @@ final class RecentDocumentsViewController: UIViewController {
 
     private func reloadFiles() {
         files = RecentDocumentsStore.shared.recentURLs()
+        // 高亮的那份如果已经不在列表里（记录被移除），别让状态一直挂着一个不存在的路径
+        if let id = highlightedItemID, !files.contains(where: { $0.path == id }) {
+            highlightedItemID = nil
+        }
         tableView.isHidden = files.isEmpty
         emptyLabel.isHidden = !files.isEmpty
         // 一条记录都没有时，「清空」这个按钮按下去也没意义，直接置灰
@@ -167,6 +213,9 @@ final class RecentDocumentsViewController: UIViewController {
             reloadFiles()
             return
         }
+        // 打开成功就点亮这一行；iPad / Mac 上右侧切 Tab 时还会由
+        // `onSelectedItemChanged` 再同步一次（幂等）
+        setHighlightedItemID(url.path)
         // 打开过之后这份会重新排到最前面，列表顺序得跟着变
         reloadFiles()
     }
@@ -255,16 +304,15 @@ extension RecentDocumentsViewController: UITableViewDataSource, UITableViewDeleg
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: Self.cellIdentifier, for: indexPath)
+        // 和「文档」那一页共用同一个 cell：标题、首行预览、修改日期，样式自然一致
+        guard let documentCell = cell as? DocumentListCell else { return cell }
         let url = files[indexPath.row]
-        var content = cell.defaultContentConfiguration()
-        content.text = DocumentsWorkspace.displayName(for: url)
-        // 副标题写「上次打开是什么时候」，这一页的价值就在于这个先后
-        if let date = RecentDocumentsStore.shared.lastOpenedAt(for: url) {
-            content.secondaryText = Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
-        }
-        content.image = UIImage(systemName: "clock")
-        cell.contentConfiguration = content
-        return cell
+        documentCell.configure(name: DocumentsWorkspace.displayName(for: url),
+                               preview: DocumentsWorkspace.previewText(of: url),
+                               date: DocumentsWorkspace.modificationDate(of: url))
+        // cell 会被复用，所以每次都要按当前高亮状态重新上色
+        documentCell.setHighlighted(url.path == highlightedItemID)
+        return documentCell
     }
 
     /// ⚠️ 这里**故意不打开文档** —— 打开归上面那两把手势管（要区分单击 / 双击），

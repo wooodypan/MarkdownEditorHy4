@@ -45,6 +45,52 @@ final class DocumentListViewController: UIViewController {
     /// 当前列出来的文件，按显示顺序
     private var files: [URL] = []
 
+    // MARK: - 选中行高亮（与右侧选中的 Tab 联动）
+
+    /// 当前高亮行的内容 id —— 就是 `PPContentItem.id`，也就是文件路径（见 `DocumentOpening`）
+    private(set) var highlightedItemID: String?
+
+    /// 这一页里有没有这条内容。右栏切换 Tab、联动高亮时用它判断该亮哪一页
+    func containsItem(withID id: String) -> Bool {
+        files.contains { $0.path == id }
+    }
+
+    /// 设置 / 清除高亮行（传 `nil` 清除）。
+    ///
+    /// - Parameter scrollToSelection: 目标行不在屏幕内时要不要滚过去。
+    ///   自己点击时传 false（本来就在眼前）；右侧切 Tab 联动时传 true，更接近 VS Code。
+    func setHighlightedItemID(_ id: String?, scrollToSelection: Bool = false) {
+        guard id != highlightedItemID else { return }
+        highlightedItemID = id
+        // 视图还没加载时只记状态，首次 `cellForRowAt` 会按它上色
+        guard isViewLoaded else { return }
+        applyHighlight(scrollToSelection: scrollToSelection)
+    }
+
+    /// 把高亮状态套到当前可见的 cell 上；看不见的行等滚动出现时由 `cellForRowAt` 上色
+    private func applyHighlight(scrollToSelection: Bool) {
+        for cell in tableView.visibleCells {
+            guard let indexPath = tableView.indexPath(for: cell) else { continue }
+            updateHighlightAppearance(of: cell, at: indexPath)
+        }
+
+        guard scrollToSelection,
+              let indexPath = highlightedIndexPath(),
+              tableView.window != nil,
+              !(tableView.indexPathsForVisibleRows ?? []).contains(indexPath) else { return }
+        tableView.scrollToRow(at: indexPath, at: .middle, animated: true)
+    }
+
+    private func highlightedIndexPath() -> IndexPath? {
+        guard let id = highlightedItemID,
+              let row = files.firstIndex(where: { $0.path == id }) else { return nil }
+        return IndexPath(row: row, section: 0)
+    }
+
+    private func updateHighlightAppearance(of cell: UITableViewCell, at indexPath: IndexPath) {
+        (cell as? DocumentListCell)?.setHighlighted(files[indexPath.row].path == highlightedItemID)
+    }
+
     /// 冷启动时那个「该不该自动打开第一份文档」只做一次
     private var didOpenInitialDocument = false
 
@@ -192,6 +238,10 @@ final class DocumentListViewController: UIViewController {
 
     private func reloadFiles() {
         files = DocumentsWorkspace.documentURLs()
+        // 高亮的那份如果已经不在列表里（被删 / 改名），别让状态一直挂着一个不存在的路径
+        if let id = highlightedItemID, !files.contains(where: { $0.path == id }) {
+            highlightedItemID = nil
+        }
         tableView.isHidden = files.isEmpty
         emptyLabel.isHidden = !files.isEmpty
         tableView.reloadData()
@@ -254,6 +304,9 @@ final class DocumentListViewController: UIViewController {
             reloadFiles()
             return
         }
+        // 打开成功就把这一行点亮（VS Code 式）；iPad / Mac 上右侧切 Tab 时
+        // 还会由 `onSelectedItemChanged` 再同步一次（幂等）
+        setHighlightedItemID(url.path)
         // 打开之后「最近」那一页的顺序会变，但那是它自己的事（它出现时会重列）
     }
 
@@ -542,6 +595,8 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
         documentCell.configure(name: DocumentsWorkspace.displayName(for: url),
                                preview: DocumentsWorkspace.previewText(of: url),
                                date: DocumentsWorkspace.modificationDate(of: url))
+        // cell 会被复用，所以每次都要按当前高亮状态重新上色
+        documentCell.setHighlighted(url.path == highlightedItemID)
         return documentCell
     }
 
