@@ -1,0 +1,23 @@
+#!/bin/bash
+# .app 的入口，由 launchd 拉起（不是从沙盒里的 bash 直接跑，那样会继承沙盒）。
+# 唯一职责：找 Python、把 server.py 跑起来。
+
+APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# 优先用 WorkBuddy 托管的 Python，其次系统 Python
+for candidate in \
+  /Users/pan/.workbuddy/binaries/python/versions/3.13.12/bin/python3 \
+  /opt/homebrew/bin/python3 \
+  /usr/bin/python3; do
+  if [ -x "$candidate" ]; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+
+if [ -z "$PYTHON" ]; then
+  echo "no python3 found" >&2
+  exit 78
+fi
+
+exec "$PYTHON" "$APP_DIR/Resources/server.py"
