@@ -205,6 +205,11 @@ final class MarkdownEditorSettings {
         /// 想要原样 HTML 的人可以来关掉
         static let pastesHTMLAsMarkdown = true
 
+        /// 「网页图片存到本地」默认打开。
+        /// 网页里复制来的图片原本只是一串网络地址，原网页改了、删了或者断网，笔记里的图就全没了。
+        /// 存一份到本地，笔记才算独立。
+        static let savesWebImagesLocally = true
+
         /// 「显示行号」默认**关闭**：对读代码 / 校对长文的人来说它有用，
         /// 但默认打开会白占正文左边一条带子 —— 纯读文档的人不需要它
         static let showsLineNumbers = false
@@ -386,6 +391,8 @@ final class MarkdownEditorSettings {
         var remembersScrollPosition: Bool?
         /// 粘贴网页复制来的富文本时，要不要先转成 markdown 源码
         var pastesHTMLAsMarkdown: Bool?
+        /// 网页内容里的图片要不要下载下来存到本地
+        var savesWebImagesLocally: Bool?
         /// 正文左边要不要显示行号
         var showsLineNumbers: Bool?
         /// 引用块的内容（竖条右边那一整片）要不要铺一层淡背景
@@ -460,6 +467,17 @@ final class MarkdownEditorSettings {
     /// 转换是「尽力而为」的 —— 结果不保证和原页面一模一样。
     /// 想保留原始 HTML（比如要粘一段现成的网页代码）的人得有办法关掉它。
     private(set) var pastesHTMLAsMarkdown: Bool
+
+    /// 粘贴网页内容时，把正文里指向网络的图片下载下来存到本地。默认 `true`（开）。
+    ///
+    /// 打开时：网页里的图会先下载一份，按「插入图片」那一组的选择存进对应目录，正文里的地址换成本地路径。
+    /// 这样断网、或者原网页把图删了，笔记里的图照样打得开。
+    ///
+    /// 关掉时：正文里保留原来的网络地址，图能不能显示全看那张网还在不在。
+    ///
+    /// ### 什么时候才轮得到这一项
+    /// 它挂在「粘贴网页内容时转成 Markdown」后面：那个开关关着时，粘进来的是纯文本，正文里根本没有图片地址，这一项也就无从下手。
+    private(set) var savesWebImagesLocally: Bool
 
     /// 正文左边要不要显示行号。默认 `false`（关）。
     ///
@@ -738,6 +756,16 @@ final class MarkdownEditorSettings {
     func setPastesHTMLAsMarkdown(_ value: Bool) {
         guard value != pastesHTMLAsMarkdown else { return }
         pastesHTMLAsMarkdown = value
+        save()
+        postChange()
+    }
+
+    /// 改「网页图片存到本地」。
+    ///
+    /// 和上面那一项一样，只影响下一次粘贴，已经粘进来的内容不动，所以不用重新渲染。
+    func setSavesWebImagesLocally(_ value: Bool) {
+        guard value != savesWebImagesLocally else { return }
+        savesWebImagesLocally = value
         save()
         postChange()
     }
@@ -1035,6 +1063,7 @@ final class MarkdownEditorSettings {
         // 先给一套默认值，再用盘上的内容覆盖 —— 这样「读文件失败」也能得到一份可用的配置
         self.remembersScrollPosition = Default.remembersScrollPosition
         self.pastesHTMLAsMarkdown = Default.pastesHTMLAsMarkdown
+        self.savesWebImagesLocally = Default.savesWebImagesLocally
         self.showsLineNumbers = Default.showsLineNumbers
         self.showsQuoteBackground = Default.showsQuoteBackground
         self.showsInlineCodeBacktickBackground = Default.showsInlineCodeBacktickBackground
@@ -1082,6 +1111,7 @@ final class MarkdownEditorSettings {
         guard let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return }
         if let value = payload.remembersScrollPosition { remembersScrollPosition = value }
         if let value = payload.pastesHTMLAsMarkdown { pastesHTMLAsMarkdown = value }
+        if let value = payload.savesWebImagesLocally { savesWebImagesLocally = value }
         if let value = payload.showsLineNumbers { showsLineNumbers = value }
         if let value = payload.showsQuoteBackground { showsQuoteBackground = value }
         if let value = payload.showsInlineCodeBacktickBackground {
@@ -1183,6 +1213,7 @@ final class MarkdownEditorSettings {
     private func save() {
         let payload = Payload(remembersScrollPosition: remembersScrollPosition,
                               pastesHTMLAsMarkdown: pastesHTMLAsMarkdown,
+                              savesWebImagesLocally: savesWebImagesLocally,
                               showsLineNumbers: showsLineNumbers,
                               showsQuoteBackground: showsQuoteBackground,
                               showsInlineCodeBacktickBackground: showsInlineCodeBacktickBackground,

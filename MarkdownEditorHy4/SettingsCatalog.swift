@@ -75,7 +75,7 @@ enum SettingsSection: Int, CaseIterable {
         case .tableLayout: return "列宽、下方源码的字号与文字颜色"
         case .imageSize: return "图片画多大：宽度怎么算、最大高度"
         case .imageInsertion: return "粘贴进来的图片存到哪儿、文件叫什么名字"
-        case .clipboard: return "粘贴网页内容时先转成 Markdown 源码"
+        case .clipboard: return "粘贴网页内容时先转成 Markdown 源码；网页里的图片要不要一起存到本地"
         }
     }
 
@@ -122,7 +122,8 @@ enum SettingsSection: Int, CaseIterable {
             return [.imageInsertionMode, .imageNameMode]
             #endif
         case .clipboard:
-            return [.pastesHTMLAsMarkdown]
+            // 「存本地」排在转 markdown 下面：它得先有 markdown 里的图片地址才谈得上存
+            return [.pastesHTMLAsMarkdown, .savesWebImagesLocally]
         }
     }
 }
@@ -192,6 +193,8 @@ enum SettingsRow: Int, CaseIterable {
     case imageNameMode
     /// 粘贴网页复制来的富文本时，要不要先转成 markdown 源码
     case pastesHTMLAsMarkdown
+    /// 网页内容里的图片要不要下载下来，按「插入图片」那一组的选择存进对应目录
+    case savesWebImagesLocally
 
     /// 这一行在**当前设备**上有没有意义（没有就整行不出现）。
     ///
@@ -274,6 +277,8 @@ enum SettingsRow: Int, CaseIterable {
             return "图片文件名"
         case .pastesHTMLAsMarkdown:
             return "粘贴网页内容时转成 Markdown"
+        case .savesWebImagesLocally:
+            return "网页图片存到本地"
         }
     }
 
@@ -423,6 +428,12 @@ enum SettingsRow: Int, CaseIterable {
                 + "标题、列表、表格、链接、图片都转成对应的 markdown 写法，而不是一堆标签。"
                 + "关掉：剪贴板里有什么就原样插什么。"
                 + "复制的是纯文本时这一项没有区别，只有带格式的富文本才看得出开关。"
+        case .savesWebImagesLocally:
+            return "打开：粘贴网页内容时，正文里那些指向网络的图片会先下载一份存到本地，地址换成本地路径。"
+                + "存到哪个目录、文件叫什么名字，跟着设置里「插入图片」那一组的选择走。"
+                + "这样断网、或者原网页把图删了，笔记里的图照样打得开。"
+                + "关掉：正文里保留原来的网络地址，图显示得出来全靠那张网还在。"
+                + "只对带图片的网页内容有影响；复制的是一段纯文字时看不出区别。"
         }
     }
 
@@ -488,6 +499,7 @@ enum SettingsRow: Int, CaseIterable {
         case .showsLineNumbers: return settings.showsLineNumbers
         case .remembersScrollPosition: return settings.remembersScrollPosition
         case .pastesHTMLAsMarkdown: return settings.pastesHTMLAsMarkdown
+        case .savesWebImagesLocally: return settings.savesWebImagesLocally
         case .showsQuoteBackground: return settings.showsQuoteBackground
         case .inlineCodeBacktickBackground: return settings.showsInlineCodeBacktickBackground
         case .outlineReservesSpace: return settings.reservesSpaceForOutline

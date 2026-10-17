@@ -130,6 +130,8 @@ final class SettingsPaneViewController: UIViewController {
             settings.setRemembersScrollPosition(sender.isOn)
         case .pastesHTMLAsMarkdown:
             settings.setPastesHTMLAsMarkdown(sender.isOn)
+        case .savesWebImagesLocally:
+            settings.setSavesWebImagesLocally(sender.isOn)
         default:
             break
         }
@@ -203,6 +205,7 @@ final class SettingsPaneViewController: UIViewController {
         case .imageMaxHeight:
             settings.setImageMaxHeight(stepped)
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
+             .savesWebImagesLocally,
              .showsQuoteBackground, .outlineReservesSpace,
              .inlineCodeBacktickBackground,
              .outlineWidthMode, .outlineHeightMode, .imageWidthMode,
@@ -604,6 +607,7 @@ extension SettingsPaneViewController: UITableViewDataSource, UITableViewDelegate
 
         switch row {
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
+             .savesWebImagesLocally,
              .showsQuoteBackground, .inlineCodeBacktickBackground, .outlineReservesSpace:
             return makeToggleCell(for: row)
         case .outlineWidthMode:

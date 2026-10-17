@@ -202,10 +202,23 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         editor.pasteboardController.imageFileWriter = { [weak self] data, originalFileName in
             guard let self else { return nil }
             let outcome = ImageAssetStore.write(data, for: self.openedFileURL, originalFileName: originalFileName)
-            // 本来是存到指定文件夹、结果没写成（文件夹被挪走之类）时，得让用户知道图去哪儿了 ——
+            // 本来是存到指定文件夹、结果没写成（文件夹被挪走之类）时，得让用户知道图去哪儿了。
             // 不然他会以为「粘贴没反应」
             if let note = outcome.note { self.flashStatus(note) }
             return outcome.path
+        }
+        // 装上「网页里的图要不要存到本地」：粘贴网页内容时，正文里还是 `https://…` 的图片会先下载一份，
+        // 按同一套「插入图片」的设置存进对应目录，再把地址换成本地路径，拔了网线笔记里的图也还在。
+        // 返回 false 表示这次没有网络图片要存（或者设置里关了），粘贴照旧当场插入，不用等。
+        editor.pasteboardController.webImageLocalizer = { [weak self] markdown, completion in
+            guard let self else { return false }
+            // ⚠️ 和上面那个回调一样，这里读的是**按下粘贴那一刻**的文档，不是装配时的那份
+            return WebMarkdownImageSaver.localize(markdown,
+                                                  documentURL: self.openedFileURL,
+                                                  onStatus: { [weak self] message in
+                                                      self?.flashStatus(message)
+                                                  },
+                                                  completion: completion)
         }
         view.addSubview(editor)
 
