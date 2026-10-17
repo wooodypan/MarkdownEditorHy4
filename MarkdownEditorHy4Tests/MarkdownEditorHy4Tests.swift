@@ -955,6 +955,29 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         XCTAssertGreaterThan(checked, 10, "应该检查到一批源码字符，实际只检查了 \(checked) 个")
     }
 
+    /// 表格源码的字号 / 颜色都从主题里那两个变量来 —— 设置页的「源码字号」「源码文字颜色」改的就是它们
+    func testTableSourceUsesThemeFontSizeAndColor() {
+        var theme = MarkdownTheme.default
+        theme.table.sourceFontSize = 21
+        theme.table.sourceTextColor = .systemRed
+        let store = MarkdownDocumentStore(renderer: MarkupToAttributedRenderer(theme: theme))
+        store.load(markdown: tableSample, containerWidth: 600)
+        let block = store.blocks[0]
+
+        var checked = 0
+        for (offset, mapping) in block.charMappings.enumerated() where !mapping.isAttachmentView {
+            let font = block.renderedContent.attribute(.font, at: offset, effectiveRange: nil) as? UIFont
+            XCTAssertEqual(font?.pointSize, 21, "第 \(offset) 个源码字符的字号没跟着主题走")
+
+            let color = block.renderedContent.attribute(.foregroundColor,
+                                                        at: offset,
+                                                        effectiveRange: nil) as? UIColor
+            XCTAssertEqual(color, theme.table.sourceTextColor, "第 \(offset) 个源码字符的颜色不对")
+            checked += 1
+        }
+        XCTAssertGreaterThan(checked, 10, "应该检查到一批源码字符，实际只检查了 \(checked) 个")
+    }
+
     /// 表格图必须排在源码前面，尺寸撑满容器、高度按内容算，并且真的画出了图片
     func testTableAttachmentSitsAboveSource() throws {
         let store = makeStore(tableSample)

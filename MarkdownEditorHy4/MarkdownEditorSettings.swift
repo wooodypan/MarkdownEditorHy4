@@ -242,6 +242,15 @@ final class MarkdownEditorSettings {
         static let tableMinColumnWidth: Double = 64
         static let tableMaxColumnWidth: Double = 280
 
+        /// 表格源码字号**默认不单独指定**（`nil`）：跟着正文字号走（正文 - 1）。
+        ///
+        /// 为什么不直接给个固定 16：以前源码字号就是从正文推出来的。
+        /// 要是这里一上来就写死 16，用户把正文调到 24 之后，源码会突然比正文小一大截 ——
+        /// 没人动过这一项，外观却变了。留一个「没设过」的状态，默认表现才和以前一致。
+        static let tableSourceFontSizeOverride: Double? = nil
+        /// 表格源码文字颜色默认**不覆盖**（`nil`）：跟着主题 / 配色里那一色走，换主题时它跟着换
+        static let tableSourceTextColorHex: String? = nil
+
         /// 渲染层主题里的那套默认排版。
         ///
         /// 下面「正文排版」那几个默认值**都从它取**，不在这里写死第二份数字 ——
@@ -315,6 +324,12 @@ final class MarkdownEditorSettings {
         static let tableMinColumnWidth: ClosedRange<Double> = 32...200
         /// 表格「最大列宽」的合法范围
         static let tableMaxColumnWidth: ClosedRange<Double> = 80...600
+        /// 表格源码字号的合法范围（点）。
+        ///
+        /// 下限 9 是「再小就认不出字」的边界，上限 28 和正文字号的上限齐平。
+        /// ⚠️ 量程的**上下界一起**不能和别的行撞车（正文字号 12...28、圆点 4...16 都已占用）——
+        /// 设置页的测试是按「量程」在视图树里找滑块的，两行完全一样就分不出谁是谁。
+        static let tableSourceFontSize: ClosedRange<Double> = 9...28
 
         /// 正文字号的合法范围（点）。下限 12 再小就难认，上限 28 再大一行放不下几个字
         static let bodyFontSize: ClosedRange<Double> = 12...28
@@ -389,6 +404,10 @@ final class MarkdownEditorSettings {
         var outlineBackgroundOpacity: Double?
         var tableMinColumnWidth: Double?
         var tableMaxColumnWidth: Double?
+        /// 表格源码样式。字号没设过就是「跟随正文」，所以是可选
+        var tableSourceFontSize: Double?
+        /// 表格源码文字颜色的覆盖值（`#rrggbb` / `#rrggbbaa`）。没设过就是「跟随主题」
+        var tableSourceTextColorHex: String?
         /// 正文排版那一组。同样都写成可选的，老配置文件里没有就各自退默认
         var bodyFontSize: Double?
         var lineHeightMultiple: Double?
@@ -530,6 +549,29 @@ final class MarkdownEditorSettings {
     /// 某一列内容特别长（贴了个长链接）时，列宽到这个值就封顶，
     /// 多出来的文字换行，别把别的列挤没了。
     private(set) var tableMaxColumnWidth: Double
+
+    /// 用户**单独指定**的表格源码字号（点）。`nil` = 没设过，跟着正文字号走。
+    ///
+    /// 为什么要分「没设过」和「设成某个值」：默认值是从正文字号推出来的（正文 - 1），
+    /// 这样用户调正文时源码会跟着变，看起来才是一套；只有他真去拖了设置页那一根滑块，
+    /// 才固化成他挑的数（之后不再跟着正文跑）。
+    private(set) var tableSourceFontSizeOverride: Double?
+
+    /// 表格源码**实际**用的字号（点）：没单独设过就跟正文（正文 - 1，至少 9）。
+    var tableSourceFontSize: Double {
+        tableSourceFontSizeOverride
+            ?? max(Limits.tableSourceFontSize.lowerBound, bodyFontSize - 1)
+    }
+
+    /// 表格源码文字颜色的覆盖值（十六进制）。`nil` = 跟随主题 / 配色。
+    ///
+    /// ### 为什么要一个独立的覆盖位
+    /// 主题里本来就有这一色（配色表的「表格源码文字」，主题页也能逐色调）。
+    /// 但用户常常只是想「这篇源码太淡了，调深一点」，不值得为此换一套主题 ——
+    /// 所以设置页也给一个入口，选完就固定用它，换主题也不影响。
+    ///
+    /// ⚠️ 它的优先级**高于配色表**（套完配色之后才写进主题），否则换个主题就被盖掉了。
+    private(set) var tableSourceTextColorHex: String?
 
     // MARK: 正文排版
 
@@ -804,6 +846,29 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「表格源码字号」。超出 `Limits.tableSourceFontSize` 的值会被夹到边界上。
+    ///
+    /// ⚠️ 调过之后这一项就**不再跟着正文字号走**了（用户既然单独拖了，就该听他的）。
+    func setTableSourceFontSize(_ value: Double) {
+        let clamped = clamp(value, to: Limits.tableSourceFontSize)
+        guard clamped != tableSourceFontSizeOverride else { return }
+        tableSourceFontSizeOverride = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「表格源码文字颜色」。传 `nil` = 恢复成跟随主题。
+    ///
+    /// 颜色统一以十六进制字符串落盘（`MarkdownHexColor` 那套），读回来再转成 `UIColor` ——
+    /// `UIColor` 自己不能被 JSON 编解码，项目里所有颜色都是这么存的。
+    func setTableSourceTextColor(_ color: UIColor?) {
+        let hex = color.map { MarkdownHexColor.string(from: $0) }
+        guard hex != tableSourceTextColorHex else { return }
+        tableSourceTextColorHex = hex
+        save()
+        postChange()
+    }
+
     // MARK: 改正文排版
 
     /// 改「正文字号」
@@ -958,6 +1023,8 @@ final class MarkdownEditorSettings {
         self.outlineBackgroundOpacity = Default.outlineBackgroundOpacity
         self.tableMinColumnWidth = Default.tableMinColumnWidth
         self.tableMaxColumnWidth = Default.tableMaxColumnWidth
+        self.tableSourceFontSizeOverride = Default.tableSourceFontSizeOverride
+        self.tableSourceTextColorHex = Default.tableSourceTextColorHex
         self.bodyFontSize = Default.bodyFontSize
         self.lineHeightMultiple = Default.lineHeightMultiple
         self.paragraphSpacing = Default.paragraphSpacing
@@ -1022,6 +1089,14 @@ final class MarkdownEditorSettings {
         }
         if let value = payload.tableMaxColumnWidth {
             tableMaxColumnWidth = clamp(value, to: Limits.tableMaxColumnWidth)
+        }
+        // 源码字号：盘上有值才算「用户单独设过」，没有就继续跟着正文字号走
+        if let value = payload.tableSourceFontSize {
+            tableSourceFontSizeOverride = clamp(value, to: Limits.tableSourceFontSize)
+        }
+        // 颜色覆盖：只认能解析出来的十六进制，写坏了（或者手改错）就当没设过、继续跟主题
+        if let value = payload.tableSourceTextColorHex, MarkdownHexColor.parse(value) != nil {
+            tableSourceTextColorHex = value
         }
         if let value = payload.bodyFontSize {
             bodyFontSize = clamp(value, to: Limits.bodyFontSize)
@@ -1092,6 +1167,8 @@ final class MarkdownEditorSettings {
                               outlineBackgroundOpacity: outlineBackgroundOpacity,
                               tableMinColumnWidth: tableMinColumnWidth,
                               tableMaxColumnWidth: tableMaxColumnWidth,
+                              tableSourceFontSize: tableSourceFontSizeOverride,
+                              tableSourceTextColorHex: tableSourceTextColorHex,
                               bodyFontSize: bodyFontSize,
                               lineHeightMultiple: lineHeightMultiple,
                               paragraphSpacing: paragraphSpacing,
@@ -1192,6 +1269,27 @@ extension MarkdownEditorSettings {
         if minValue > maxValue { minValue = maxValue }
         theme.table.minColumnWidth = CGFloat(minValue)
         theme.table.maxColumnWidth = CGFloat(maxValue)
+    }
+
+    /// 把「表格源码」这一组（字号 + 文字颜色）写进编辑器主题。
+    ///
+    /// ### 为什么单独一个方法，不并进 `applyTableColumnWidths`
+    /// 列宽是「表格这张图怎么排」，字号 / 颜色是「下面那几行源码长什么样」，
+    /// 是两件事，分开之后各自能被单独测、也能单独调整顺序。
+    ///
+    /// ### ⚠️ 必须在 `applyColors` 之后调
+    /// 配色表是「覆盖表」：它会重写 `theme.table.sourceTextColor`。
+    /// 这里写的是用户在设置页**专门指定**的颜色，必须最后落笔 ——
+    /// 顺序反了就会被配色表重新盖掉，表现是「在设置里选了色，没反应」。
+    ///
+    /// ### 改完必须整篇重渲染
+    /// 字号和颜色都是渲染那一刻烙进 `NSAttributedString` 的，只改主题不动画面。
+    func applyTableSourceStyle(to theme: inout MarkdownTheme) {
+        theme.table.sourceFontSize = CGFloat(tableSourceFontSize)
+        // 没指定过（或者字符串坏了）就什么都不做：主题里已经是配色表给的那一色
+        if let hex = tableSourceTextColorHex, let color = MarkdownHexColor.parse(hex) {
+            theme.table.sourceTextColor = color
+        }
     }
 }
 
@@ -1298,12 +1396,27 @@ extension MarkdownEditorSettings {
     var currentTheme: MarkdownTheme {
         // 从默认主题起步：那上面已经带着渲染层默认的颜色和排版
         var theme = MarkdownTheme.default
-        // 顺序和编辑页那四行一致 —— 配色只改颜色，后面三组再按用户拖过的滑块覆盖自己那几个值，两者不冲突
+        // 顺序和编辑页那几行一致 —— 配色只改颜色，后面三组再按用户拖过的滑块覆盖自己那几个值，两者不冲突
         applyColors(to: &theme,
                     customPalette: MarkdownCustomThemeStore.shared.loadPalette(named: customThemeFileName))
         applyTypography(to: &theme)
         applyTableColumnWidths(to: &theme)
+        // 表格源码的样式放配色之后：它可能覆盖掉配色表里的那一色（理由见那个方法）
+        applyTableSourceStyle(to: &theme)
         applyImageSize(to: &theme)
         return theme
+    }
+
+    /// 表格源码**现在真正会显示**的颜色（用户指定过就用那个，否则按当前主题 / 配色算出来）。
+    ///
+    /// 设置页画「源码文字颜色」那一行的小色块要用它 ——
+    /// 只画用户设的那个 hex 的话，「跟随主题」状态下色块就不知道该画什么了。
+    ///
+    /// ⚠️ 它内部会现拼一套主题（含读一次自定义配色文件），别在高频路径上调。
+    var effectiveTableSourceTextColor: UIColor {
+        if let hex = tableSourceTextColorHex, let color = MarkdownHexColor.parse(hex) {
+            return color
+        }
+        return currentTheme.table.sourceTextColor
     }
 }

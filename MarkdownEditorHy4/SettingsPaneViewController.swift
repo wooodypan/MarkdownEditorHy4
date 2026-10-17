@@ -50,6 +50,25 @@ final class SettingsPaneViewController: UIViewController {
     /// 滑块旁边那个显示当前值的标签，靠 tag 从 cell 里找回来
     private static let valueLabelTag = 9001
 
+    /// 「表格源码文字颜色」那个按钮，拖动取色器时要靠 tag 找到它改色块
+    private static let tableSourceColorButtonTag = 9002
+
+    // MARK: 取色器的临时状态
+
+    /// 取色器**打开那一刻**的颜色。用来认出「只是点开看一眼、没真改」——
+    /// ⚠️ 取色器一露面就会回调一次当前色，照单全收的话「跟随主题」会被悄悄改成固定色。
+    private var tableSourceColorAtOpen: String?
+
+    /// 这一轮取色里用户**真的动过**颜色（拖出一个和打开时不一样的色）才置 `true`。
+    /// 置了之后就连「拖回原色」也要照实写进去，否则配置会停在中间某一色上。
+    private var hasPickedTableSourceColor = false
+
+    /// 拖动过程中攒着的那一色：等手停下来才写进配置（每动一格都写会让正文整篇重渲染，拖起来一顿一顿的）
+    private var pendingTableSourceColor: UIColor?
+
+    /// 上面那个「等手停下来」的定时器
+    private var tableSourceColorCommitTimer: Timer?
+
     init(section: SettingsSection, settings: MarkdownEditorSettings = .shared) {
         self.section = section
         self.settings = settings
@@ -86,6 +105,14 @@ final class SettingsPaneViewController: UIViewController {
     }
 
     // MARK: 控件回调
+
+    /// 离开这一页（换分组、关面板）：把还在定时器里等着的那一色先落地。
+    ///
+    /// ⚠️ 弹取色器时这个回调也会走一趟，那时 `pending` 是空的，`commit` 直接返回，没有副作用。
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        commitPendingTableSourceColor()
+    }
 
     /// 开关被拨动
     @objc private func switchChanged(_ sender: UISwitch) {
@@ -165,6 +192,8 @@ final class SettingsPaneViewController: UIViewController {
             settings.setTableMinColumnWidth(stepped)
         case .tableMaxColumnWidth:
             settings.setTableMaxColumnWidth(stepped)
+        case .tableSourceFontSize:
+            settings.setTableSourceFontSize(stepped)
         case .imageWidthRatio:
             settings.setImageWidthRatio(stepped)
         case .imageWidthPoints:
@@ -174,7 +203,8 @@ final class SettingsPaneViewController: UIViewController {
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
              .showsQuoteBackground, .outlineReservesSpace,
              .outlineWidthMode, .outlineHeightMode, .imageWidthMode,
-             .imageInsertionMode, .imageCustomFolderPath, .imageNameMode:
+             .imageInsertionMode, .imageCustomFolderPath, .imageNameMode,
+             .tableSourceTextColor:
             // 这几行挂的是开关 / 分段控件 / 菜单按钮，不是滑块，回调不会从这儿进来。
             // ⚠️ 这里故意不写 `default:`：穷举之后，以后往 `SettingsRow` 里加一行滑块，
             // 编译器会直接报「switch must be exhaustive」逼你回来接上 ——
@@ -374,6 +404,130 @@ final class SettingsPaneViewController: UIViewController {
         present(picker, animated: true)
     }
 
+    /// 「表格源码文字颜色」：一个色块 + 当前色号，点开菜单选色、或者交还给主题。
+    ///
+    /// ### 为什么不做成「点一下直接弹取色器」
+    /// 这一项有个「没设过（跟随主题）」的状态，用户得能回到那个状态。
+    /// 菜单里两项正好摆平：「选择颜色…」和「跟随主题」（当前是哪一种就打勾），
+    /// 和上面「图片存放位置」那几行是同一套交互，用户不用再学一遍。
+    private func makeTableSourceColorCell() -> UITableViewCell {
+        let button = UIButton(type: .system)
+        var config = UIButton.Configuration.gray()
+        // 没覆盖过就写「跟随主题」—— 让用户一眼看出现在的色是从哪儿来的
+        config.title = settings.tableSourceTextColorHex ?? "跟随主题"
+        // 色块当图标：光看色号（#8e8e93）没有人能想象出颜色
+        config.image = makeColorSwatch(settings.effectiveTableSourceTextColor)
+        config.imagePlacement = .leading
+        config.imagePadding = 8
+        config.cornerStyle = .medium
+        button.configuration = config
+        button.contentHorizontalAlignment = .leading
+        button.showsMenuAsPrimaryAction = true
+        button.menu = makeTableSourceColorMenu()
+        // 拖动取色器时要就地改这个按钮的色块（不重建单元格），靠 tag 找回来
+        button.tag = Self.tableSourceColorButtonTag
+        button.accessibilityLabel = SettingsRow.tableSourceTextColor.accessibilityLabel
+        return makeCell(row: .tableSourceTextColor, control: button)
+    }
+
+    /// 「源码文字颜色」那两件事：选色 / 跟随主题
+    private func makeTableSourceColorMenu() -> UIMenu {
+        let hasOverride = settings.tableSourceTextColorHex != nil
+
+        let pick = UIAction(title: "选择颜色…",
+                            image: UIImage(systemName: "eyedropper")) { [weak self] _ in
+            self?.presentTableSourceColorPicker()
+        }
+        let follow = UIAction(title: "跟随主题",
+                              state: hasOverride ? .off : .on) { [weak self] _ in
+            guard let self else { return }
+            // 传 nil = 把覆盖清掉，下次套主题时又回到配色表给的那一色
+            self.settings.setTableSourceTextColor(nil)
+            self.tableView.reloadData()
+        }
+        return UIMenu(children: [pick, follow])
+    }
+
+    /// 弹系统的取色器。
+    ///
+    /// 和主题页「自己调色」用的是同一个控件（`UIColorPickerViewController`），
+    /// 在 Mac 上是一块浮窗、在 iPhone 上是半屏弹层，两端都不用手写。
+    private func presentTableSourceColorPicker() {
+        let picker = UIColorPickerViewController()
+        picker.delegate = self
+        picker.title = SettingsRow.tableSourceTextColor.title
+        // 允许带透明度：源码本来就是要「压淡」的，用户可能想让它更淡一点
+        picker.supportsAlpha = true
+        // 取色器一露面会先回调一次「现在这个色」，把它记下来当「没改过」的基准
+        let current = settings.effectiveTableSourceTextColor
+        picker.selectedColor = current
+        tableSourceColorAtOpen = MarkdownHexColor.string(from: current)
+        hasPickedTableSourceColor = false
+        present(picker, animated: true)
+    }
+
+    /// 画一枚小圆色块，给颜色那一行当图标。
+    ///
+    /// ⚠️ 先把动态色按当前外观解析成实色再画：`.tertiaryLabel` 这类系统色直接 `cgColor`
+    /// 拿到的是浅色模式下的值，深色模式下画出来会是一块偏黑的圆。
+    ///
+    /// ⚠️ 画完要 `.withRenderingMode(.alwaysOriginal)`：按钮会把默认渲染模式的图片
+    /// 当成模板图整体染成系统蓝，那样色块就永远是蓝的、看不出自己挑了哪个色。
+    private func makeColorSwatch(_ color: UIColor) -> UIImage {
+        let side: CGFloat = 14
+        let resolved = color.resolvedColor(with: traitCollection)
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
+        let image = renderer.image { context in
+            context.cgContext.setFillColor(resolved.cgColor)
+            context.cgContext.fillEllipse(in: CGRect(x: 0, y: 0, width: side, height: side))
+        }
+        return image.withRenderingMode(.alwaysOriginal)
+    }
+
+    /// 把「表格源码文字颜色」那一行的色块和色号**就地**改掉。
+    ///
+    /// ⚠️ 只改这一个按钮，不走 `reloadData`：取色器正开着，重建整表会连带再算一次
+    /// 「跟随主题时该显示哪一色」（那里面要读一次自定义配色文件），拖动时每回调一次就白读一遍。
+    private func refreshTableSourceColorControl(color: UIColor, title: String) {
+        guard let index = section.rows.firstIndex(of: .tableSourceTextColor) else { return }
+        let path = IndexPath(row: index, section: 0)
+        guard let cell = tableView.cellForRow(at: path),
+              let button = cell.contentView.viewWithTag(Self.tableSourceColorButtonTag) as? UIButton
+        else { return }
+
+        // 明确取出来改完再写回：`configuration` 是结构体，直接改它的字段虽然也能生效，
+        // 但写回来这一步更直白，以后换别人接手也不容易看漏
+        var config = button.configuration ?? .gray()
+        config.image = makeColorSwatch(color)
+        config.title = title
+        button.configuration = config
+    }
+
+    /// 攒下拖动中的颜色，手停 0.25 秒再写配置
+    private func scheduleTableSourceColorCommit() {
+        tableSourceColorCommitTimer?.invalidate()
+        tableSourceColorCommitTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+            self?.commitPendingTableSourceColor()
+        }
+    }
+
+    /// 把攒着的那一色真正写进配置。
+    ///
+    /// ### 为什么要攒一下再写
+    /// 每写一次配置都会广播「设置变了」，正文跟着整篇重渲染一遍。取色器拖动时一秒回调几十次，
+    /// 次次重排的话手指底下会一顿一顿的。0.25 秒的停顿足够把一串回调并成一次。
+    ///
+    /// ### 为什么关闭取色器时还要再调一次
+    /// 用户拖完常常直接点别处把浮窗关掉，最后一次回调可能才刚发生、定时器还没到点。
+    /// 这里先落盘，颜色才不会「拖了但没生效」。
+    private func commitPendingTableSourceColor() {
+        tableSourceColorCommitTimer?.invalidate()
+        tableSourceColorCommitTimer = nil
+        guard let color = pendingTableSourceColor else { return }
+        pendingTableSourceColor = nil
+        settings.setTableSourceTextColor(color)
+    }
+
     /// 数值行：左边滑块，右边当前值。
     ///
     /// 当前这一项在当前模式下不生效时，滑块置灰 —— 光看文字说明还不够直观，
@@ -461,11 +615,13 @@ extension SettingsPaneViewController: UITableViewDataSource, UITableViewDelegate
             return makeImageFolderCell()
         case .imageNameMode:
             return makeImageNameModeCell()
+        case .tableSourceTextColor:
+            return makeTableSourceColorCell()
         case .bodyFontSize, .lineHeightMultiple, .paragraphSpacing, .paragraphIndentCharacters,
              .bodyContentWidth, .bulletDiameter,
              .outlineWidthRatio, .outlineWidthPoints,
              .outlineHeightRatio, .outlineMaximumHeight, .outlineBackgroundOpacity,
-             .tableMinColumnWidth, .tableMaxColumnWidth,
+             .tableMinColumnWidth, .tableMaxColumnWidth, .tableSourceFontSize,
              .imageWidthRatio, .imageWidthPoints, .imageMaxHeight:
             return makeSliderCell(for: row)
         }
@@ -515,6 +671,56 @@ extension SettingsPaneViewController: UIDocumentPickerDelegate {
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
         settings.setImageCustomFolderPath(url.path)
+        tableView.reloadData()
+    }
+}
+
+// MARK: - 取色器的回调
+
+extension SettingsPaneViewController: UIColorPickerViewControllerDelegate {
+
+    /// 取色器里**拖色**的时候会一直回调：色块立刻跟着变，配置则等手停下来再写。
+    ///
+    /// ### 为什么不每回调一次就写配置
+    /// 写一次配置就会广播「设置变了」，正文整篇重渲染一遍。拖动时一秒几十次回调，
+    /// 次次重排的话手指底下会一顿一顿的 —— 所以这里只更新界面，真正的落盘交给 0.25 秒后的定时器。
+    ///
+    /// ### 为什么不干脆在这里什么都不做（以前就是这么写的）
+    /// Mac 上的取色器是块浮窗，拖完直接点别处关掉很常见，那时候 `didFinish` 不一定来 ——
+    /// 结果就是「颜色选了，但小色块和正文都没变」。现在拖动就更新色块、0.25 秒后落盘，
+    /// 关不关浮窗都不影响。
+    func colorPickerViewControllerDidSelectColor(_ viewController: UIColorPickerViewController) {
+        let picked = viewController.selectedColor
+        let hex = MarkdownHexColor.string(from: picked)
+
+        // 拖动时先把这一行的色块 / 色号改掉，让用户看到自己挑的是哪一色
+        refreshTableSourceColorControl(color: picked, title: hex)
+
+        // ⚠️ 取色器一露面就会回调一次「当前这个色」。不比对就照单全收的话，
+        // 用户只是点进来看一眼，这一色也被记成「已改」——「跟随主题」就这么被悄悄换成了固定色
+        if hex != tableSourceColorAtOpen {
+            hasPickedTableSourceColor = true
+        }
+        guard hasPickedTableSourceColor else { return }
+
+        pendingTableSourceColor = picked
+        scheduleTableSourceColorCommit()
+    }
+
+    /// 取色器关掉（点完成、点外面、或者划走）：把最后一次颜色落地，再把整行刷成配置里的真值。
+    ///
+    /// `didFinish` 在 Mac Catalyst 上不保证每次都会来，所以真正的落盘逻辑在
+    /// `commitPendingTableSourceColor` 里 —— 它也会被定时器和「离开这一页」调，
+    /// 这里只是顺手再催一次（`pending` 为空时它什么都不做）。
+    func colorPickerViewControllerDidFinish(_ viewController: UIColorPickerViewController) {
+        if hasPickedTableSourceColor {
+            pendingTableSourceColor = viewController.selectedColor
+        }
+        commitPendingTableSourceColor()
+
+        tableSourceColorAtOpen = nil
+        hasPickedTableSourceColor = false
+        // 走一遍数据源，按钮上的文字 / 色块和配置对齐（也把「跟随主题」状态显示对）
         tableView.reloadData()
     }
 }

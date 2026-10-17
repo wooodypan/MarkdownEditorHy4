@@ -410,12 +410,29 @@ struct MarkdownTheme {
         [.font: bodyFont, .foregroundColor: orderedListMarkerColor]
     }
 
+    /// 表格源码用的字体：**等宽**（源码要对齐），字号单独由 `table.sourceFontSize` 决定。
+    ///
+    /// ### 为什么不直接用代码块那个 `codeFont`
+    /// 以前是共用 `codeFont` 的，等于「表格源码多大」只能跟着「正文 / 代码块字号」走，
+    /// 用户想单独把它调小（少占视觉）、或者调大（方便照着改）都没法调。
+    /// 现在字号是主题里一个独立的数，设置页的「源码字号」改的就是它；
+    /// 不调的时候由配置层填成「正文 - 1」，外观和以前一样。
+    ///
+    /// ⚠️ 下限 9：再小就没法读了，配置层也夹在 9 以上（这里再兜一道，防手改主题）。
+    var tableSourceFont: UIFont {
+        UIFont.monospacedSystemFont(ofSize: max(9, table.sourceFontSize), weight: .regular)
+    }
+
     /// 表格下方那几行**表格源码**的样式：等宽字体 + 浅灰。
     ///
     /// 表格本体已经画成一张图了，源码留在这里只是为了「所见即所编辑」
     /// （光标能停进去改），所以颜色压到很淡，不抢视觉焦点。
+    ///
+    /// ⚠️ 字号和颜色都来自 `table` 里那两个字段（设置页可以单独配），不再写死成代码块那一套。
+    /// ⚠️ Mermaid 图表下面的源码提示也复用了这一份样式 —— 改这两项会同时影响它。
+    /// 要拆开的话，另加一个 `diagramSourceAttributes` 即可（见 `doc/Mermaid原生渲染方案.md`）。
     var tableSourceAttributes: [NSAttributedString.Key: Any] {
-        [.font: codeFont, .foregroundColor: table.sourceTextColor]
+        [.font: tableSourceFont, .foregroundColor: table.sourceTextColor]
     }
 
     // MARK: 段落样式
@@ -666,7 +683,18 @@ extension MarkdownTheme {
         var maxColumnWidth: CGFloat = 280
         /// 表格外框圆角
         var cornerRadius: CGFloat = 8
+        /// 表格源码的**字号**（点）。
+        ///
+        /// 表格画成图之后，下面那几行源码只用来「对照着改内容」，所以默认比正文小一号。
+        /// 单独放一个数，是为了让它不和正文 / 代码块的字号绑死（设置页有「源码字号」这一项）。
+        ///
+        /// ⚠️ 默认 16 = 主题默认的代码字号（正文 17 - 1）：没动过设置的人和以前看到的一模一样。
+        /// ⚠️ 它管的是**字体大小**，行高会跟着字号自然变 —— 不用另外配一个行高值。
+        var sourceFontSize: CGFloat = 16
         /// 表格源码文字的颜色（浅灰）
+        ///
+        /// 默认用系统的三级标签色：浅色 / 深色模式下都看得清，又不抢正文的注意力。
+        /// 设置页的「源码文字颜色」选过色之后，配置层会把它换成用户挑的那个实色。
         var sourceTextColor: UIColor = .tertiaryLabel
     }
 

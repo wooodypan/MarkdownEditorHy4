@@ -523,6 +523,200 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertEqual(settings.tableMaxColumnWidth, 336, accuracy: 0.0001, "333 应该被吸到 336（步进 8）")
     }
 
+    // MARK: - 表格源码样式（字号 / 颜色）
+
+    /// 没单独设过时：字号跟着正文（正文 - 1），颜色跟着主题 —— 老用户不该因为多了这一项就看到变化
+    func testTableSourceStyleDefaultsFollowBodyAndTheme() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        XCTAssertNil(settings.tableSourceFontSizeOverride, "默认不该是「单独设过」的状态")
+        XCTAssertEqual(settings.tableSourceFontSize, settings.bodyFontSize - 1, accuracy: 0.0001,
+                       "没设过时应该跟着正文字号（正文 - 1）")
+        XCTAssertNil(settings.tableSourceTextColorHex, "默认不该覆盖主题里的那一色")
+
+        var theme = MarkdownTheme.default
+        settings.applyTableSourceStyle(to: &theme)
+        XCTAssertEqual(theme.table.sourceFontSize, 16, accuracy: 0.0001, "默认正文 17 → 源码 16")
+        XCTAssertEqual(theme.table.sourceTextColor, MarkdownTheme.default.table.sourceTextColor,
+                       "没指定颜色时不该动主题里的那一色")
+    }
+
+    /// 改正文大小时源码字号要跟着变；但一旦单独拖过，就不再跟着正文跑
+    func testTableSourceFontSizeFollowsBodyUntilOverridden() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+
+        settings.setBodyFontSize(24)
+        XCTAssertEqual(settings.tableSourceFontSize, 23, accuracy: 0.0001,
+                       "没单独设过时应该跟着正文走")
+
+        settings.setTableSourceFontSize(12)
+        settings.setBodyFontSize(28)
+        XCTAssertEqual(settings.tableSourceFontSize, 12, accuracy: 0.0001,
+                       "单独设过之后应该守住用户挑的值")
+    }
+
+    /// 两项都要落盘（重启之后还是用户调过的那套）
+    func testTableSourceStyleIsPersisted() {
+        let url = makeTempFileURL()
+        let settings = MarkdownEditorSettings(fileURL: url)
+        let color = UIColor(red: 0.5, green: 0.25, blue: 0.75, alpha: 1)
+        settings.setTableSourceFontSize(21)
+        settings.setTableSourceTextColor(color)
+
+        let reloaded = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(reloaded.tableSourceFontSizeOverride ?? 0, 21, accuracy: 0.0001)
+        XCTAssertEqual(reloaded.tableSourceTextColorHex, MarkdownHexColor.string(from: color),
+                       "颜色该原样存回来")
+    }
+
+    /// 越界的字号要夹住；颜色字符串写坏了就当没设过（不能让一份坏配置把源码涂黑）
+    func testTableSourceStyleClampingAndBadColor() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        settings.setTableSourceFontSize(999)
+        XCTAssertEqual(settings.tableSourceFontSize, 28, accuracy: 0.0001, "超出上限要夹回来")
+        settings.setTableSourceFontSize(1)
+        XCTAssertEqual(settings.tableSourceFontSize, 9, accuracy: 0.0001, "低于下限要夹回来")
+
+        // 路径二：配置文件被手改（字号太小 + 颜色写成了中文）
+        let url = makeTempFileURL()
+        try Data(#"{"tableSourceFontSize": 3, "tableSourceTextColorHex": "这是啥颜色"}"#.utf8)
+            .write(to: url)
+        let reloaded = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(reloaded.tableSourceFontSize, 9, accuracy: 0.0001)
+        XCTAssertNil(reloaded.tableSourceTextColorHex, "解析不了的颜色字符串不该当成覆盖")
+    }
+
+    /// 设置里指定的颜色要盖在配色表之上（换主题也不该把它盖掉）；清掉之后又能回到配色表的色
+    func testTableSourceColorOverridesPalette() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let red = UIColor(red: 1, green: 0, blue: 0, alpha: 1)
+        settings.setTableSourceTextColor(red)
+
+        var theme = MarkdownTheme.default
+        // 顺序和编辑器里一致：先套配色，再套源码样式
+        settings.applyColors(to: &theme, customPalette: nil)
+        settings.applyTableSourceStyle(to: &theme)
+        XCTAssertEqual(MarkdownHexColor.string(from: theme.table.sourceTextColor),
+                       MarkdownHexColor.string(from: red),
+                       "设置里挑的色该盖过配色表")
+
+        // 清掉覆盖 → 回到配色表给的那一色
+        settings.setTableSourceTextColor(nil)
+        var reset = MarkdownTheme.default
+        settings.applyColors(to: &reset, customPalette: nil)
+        settings.applyTableSourceStyle(to: &reset)
+        XCTAssertEqual(reset.table.sourceTextColor, MarkdownTheme.default.table.sourceTextColor)
+    }
+
+    /// 端到端：设置里挑的颜色 / 字号要真的出现在**渲染出来的表格源码**上。
+    ///
+    /// 前面几条是分段验的（设置写进配置、配置盖过配色、主题值落到属性上），
+    /// 这条把它们串起来 —— 万一哪一段接错（比如渲染时又读了别的变量），只测分段是发现不了的。
+    func testSettingsTableSourceStyleReachesRenderedText() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let red = UIColor(red: 1, green: 0, blue: 0, alpha: 1)
+        settings.setTableSourceTextColor(red)
+        settings.setTableSourceFontSize(19)
+
+        var theme = MarkdownTheme.default
+        // 和编辑器里同一个顺序：配色在前、源码样式在后
+        settings.applyColors(to: &theme, customPalette: nil)
+        settings.applyTableSourceStyle(to: &theme)
+
+        let store = MarkdownDocumentStore(renderer: MarkupToAttributedRenderer(theme: theme))
+        // ⚠️ 三引号这一种写法结尾**不带**换行（和渲染测试里的 `tableSample` 一致）。
+        // 末尾多一个换行的话，表格块会多出一段属于「换行装饰」的字符，断言颜色时会误判
+        store.load(markdown: """
+        | 姓名 | 年龄 | 城市 |
+        | :--- | :--: | ---: |
+        | 张三 | 18 | 上海 |
+        | 李四 | 20 | 武汉 |
+        """, containerWidth: 600)
+        let block = store.blocks[0]
+
+        var checked = 0
+        for (offset, mapping) in block.charMappings.enumerated() where !mapping.isAttachmentView {
+            let color = block.renderedContent.attribute(.foregroundColor,
+                                                        at: offset,
+                                                        effectiveRange: nil) as? UIColor
+            XCTAssertEqual(color, red, "第 \(offset) 个源码字符没用设置里挑的颜色")
+
+            let font = block.renderedContent.attribute(.font, at: offset, effectiveRange: nil) as? UIFont
+            XCTAssertEqual(font?.pointSize, 19, "第 \(offset) 个源码字符没用设置里挑的字号")
+            checked += 1
+        }
+        XCTAssertGreaterThan(checked, 10, "应该检查到一批源码字符，实际只检查了 \(checked) 个")
+    }
+
+    /// 设置页「表格」分组里要有源码字号滑块（9~28）和颜色行；拖滑块要写回配置
+    func testSettingsPageHasTableSourceControls() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let controller = SettingsPaneViewController(section: .tableLayout, settings: settings)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
+        controller.view.layoutIfNeeded()
+
+        XCTAssertTrue(SettingsSection.tableLayout.rows.contains(.tableSourceFontSize))
+        XCTAssertTrue(SettingsSection.tableLayout.rows.contains(.tableSourceTextColor))
+
+        let sourceSlider = try XCTUnwrap(self.slider(in: controller.view, range: 9...28),
+                                         "找不到「源码字号」的滑块")
+        XCTAssertEqual(Double(sourceSlider.value), settings.tableSourceFontSize, accuracy: 0.01,
+                       "滑块该停在「现在实际用的字号」上")
+
+        sourceSlider.value = 20
+        sourceSlider.sendActions(for: .valueChanged)
+        XCTAssertEqual(settings.tableSourceFontSizeOverride ?? 0, 20, accuracy: 0.0001,
+                       "拖动之后要固化成用户挑的值")
+
+        let colorButton = try XCTUnwrap(button(in: controller.view, label: "源码文字颜色"),
+                                        "找不到「源码文字颜色」那一行")
+        // 没设过颜色时按钮上写「跟随主题」，菜单里有「选择颜色…」和「跟随主题」两项
+        XCTAssertEqual(colorButton.configuration?.title, "跟随主题")
+        XCTAssertEqual(colorButton.menu?.children.count, 2)
+    }
+
+    /// 取色器里拖完色、**不点完成**（Mac 上直接点别处关掉很常见）也要落盘。
+    ///
+    /// ⚠️ 这条测试盯的是一个真机 bug：以前只在 `didFinish` 里写配置，而 Mac Catalyst 的取色器是块浮窗，
+    /// 关掉时不保证回调 `didFinish` —— 结果就是「选了颜色，色块和正文都没变」。
+    func testColorPickedWhileDraggingIsCommittedWithoutFinish() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let controller = SettingsPaneViewController(section: .tableLayout, settings: settings)
+        controller.loadViewIfNeeded()
+
+        let picker = UIColorPickerViewController()
+        let red = UIColor(red: 0.9, green: 0.1, blue: 0.15, alpha: 1)
+        picker.selectedColor = red
+        controller.colorPickerViewControllerDidSelectColor(picker)
+
+        // 拖动中先别写配置：每写一次都会让正文整篇重渲染，拖起来会一顿一顿的
+        XCTAssertNil(settings.tableSourceTextColorHex, "拖动过程中不该立刻写配置")
+
+        // 手停下来（0.25 秒没新回调）就该自动落盘
+        let settled = expectation(description: "定时器到点后落盘")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
+
+        XCTAssertEqual(settings.tableSourceTextColorHex, MarkdownHexColor.string(from: red),
+                       "取色器没回调 didFinish 时，拖完的颜色也得写进去")
+    }
+
+    /// 关闭取色器时，最后一次颜色必须立刻生效（不等那 0.25 秒的定时器）
+    func testClosingColorPickerAppliesLastColorImmediately() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let controller = SettingsPaneViewController(section: .tableLayout, settings: settings)
+        controller.loadViewIfNeeded()
+
+        let picker = UIColorPickerViewController()
+        let blue = UIColor(red: 0.1, green: 0.3, blue: 0.95, alpha: 1)
+        picker.selectedColor = blue
+        controller.colorPickerViewControllerDidSelectColor(picker)
+        controller.colorPickerViewControllerDidFinish(picker)
+
+        XCTAssertEqual(settings.tableSourceTextColorHex, MarkdownHexColor.string(from: blue),
+                       "关掉取色器时那一色要立刻落地，不能等定时器")
+    }
+
     // MARK: - 图片尺寸：配置本身
 
     /// 需求给的默认：按百分比、50%、固定宽度 200px、最大高度 420pt
@@ -776,6 +970,17 @@ final class MarkdownEditorSettingsTests: XCTestCase {
                 return slider
             }
             if let found = slider(in: subview, range: range) { return found }
+        }
+        return nil
+    }
+
+    /// 按 `accessibilityLabel` 找一个按钮（颜色那一行就是按钮 + 菜单，没有滑块也看不出量程）。
+    private func button(in view: UIView, label: String) -> UIButton? {
+        for subview in view.subviews {
+            if let button = subview as? UIButton, button.accessibilityLabel == label {
+                return button
+            }
+            if let found = button(in: subview, label: label) { return found }
         }
         return nil
     }

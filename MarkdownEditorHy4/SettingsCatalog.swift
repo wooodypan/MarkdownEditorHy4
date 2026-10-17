@@ -23,7 +23,7 @@ enum SettingsSection: Int, CaseIterable {
     case reading
     /// 大纲面板多宽 / 多高 / 背景多透
     case outlineSize
-    /// 表格画出来时的列宽限制
+    /// 表格画出来时的列宽限制，以及表格下方那几行源码的字号 / 颜色
     case tableLayout
     /// 图片画多大
     case imageSize
@@ -38,7 +38,7 @@ enum SettingsSection: Int, CaseIterable {
         case .typography: return "正文排版"
         case .reading: return "阅读与显示"
         case .outlineSize: return "大纲面板"
-        case .tableLayout: return "表格列宽"
+        case .tableLayout: return "表格"
         case .imageSize: return "图片尺寸"
         case .imageInsertion: return "插入图片"
         case .clipboard: return "剪贴板"
@@ -72,7 +72,7 @@ enum SettingsSection: Int, CaseIterable {
             return SettingsRow.outlineReservesSpace.isAvailableOnCurrentDevice
                 ? "展开时正文是否让出右侧空间，面板的宽度、高度、背景不透明度"
                 : "面板的宽度、高度、背景不透明度"
-        case .tableLayout: return "表格列的最小 / 最大宽度"
+        case .tableLayout: return "列宽、下方源码的字号与文字颜色"
         case .imageSize: return "图片画多大：宽度怎么算、最大高度"
         case .imageInsertion: return "粘贴进来的图片存到哪儿、文件叫什么名字"
         case .clipboard: return "粘贴网页内容时先转成 Markdown 源码"
@@ -103,7 +103,9 @@ enum SettingsSection: Int, CaseIterable {
                                         .outlineBackgroundOpacity]
             return items.filter(\.isAvailableOnCurrentDevice)
         case .tableLayout:
-            return [.tableMinColumnWidth, .tableMaxColumnWidth]
+            // 顺序：先把表格这张图排好（两个列宽），再管图下面那几行源码（字号、颜色）
+            return [.tableMinColumnWidth, .tableMaxColumnWidth,
+                    .tableSourceFontSize, .tableSourceTextColor]
         case .imageSize:
             // 顺序就是界面上从上到下的顺序：先选「宽度怎么算」，再调两个数值，
             // 最后是「最多占多高」
@@ -167,6 +169,10 @@ enum SettingsRow: Int, CaseIterable {
     case tableMinColumnWidth
     /// 表格最宽的一列（点）
     case tableMaxColumnWidth
+    /// 表格下方那几行**源码**的字号（点）
+    case tableSourceFontSize
+    /// 表格下方那几行**源码**的文字颜色（选过才覆盖主题里的那一色）
+    case tableSourceTextColor
     /// 图片最大宽度按什么算（百分比 / 固定点数）
     case imageWidthMode
     /// 图片宽度占编辑器宽度的比例
@@ -243,6 +249,10 @@ enum SettingsRow: Int, CaseIterable {
             return "最小列宽"
         case .tableMaxColumnWidth:
             return "最大列宽"
+        case .tableSourceFontSize:
+            return "源码字号"
+        case .tableSourceTextColor:
+            return "源码文字颜色"
         case .imageWidthMode:
             return "宽度怎么算"
         case .imageWidthRatio:
@@ -355,6 +365,14 @@ enum SettingsRow: Int, CaseIterable {
         case .tableMaxColumnWidth:
             return "某一列内容特别长（比如贴了长链接）时，列宽到这里就封顶，"
                 + "多出来的文字自动换行，不把别的列挤没。"
+        case .tableSourceFontSize:
+            return "表格画成一张图之后，下面仍然留着那几行 | 姓名 | 年龄 | 源码，光标能停进去改内容 ——"
+                + "这一项调的就是那几行字的大小。"
+                + "默认跟着正文字号走（比正文小 1 点），调正文时它一起变；在这里拖一下，就固定成你选的值。"
+        case .tableSourceTextColor:
+            return "上面那几行源码的颜色。默认跟着主题里的「表格源码文字」，换主题时它跟着换；"
+                + "在这里选一个颜色就固定用它，不再受换主题影响。"
+                + "想交还给主题，点按钮选「跟随主题」。"
         case .imageWidthMode:
             return "「按百分比」：图片最多占编辑器宽度的百分之几，窗口拉宽图也跟着变宽；"
                 + "「固定宽度」：永远是你指定的点数，跟窗口无关。"
@@ -416,6 +434,7 @@ enum SettingsRow: Int, CaseIterable {
             return MarkdownEditorSettings.Limits.outlineBackgroundOpacity
         case .tableMinColumnWidth: return MarkdownEditorSettings.Limits.tableMinColumnWidth
         case .tableMaxColumnWidth: return MarkdownEditorSettings.Limits.tableMaxColumnWidth
+        case .tableSourceFontSize: return MarkdownEditorSettings.Limits.tableSourceFontSize
         case .imageWidthRatio: return MarkdownEditorSettings.Limits.imageWidthRatio
         case .imageWidthPoints: return MarkdownEditorSettings.Limits.imageWidthPoints
         case .imageMaxHeight: return MarkdownEditorSettings.Limits.imageMaxHeight
@@ -441,6 +460,8 @@ enum SettingsRow: Int, CaseIterable {
         // 一档 5%：这一项量程是 20%~100%，5% 一档拖起来手感和别的比例项一致
         case .outlineBackgroundOpacity: return 0.05
         case .tableMinColumnWidth, .tableMaxColumnWidth: return 8
+        // 字号一档 1 点：量程 9~28，一档 2 点就只能挑十个大小了
+        case .tableSourceFontSize: return 1
         case .imageWidthRatio: return 0.05
         case .imageWidthPoints, .imageMaxHeight: return 20
         default: return 1
@@ -479,6 +500,8 @@ enum SettingsRow: Int, CaseIterable {
         case .outlineBackgroundOpacity: return settings.outlineBackgroundOpacity
         case .tableMinColumnWidth: return settings.tableMinColumnWidth
         case .tableMaxColumnWidth: return settings.tableMaxColumnWidth
+        // 从配置读「实际用的字号」：没单独设过时它是「正文 - 1」，滑块的起点才是对的位置
+        case .tableSourceFontSize: return settings.tableSourceFontSize
         case .imageWidthRatio: return settings.imageWidthRatio
         case .imageWidthPoints: return settings.imageWidthPoints
         case .imageMaxHeight: return settings.imageMaxHeight
@@ -510,7 +533,8 @@ enum SettingsRow: Int, CaseIterable {
                 : "\(Int(value.rounded())) pt"
         case .outlineWidthRatio, .outlineHeightRatio, .outlineBackgroundOpacity:
             return "\(Int((value * 100).rounded()))%"
-        case .outlineWidthPoints, .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth:
+        case .outlineWidthPoints, .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth,
+             .tableSourceFontSize:
             return "\(Int(value.rounded())) pt"
         case .bulletDiameter:
             return "\(Int(value.rounded())) pt"

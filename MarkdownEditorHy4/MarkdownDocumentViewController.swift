@@ -706,7 +706,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         applyEditorStyle()
     }
 
-    /// 把「配色」「正文排版」「表格列宽」「图片尺寸」四组配置写进编辑器主题，再套上主题外壳（编辑区字号、链接样式、底色）。**不重排。**
+    /// 把「配色」「正文排版」「表格（列宽 + 源码样式）」「图片尺寸」这几组配置写进编辑器主题，再套上主题外壳（编辑区字号、链接样式、底色）。**不重排。**
     ///
     /// 🚨 单拆出来是为了「打开文档」那条路：那边必须在 `setMarkdown` **之前**调它，让文档那一次渲染就用上最终主题。
     /// 顺序反过来（先 `setMarkdown` 再 `refreshTheme()`）会先用默认主题整篇渲一遍、紧接着再用真主题整篇重渲一遍 —— 同一份内容白渲染两次，实测各 ~155 ms（2026-10-11 的 Time Profiler）。
@@ -724,6 +724,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         view.backgroundColor = editor.renderer.theme.editorBackground
         settings.applyTypography(to: &editor.renderer.theme)
         settings.applyTableColumnWidths(to: &editor.renderer.theme)
+        // 表格源码的字号 / 颜色：必须排在 `applyColors` 之后，
+        // 用户单独指定的那一色才不会被配色表盖掉（理由见 `applyTableSourceStyle`）
+        settings.applyTableSourceStyle(to: &editor.renderer.theme)
         settings.applyImageSize(to: &editor.renderer.theme)
         // 行宽是**编辑器自己的布局参数**，不走主题 ——
         // 主题管「文字长什么样」，行宽取决于窗口有多宽，是布局的事
