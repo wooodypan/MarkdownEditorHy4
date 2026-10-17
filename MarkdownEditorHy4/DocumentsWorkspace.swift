@@ -269,6 +269,13 @@ enum DocumentsWorkspace {
         (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
     }
 
+    /// 文件的创建时间（「按创建时间」排序用）。
+    ///
+    /// 有些文件系统 / 同步盘取不到这个值，返回 nil —— 排序那边会把它当「最旧」处理。
+    static func creationDate(of url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate
+    }
+
     // MARK: - 删除
 
     /// 删掉一份文档。

@@ -180,15 +180,18 @@ final class WorkspaceCoordinator {
     /// ### 为什么要手动搬一次
     /// 外层那个导航控制器（iPhone 上这里建的、iPad / Mac 上库里建的）只认
     /// **它直接那个子控制器**的 `navigationItem` —— 也就是 `PPTabBarController` 自己的。
-    /// 两个列表挂在标签页**里面**，它们各自的「+」「清空」按钮不会自己冒到导航条上。
+    /// 两个列表挂在标签页**里面**，它们各自的「+」「⋯」「清空」按钮不会自己冒到导航条上。
     /// 所以切 Tab 的时候得把当前这一页的按钮搬上去。
+    ///
+    /// 用 `rightBarButtonItems`（数组）而不是单数的 `rightBarButtonItem`：
+    /// 「文档」那一页现在是「+」和「⋯」两颗，只搬单数会把「⋯」弄丢。
     ///
     /// 这也是两个列表页把按钮配在 `init` 里、而不是 `viewDidLoad` 里的原因：
     /// 搬的时候它们的 view 可能还没加载。
     private func syncNavigationItem(for index: Int) {
         guard leftTabs.indices.contains(index) else { return }
-        // 直接共用同一个按钮对象：它的可用状态（比如「清空」在没有记录时置灰）
+        // 直接共用同一批按钮对象：它们的可用状态（比如「清空」在没有记录时置灰）
         // 由列表页自己维护，两边看到的自然是同一个
-        leftTabBar.navigationItem.rightBarButtonItem = leftTabs[index].navigationItem.rightBarButtonItem
+        leftTabBar.navigationItem.rightBarButtonItems = leftTabs[index].navigationItem.rightBarButtonItems
     }
 }

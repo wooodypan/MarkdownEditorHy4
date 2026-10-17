@@ -41,9 +41,35 @@ final class DocumentListViewController: UIViewController {
 
     private let tableView = UITableView(frame: .zero, style: .plain)
     private let emptyLabel = UILabel()
+    private let searchBar = UISearchBar()
 
-    /// 当前列出来的文件，按显示顺序
+    /// 目录里现在有什么（排序 / 过滤之前的完整列表）
+    private var allFiles: [URL] = []
+
+    /// 当前**展示**的文件（已经过排序和搜索过滤）
     private var files: [URL] = []
+
+    // MARK: - 排序
+
+    /// 列表的排序方式。默认按标题升序，和 `DocumentsWorkspace.documentURLs` 原来的顺序一致
+    private enum SortOrder: Equatable {
+        case titleAscending
+        case titleDescending
+        case modifiedNewestFirst
+        case modifiedOldestFirst
+        case createdNewestFirst
+        case createdOldestFirst
+    }
+
+    private var sortOrder: SortOrder = .titleAscending
+
+    /// 导航条上「+」右边那颗「更多」按钮，点开是排序菜单
+    private lazy var moreBarButtonItem: UIBarButtonItem = {
+        let item = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"),
+                                   menu: makeSortMenu())
+        item.accessibilityLabel = "更多"
+        return item
+    }()
 
     // MARK: - 选中行高亮（与右侧选中的 Tab 联动）
 
@@ -133,6 +159,7 @@ final class DocumentListViewController: UIViewController {
         title = "文档"
         view.backgroundColor = .systemBackground
 
+        setupSearchBar()
         setupTableView()
         setupEmptyLabel()
         setupTapGestures()
@@ -157,10 +184,31 @@ final class DocumentListViewController: UIViewController {
 
     // MARK: - 界面
 
+    /// 列表顶上的搜索框：按文件名过滤，忽略大小写
+    private func setupSearchBar() {
+        searchBar.translatesAutoresizingMaskIntoConstraints = false
+        searchBar.delegate = self
+        searchBar.placeholder = "搜索文件名"
+        searchBar.searchBarStyle = .minimal
+        // 文件名不需要自动大写 / 纠错，别让系统把用户输入改掉
+        searchBar.autocapitalizationType = .none
+        searchBar.autocorrectionType = .no
+        searchBar.spellCheckingType = .no
+        view.addSubview(searchBar)
+
+        NSLayoutConstraint.activate([
+            searchBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            searchBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            searchBar.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
+    }
+
     private func setupTableView() {
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.dataSource = self
         tableView.delegate = self
+        // 滚动列表时顺手把搜索键盘收起来
+        tableView.keyboardDismissMode = .onDrag
         // 行高交给系统按内容算：这一行有三行字（文件名 / 预览 / 日期），字号还会跟着系统的
         // 「文字大小」设置变，写死一个数字迟早会在某种字号下把字挤住
         tableView.rowHeight = UITableView.automaticDimension
@@ -170,11 +218,20 @@ final class DocumentListViewController: UIViewController {
         view.addSubview(tableView)
 
         NSLayoutConstraint.activate([
-            tableView.topAnchor.constraint(equalTo: view.topAnchor),
+            tableView.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
             tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+    }
+
+    /// 目录真的为空时的说明文字（搜索没命中是另一段，见 `updateEmptyState`）
+    private var emptyDirectoryMessage: String {
+        #if targetEnvironment(macCatalyst)
+        return "这个目录里还没有文档\n\n用「文件 > 打开…」把硬盘上的 .md 打开，\n或者点右上角的「+」新建一份。"
+        #else
+        return "这个目录里还没有文档\n\n把 .md 文件放进「文件」App\n的 MarkdownEditorHy4 文件夹，\n或者点右上角的「+」新建一份。"
+        #endif
     }
 
     /// 一份文件都没有时的说明文字 —— 空白列表很容易被当成「卡住了」
@@ -187,11 +244,7 @@ final class DocumentListViewController: UIViewController {
     ///   「文件」App 里，直接往里丢就行。
     private func setupEmptyLabel() {
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
-        #if targetEnvironment(macCatalyst)
-        emptyLabel.text = "这个目录里还没有文档\n\n用「文件 > 打开…」把硬盘上的 .md 打开，\n或者点右上角的「+」新建一份。"
-        #else
-        emptyLabel.text = "这个目录里还没有文档\n\n把 .md 文件放进「文件」App\n的 MarkdownEditorHy4 文件夹，\n或者点右上角的「+」新建一份。"
-        #endif
+        emptyLabel.text = emptyDirectoryMessage
         emptyLabel.numberOfLines = 0
         emptyLabel.textAlignment = .center
         emptyLabel.font = .preferredFont(forTextStyle: .footnote)
@@ -208,12 +261,12 @@ final class DocumentListViewController: UIViewController {
     }
 
     private func setupNavigationBar() {
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            barButtonSystemItem: .add,
-            target: self,
-            action: #selector(createNewDocument)
-        )
-        navigationItem.rightBarButtonItem?.accessibilityLabel = "新建文档"
+        let addItem = UIBarButtonItem(barButtonSystemItem: .add,
+                                      target: self,
+                                      action: #selector(createNewDocument))
+        addItem.accessibilityLabel = "新建文档"
+        // rightBarButtonItems 里**第一个是最右边那颗**：这样「+」在左、「⋯」在右
+        navigationItem.rightBarButtonItems = [moreBarButtonItem, addItem]
     }
 
     /// 单击 / 双击两把手势。
@@ -237,14 +290,134 @@ final class DocumentListViewController: UIViewController {
     // MARK: - 数据
 
     private func reloadFiles() {
-        files = DocumentsWorkspace.documentURLs()
-        // 高亮的那份如果已经不在列表里（被删 / 改名），别让状态一直挂着一个不存在的路径
-        if let id = highlightedItemID, !files.contains(where: { $0.path == id }) {
+        allFiles = DocumentsWorkspace.documentURLs()
+        // 高亮的那份如果已经不在目录里（被删 / 改名），别让状态一直挂着一个不存在的路径。
+        // 注意看的是 `allFiles` 而不是过滤后的 `files`：只是被搜索藏起来的行，
+        // 清空搜索后还该亮着
+        if let id = highlightedItemID, !allFiles.contains(where: { $0.path == id }) {
             highlightedItemID = nil
         }
-        tableView.isHidden = files.isEmpty
-        emptyLabel.isHidden = !files.isEmpty
+        applySortAndFilter()
+    }
+
+    /// 按当前排序方式 + 搜索框里的关键词，重算 `files` 并刷新列表
+    private func applySortAndFilter() {
+        let query = (searchBar.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let matched = query.isEmpty ? allFiles : allFiles.filter { url in
+            // 匹配的是界面上显示的标题（去掉扩展名），忽略大小写；
+            // 带上 diacriticInsensitive，英文名带重音也能搜到
+            DocumentsWorkspace.displayName(for: url)
+                .range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+        files = sorted(matched)
+        updateEmptyState(query: query)
         tableView.reloadData()
+    }
+
+    /// 按 `sortOrder` 排一份拷贝
+    private func sorted(_ urls: [URL]) -> [URL] {
+        switch sortOrder {
+        case .titleAscending:
+            return urls.sorted { compareNames($0, $1) == .orderedAscending }
+        case .titleDescending:
+            return urls.sorted { compareNames($0, $1) == .orderedDescending }
+        case .modifiedNewestFirst:
+            return sortedByDate(urls, newestFirst: true, kind: .modified)
+        case .modifiedOldestFirst:
+            return sortedByDate(urls, newestFirst: false, kind: .modified)
+        case .createdNewestFirst:
+            return sortedByDate(urls, newestFirst: true, kind: .created)
+        case .createdOldestFirst:
+            return sortedByDate(urls, newestFirst: false, kind: .created)
+        }
+    }
+
+    private enum DateKind {
+        case modified
+        case created
+    }
+
+    /// 按时间排；时间一样时退回按标题升序，保证顺序稳定、可预期
+    private func sortedByDate(_ urls: [URL],
+                              newestFirst: Bool,
+                              kind: DateKind) -> [URL] {
+        // 每个文件只读一次属性 —— 放进排序闭包里每比较一次就读一次太浪费
+        let dates = Dictionary(uniqueKeysWithValues: urls.map { url -> (String, Date) in
+            let date: Date?
+            switch kind {
+            case .modified:
+                date = DocumentsWorkspace.modificationDate(of: url)
+            case .created:
+                date = DocumentsWorkspace.creationDate(of: url)
+            }
+            return (url.path, date ?? .distantPast)
+        })
+        return urls.sorted { lhs, rhs in
+            let lhsDate = dates[lhs.path] ?? .distantPast
+            let rhsDate = dates[rhs.path] ?? .distantPast
+            if lhsDate != rhsDate {
+                return newestFirst ? lhsDate > rhsDate : lhsDate < rhsDate
+            }
+            return compareNames(lhs, rhs) == .orderedAscending
+        }
+    }
+
+    /// 标题比较用 `localizedStandardCompare`：中文 / 数字排法才符合直觉
+    private func compareNames(_ lhs: URL, _ rhs: URL) -> ComparisonResult {
+        DocumentsWorkspace.displayName(for: lhs)
+            .localizedStandardCompare(DocumentsWorkspace.displayName(for: rhs))
+    }
+
+    /// 列表空了时该显示哪段说明：目录本来就空，还是搜索没命中
+    private func updateEmptyState(query: String) {
+        let isEmpty = files.isEmpty
+        tableView.isHidden = isEmpty
+        emptyLabel.isHidden = !isEmpty
+        guard isEmpty else { return }
+        emptyLabel.text = allFiles.isEmpty
+            ? emptyDirectoryMessage
+            : "没有找到「\(query)」\n\n换个关键词试试。"
+    }
+
+    // MARK: - 排序菜单
+
+    /// 「⋯」点开的排序菜单：修改时间 / 创建时间 / 标题，各自升序和降序。
+    /// 当前选中的那一项打勾。
+    private func makeSortMenu() -> UIMenu {
+        func action(_ title: String, _ order: SortOrder) -> UIAction {
+            UIAction(title: title, state: sortOrder == order ? .on : .off) { [weak self] _ in
+                self?.applySortOrder(order)
+            }
+        }
+
+        // 时间类按用户的说法写「最新的排在前 / 最旧的排在前」，比「降序 / 升序」直观
+        let modified = UIMenu(title: "按修改时间",
+                              image: UIImage(systemName: "clock"),
+                              children: [
+                                  action("最新的排在前", .modifiedNewestFirst),
+                                  action("最旧的排在前", .modifiedOldestFirst)
+                              ])
+        let created = UIMenu(title: "按创建时间",
+                             image: UIImage(systemName: "calendar"),
+                             children: [
+                                 action("最新的排在前", .createdNewestFirst),
+                                 action("最旧的排在前", .createdOldestFirst)
+                             ])
+        let title = UIMenu(title: "按标题",
+                           image: UIImage(systemName: "textformat"),
+                           children: [
+                               action("升序", .titleAscending),
+                               action("降序", .titleDescending)
+                           ])
+        return UIMenu(children: [modified, created, title])
+    }
+
+    private func applySortOrder(_ order: SortOrder) {
+        guard order != sortOrder else { return }
+        sortOrder = order
+        // 对勾要跟着换：重建菜单挂回按钮上
+        moreBarButtonItem.menu = makeSortMenu()
+        applySortAndFilter()
     }
 
     /// 通知：目录变了 / 有人要新建 / 有外部文件要打开
@@ -573,6 +746,20 @@ final class DocumentListViewController: UIViewController {
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "好", style: .default))
         present(alert, animated: true)
+    }
+}
+
+// MARK: - 搜索
+
+extension DocumentListViewController: UISearchBarDelegate {
+
+    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+        // 每敲一个字就过滤一次：文件列表通常不大，不用加防抖
+        applySortAndFilter()
+    }
+
+    func searchBarSearchButtonClicked(_ searchBar: UISearchBar) {
+        searchBar.resignFirstResponder()
     }
 }
 
