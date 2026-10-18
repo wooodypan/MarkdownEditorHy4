@@ -139,6 +139,19 @@ final class MarkdownTableScrollTests: XCTestCase {
         XCTAssertGreaterThan(attachment.bounds.height, 0, "高度该照常占住（表格多高就留多高）")
     }
 
+    /// 透明占位图本身必须是 1×1，不能按表格尺寸分配位图。
+    ///
+    /// ### 为什么要守
+    /// 尺寸由 `bounds` 说了算，图片一个像素都不画；照着表格尺寸建透明图，纯属白吃内存 ——
+    /// 6 列 × 120 行、@2x 的透明图就有 64MB，和真画一张表格图一样贵。
+    func testScrollablePlaceholderUsesOnePixelImage() throws {
+        let attachment = try renderAttachment(tableSource(columns: 30))
+
+        let cg = try XCTUnwrap(attachment.image?.cgImage, "占位图必须是一张真实的 UIImage")
+        let bytes = cg.bytesPerRow * cg.height
+        XCTAssertLessThanOrEqual(bytes, 64, "占位图不该按表格尺寸分配位图，实测 \(bytes) 字节")
+    }
+
     // MARK: 浮层真的挂上去了
 
     /// 宽表格上方要浮出一个「内容比框宽」的滚动容器，宽度就是容器宽

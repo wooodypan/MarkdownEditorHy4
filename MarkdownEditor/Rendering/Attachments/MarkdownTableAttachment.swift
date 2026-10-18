@@ -59,8 +59,8 @@ final class MarkdownTableAttachment: NSTextAttachment {
         let height = presentation.layout.totalHeight
         if presentation.isScrollable {
             // 横向滚动：文本流里只占位，表格由浮层画 —— 底下留透明而不是留「最左边那一块」，否则浮层和它差一两个点就能看出重影（理由见 transparentPlaceholder 的注释）
-            image = MarkdownTableView.transparentPlaceholder(width: presentation.visibleWidth,
-                                                             height: height)
+            // 图片本身 1×1，尺寸靠 bounds 撑出来：透明图按表格尺寸分配也是几十 MB 的浪费
+            image = MarkdownTableView.transparentPlaceholder()
             bounds = CGRect(x: 0, y: 0, width: presentation.visibleWidth, height: height)
         } else {
             // 装得下：整张画成图片，bounds 用**画出来的图片**的尺寸，而不是拿容器宽度当表格宽度

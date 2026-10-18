@@ -16,7 +16,10 @@ import UIKit
 ///
 /// ### 画布为什么不是一张大图
 /// 30 列 × 每列最多 280pt 就是上万点宽，整张转成位图既吃内存又超 GPU 纹理上限。
-/// 这里放的是一块 `MarkdownTableView`（UIView），它每次只按脏矩形画露出来那一块，不管表格多宽，一帧的成本都只有一屏。
+/// 这里放的是一块 `MarkdownTableView`（UIView），它每次只按脏矩形画露出来那一块，不管表格多宽，一帧的**绘制 CPU** 都只有一屏。
+///
+/// ### ⚠️ 脏矩形不省内存
+/// 画布是个普通 UIView，它的 layer backing 仍然是整张画布大小：6 列 × 120 行、@2x 的表格，光画布就实测多出 64MB，和直接生成一张整表位图差不多。别把「一帧只画一屏」理解成「内存也只要一屏」。
 final class MarkdownTableScrollView: UIScrollView {
 
     /// 它对应的那个 attachment（浮层靠它复用：同一个表格滚出视野再滚回来，滚动位置不该丢）

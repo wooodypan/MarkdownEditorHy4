@@ -196,18 +196,21 @@ final class MarkdownTableView: UIView {
                      availableWidth: availableWidth).layout.totalHeight
     }
 
-    /// 一张**全透明**的占位图：宽表格交给浮层的滚动视图去画，文本流里只留一个位置。
+    /// 一张 **1×1 的透明图**：宽表格交给浮层的滚动视图去画，文本流里只留一个位置。
     ///
     /// ### 为什么必须是透明图而不是「不设 image」
-    /// `image = nil` 时 TextKit 会替我们补画一张「白纸 + 回形针」的占位图标（项目里踩过的老坑），屏幕上就多出一个莫名的小图标。给一张同尺寸的透明图，占的位置一样、一个像素都不画。
+    /// `image = nil` 时 TextKit 会替我们补画一张「白纸 + 回形针」的占位图标（项目里踩过的老坑），屏幕上就多出一个莫名的小图标。给一张透明图，占的位置一样、一个像素都不画。
+    ///
+    /// ### 为什么不按表格尺寸生成透明图（重要）
+    /// 透明像素也是实打实分配内存的：6 列 × 120 行、@2x 的透明图就有 64MB。
+    /// 尺寸由 `NSTextAttachment.bounds` 决定（调用方显式设置），图片本身 1×1 就够 —— TextKit 会把它拉伸到 bounds 大小，反正一个像素也不画。
     ///
     /// ### 为什么透明而不是「画最左边那一块」
     /// 浮层滚动视图盖在同一块位置上；底下要是有图，两者只要差一两个点就会看出重影。留白就没有可比对象。
-    static func transparentPlaceholder(width: CGFloat, height: CGFloat) -> UIImage {
+    static func transparentPlaceholder() -> UIImage {
         let format = UIGraphicsImageRendererFormat.default()
         format.opaque = false
-        let size = CGSize(width: max(1, width), height: max(1, height))
-        return UIGraphicsImageRenderer(size: size, format: format).image { _ in }
+        return UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1), format: format).image { _ in }
     }
 
     // MARK: 呈现方式（画多宽 / 露多宽 / 要不要横滚）
@@ -268,16 +271,23 @@ final class MarkdownTableView: UIView {
         let paddingH = style.cellPaddingHorizontal * 2
         let paddingV = style.cellPaddingVertical * 2
 
+        // 属性字典只建两份，别在每个单元格里现拼一个 —— 几百个格子时这份开销很实在
+        let bodyAttributes: [NSAttributedString.Key: Any] = [.font: bodyFont]
+        let headerAttributes: [NSAttributedString.Key: Any] = [.font: headerFont]
+
         // 1) 每列的理想宽度 = 该列最长的内容 + 左右内边距，夹在 [min, max] 之间
+        // 顺手把每个单元格的实测宽度存下来，第 4 步判断「这格会不会换行」要用
         var desired: [CGFloat] = []
         desired.reserveCapacity(columnCount)
+        var cellWidths = [CGFloat](repeating: 0, count: rowCount * columnCount)
         for column in 0..<columnCount {
             var widest: CGFloat = 0
             for row in 0..<rowCount {
-                let font = row == 0 ? headerFont : bodyFont
                 let text = data.text(row: row, column: column)
-                let size = (text as NSString).size(withAttributes: [.font: font])
-                widest = max(widest, size.width)
+                let attributes = row == 0 ? headerAttributes : bodyAttributes
+                let width = (text as NSString).size(withAttributes: attributes).width
+                cellWidths[row * columnCount + column] = width
+                widest = max(widest, width)
             }
             let ideal = ceil(widest) + paddingH
             desired.append(min(max(ideal, style.minColumnWidth), style.maxColumnWidth))
@@ -305,18 +315,30 @@ final class MarkdownTableView: UIView {
         }
 
         // 4) 行高 = 该行最高的那个单元格（文字要按列宽换行） + 上下内边距
+        // 单行格子的高度只跟字体有关，先各量一次存着；几百个格子就不用每个都跑 boundingRect
+        let bodyLineHeight = singleLineHeight(attributes: bodyAttributes)
+        let headerLineHeight = singleLineHeight(attributes: headerAttributes)
+
         var rowHeights: [CGFloat] = []
         rowHeights.reserveCapacity(rowCount)
         for row in 0..<rowCount {
-            let font = row == 0 ? headerFont : bodyFont
+            let attributes = row == 0 ? headerAttributes : bodyAttributes
+            let lineHeight = row == 0 ? headerLineHeight : bodyLineHeight
             var tallest: CGFloat = 0
             for column in 0..<columnCount {
                 let text = data.text(row: row, column: column)
                 let textWidth = max(1, columnWidths[column] - paddingH)
+                // 单行且装得下 → 高度就是一行，不用再跑一遍昂贵的 boundingRect
+                // （自然列宽下绝大多数格子走的都是这一条；只有被压缩的列才会真的换行）
+                if !text.contains("\n"),
+                   cellWidths[row * columnCount + column] <= textWidth {
+                    tallest = max(tallest, lineHeight)
+                    continue
+                }
                 let rect = (text as NSString).boundingRect(
                     with: CGSize(width: textWidth, height: .greatestFiniteMagnitude),
                     options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    attributes: [.font: font],
+                    attributes: attributes,
                     context: nil
                 )
                 tallest = max(tallest, ceil(rect.height))
@@ -327,6 +349,19 @@ final class MarkdownTableView: UIView {
         return MarkdownTableLayout(columnWidths: columnWidths,
                                    rowHeights: rowHeights,
                                    totalHeight: rowHeights.reduce(0, +))
+    }
+
+    /// 单行文字占多高。
+    ///
+    /// ⚠️ 别直接用 `font.lineHeight`：`boundingRect` 开 `.usesFontLeading` 后会比它高约 2pt，
+    /// 那是原先的行高。换成 `lineHeight` 表格会整体变紧，属于肉眼能看出来的样式变化。
+    private static func singleLineHeight(attributes: [NSAttributedString.Key: Any]) -> CGFloat {
+        ("Mg" as NSString).boundingRect(
+            with: CGSize(width: 10_000, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes,
+            context: nil
+        ).height.rounded(.up)
     }
 
     // MARK: 绘制
