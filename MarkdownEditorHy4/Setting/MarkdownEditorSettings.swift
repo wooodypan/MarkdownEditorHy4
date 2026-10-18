@@ -250,6 +250,9 @@ final class MarkdownEditorSettings {
         /// 表格列宽默认值，和渲染层 `TableStyle` 的默认值保持一致
         static let tableMinColumnWidth: Double = 64
         static let tableMaxColumnWidth: Double = 280
+        /// 表格单元格内边距的默认值：直接从渲染层主题读，不在这里写第二份数字
+        static let tableCellPaddingHorizontal = Double(theme.table.cellPaddingHorizontal)
+        static let tableCellPaddingVertical = Double(theme.table.cellPaddingVertical)
 
         /// 表格源码字号**默认不单独指定**（`nil`）：跟着正文字号走（正文 - 1）。
         ///
@@ -333,6 +336,14 @@ final class MarkdownEditorSettings {
         static let tableMinColumnWidth: ClosedRange<Double> = 32...200
         /// 表格「最大列宽」的合法范围
         static let tableMaxColumnWidth: ClosedRange<Double> = 80...600
+        /// 表格单元格左右内边距的合法范围（点）。
+        ///
+        /// 4 是「再小字就贴到表格线上」的边界，40 已经相当宽松。
+        /// ⚠️ 量程的**上下界一起**不能和别的行撞车（段落间距 0...40、圆点 4...16 都已占用）——
+        /// 设置页的测试是按「量程」在视图树里找滑块的，两行完全一样就分不出谁是谁。
+        static let tableCellPaddingHorizontal: ClosedRange<Double> = 4...40
+        /// 表格单元格上下内边距的合法范围（点）。下限同样留 4，上限 32。
+        static let tableCellPaddingVertical: ClosedRange<Double> = 4...32
         /// 表格源码字号的合法范围（点）。
         ///
         /// 下限 9 是「再小就认不出字」的边界，上限 28 和正文字号的上限齐平。
@@ -417,6 +428,9 @@ final class MarkdownEditorSettings {
         var outlineBackgroundOpacity: Double?
         var tableMinColumnWidth: Double?
         var tableMaxColumnWidth: Double?
+        /// 表格单元格的左右 / 上下内边距
+        var tableCellPaddingHorizontal: Double?
+        var tableCellPaddingVertical: Double?
         /// 表格源码样式。字号没设过就是「跟随正文」，所以是可选
         var tableSourceFontSize: Double?
         /// 表格源码文字颜色的覆盖值（`#rrggbb` / `#rrggbbaa`）。没设过就是「跟随主题」
@@ -581,6 +595,17 @@ final class MarkdownEditorSettings {
     /// 某一列内容特别长（贴了个长链接）时，列宽到这个值就封顶，
     /// 多出来的文字换行，别把别的列挤没了。
     private(set) var tableMaxColumnWidth: Double
+
+    /// 单元格文字到左右边框的距离（点）。默认 `20`。
+    ///
+    /// 它是**整列共用**的：调大之后每列都会多留白，表格整体变宽。
+    /// ⚠️ 列宽的下限会跟着它一起抬 —— 内边距都放不下的列宽没有意义（见 `MarkdownTableView.minimumColumnWidth`）。
+    private(set) var tableCellPaddingHorizontal: Double
+
+    /// 单元格文字到上下边框的距离（点）。默认 `15`。
+    ///
+    /// 调大之后每一行都会变高，表格整体变高。
+    private(set) var tableCellPaddingVertical: Double
 
     /// 用户**单独指定**的表格源码字号（点）。`nil` = 没设过，跟着正文字号走。
     ///
@@ -900,6 +925,24 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「表格单元格左右内边距」。超出 `Limits.tableCellPaddingHorizontal` 的值会被夹到边界上
+    func setTableCellPaddingHorizontal(_ value: Double) {
+        let clamped = clamp(value, to: Limits.tableCellPaddingHorizontal)
+        guard clamped != tableCellPaddingHorizontal else { return }
+        tableCellPaddingHorizontal = clamped
+        save()
+        postChange()
+    }
+
+    /// 改「表格单元格上下内边距」。超出 `Limits.tableCellPaddingVertical` 的值会被夹到边界上
+    func setTableCellPaddingVertical(_ value: Double) {
+        let clamped = clamp(value, to: Limits.tableCellPaddingVertical)
+        guard clamped != tableCellPaddingVertical else { return }
+        tableCellPaddingVertical = clamped
+        save()
+        postChange()
+    }
+
     /// 改「表格源码字号」。超出 `Limits.tableSourceFontSize` 的值会被夹到边界上。
     ///
     /// ⚠️ 调过之后这一项就**不再跟着正文字号走**了（用户既然单独拖了，就该听他的）。
@@ -1079,6 +1122,8 @@ final class MarkdownEditorSettings {
         self.outlineBackgroundOpacity = Default.outlineBackgroundOpacity
         self.tableMinColumnWidth = Default.tableMinColumnWidth
         self.tableMaxColumnWidth = Default.tableMaxColumnWidth
+        self.tableCellPaddingHorizontal = Default.tableCellPaddingHorizontal
+        self.tableCellPaddingVertical = Default.tableCellPaddingVertical
         self.tableSourceFontSizeOverride = Default.tableSourceFontSizeOverride
         self.tableSourceTextColorHex = Default.tableSourceTextColorHex
         self.bodyFontSize = Default.bodyFontSize
@@ -1149,6 +1194,12 @@ final class MarkdownEditorSettings {
         }
         if let value = payload.tableMaxColumnWidth {
             tableMaxColumnWidth = clamp(value, to: Limits.tableMaxColumnWidth)
+        }
+        if let value = payload.tableCellPaddingHorizontal {
+            tableCellPaddingHorizontal = clamp(value, to: Limits.tableCellPaddingHorizontal)
+        }
+        if let value = payload.tableCellPaddingVertical {
+            tableCellPaddingVertical = clamp(value, to: Limits.tableCellPaddingVertical)
         }
         // 源码字号：盘上有值才算「用户单独设过」，没有就继续跟着正文字号走
         if let value = payload.tableSourceFontSize {
@@ -1229,6 +1280,8 @@ final class MarkdownEditorSettings {
                               outlineBackgroundOpacity: outlineBackgroundOpacity,
                               tableMinColumnWidth: tableMinColumnWidth,
                               tableMaxColumnWidth: tableMaxColumnWidth,
+                              tableCellPaddingHorizontal: tableCellPaddingHorizontal,
+                              tableCellPaddingVertical: tableCellPaddingVertical,
                               tableSourceFontSize: tableSourceFontSizeOverride,
                               tableSourceTextColorHex: tableSourceTextColorHex,
                               bodyFontSize: bodyFontSize,
@@ -1331,6 +1384,16 @@ extension MarkdownEditorSettings {
         if minValue > maxValue { minValue = maxValue }
         theme.table.minColumnWidth = CGFloat(minValue)
         theme.table.maxColumnWidth = CGFloat(maxValue)
+    }
+
+    /// 把「单元格内边距」写进编辑器主题的表格样式。
+    ///
+    /// ### 改完必须整篇重渲染
+    /// 列宽、行高、整张表格图的尺寸都是渲染那一刻算好的；只改主题里的数字，
+    /// 屏幕上已经画好的图片纹丝不动，所以要调 `MarkdownTextView.refreshTheme()`。
+    func applyTableCellPadding(to theme: inout MarkdownTheme) {
+        theme.table.cellPaddingHorizontal = CGFloat(tableCellPaddingHorizontal)
+        theme.table.cellPaddingVertical = CGFloat(tableCellPaddingVertical)
     }
 
     /// 把「表格源码」这一组（字号 + 文字颜色）写进编辑器主题。
@@ -1463,6 +1526,7 @@ extension MarkdownEditorSettings {
                     customPalette: MarkdownCustomThemeStore.shared.loadPalette(named: customThemeFileName))
         applyTypography(to: &theme)
         applyTableColumnWidths(to: &theme)
+        applyTableCellPadding(to: &theme)
         // 表格源码的样式放配色之后：它可能覆盖掉配色表里的那一色（理由见那个方法）
         applyTableSourceStyle(to: &theme)
         applyImageSize(to: &theme)

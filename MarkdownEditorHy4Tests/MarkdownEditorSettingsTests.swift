@@ -495,6 +495,78 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertEqual(theme.table.maxColumnWidth, 120, accuracy: 0.0001)
     }
 
+    // MARK: - 表格单元格内边距
+
+    /// 默认左右 20、上下 15，并且和渲染层主题是同一个数
+    func testTableCellPaddingDefaults() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        XCTAssertEqual(settings.tableCellPaddingHorizontal, 20, accuracy: 0.0001)
+        XCTAssertEqual(settings.tableCellPaddingVertical, 15, accuracy: 0.0001)
+        XCTAssertEqual(settings.tableCellPaddingHorizontal,
+                       Double(MarkdownTheme.default.table.cellPaddingHorizontal), accuracy: 0.0001,
+                       "配置默认值该和渲染层主题一致，改了一边忘了另一边就会「没动设置也变了样」")
+        XCTAssertEqual(settings.tableCellPaddingVertical,
+                       Double(MarkdownTheme.default.table.cellPaddingVertical), accuracy: 0.0001)
+
+        var theme = MarkdownTheme.default
+        settings.applyTableCellPadding(to: &theme)
+        XCTAssertEqual(theme.table.cellPaddingHorizontal, 20, accuracy: 0.0001)
+        XCTAssertEqual(theme.table.cellPaddingVertical, 15, accuracy: 0.0001)
+    }
+
+    /// 两个值都要落盘；手改配置文件或传参越界都要被夹回来
+    func testTableCellPaddingIsPersistedAndClamped() throws {
+        let url = makeTempFileURL()
+        let settings = MarkdownEditorSettings(fileURL: url)
+        settings.setTableCellPaddingHorizontal(32)
+        settings.setTableCellPaddingVertical(24)
+
+        let reloaded = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(reloaded.tableCellPaddingHorizontal, 32, accuracy: 0.0001)
+        XCTAssertEqual(reloaded.tableCellPaddingVertical, 24, accuracy: 0.0001)
+
+        settings.setTableCellPaddingHorizontal(9999)
+        settings.setTableCellPaddingVertical(-5)
+        XCTAssertEqual(settings.tableCellPaddingHorizontal, 40, accuracy: 0.0001, "超出上限要夹回来")
+        XCTAssertEqual(settings.tableCellPaddingVertical, 4, accuracy: 0.0001, "低于下限要夹回来")
+
+        let brokenURL = makeTempFileURL("broken.json")
+        try Data(#"{"tableCellPaddingHorizontal": 0, "tableCellPaddingVertical": 999}"#.utf8)
+            .write(to: brokenURL)
+        let fromDisk = MarkdownEditorSettings(fileURL: brokenURL)
+        XCTAssertEqual(fromDisk.tableCellPaddingHorizontal, 4, accuracy: 0.0001)
+        XCTAssertEqual(fromDisk.tableCellPaddingVertical, 32, accuracy: 0.0001)
+    }
+
+    /// 设置页里要有左右 / 上下两个内边距滑块，拖动吸到 1 点并写回配置
+    func testSettingsPageHasTableCellPaddingSliders() throws {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        let controller = SettingsPaneViewController(section: .tableLayout, settings: settings)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 420, height: 2600)
+        controller.view.layoutIfNeeded()
+
+        XCTAssertTrue(SettingsSection.tableLayout.rows.contains(.tableCellPaddingHorizontal))
+        XCTAssertTrue(SettingsSection.tableLayout.rows.contains(.tableCellPaddingVertical))
+
+        let horizontal = try XCTUnwrap(slider(in: controller.view, range: 4...40),
+                                       "找不到「单元格左右内边距」的滑块")
+        let vertical = try XCTUnwrap(slider(in: controller.view, range: 4...32),
+                                     "找不到「单元格上下内边距」的滑块")
+        XCTAssertEqual(Double(horizontal.value), 20, accuracy: 0.01)
+        XCTAssertEqual(Double(vertical.value), 15, accuracy: 0.01)
+
+        horizontal.value = 27.6
+        horizontal.sendActions(for: .valueChanged)
+        XCTAssertEqual(settings.tableCellPaddingHorizontal, 28, accuracy: 0.0001,
+                       "27.6 应该被吸到 28（步进 1）")
+
+        vertical.value = 10.4
+        vertical.sendActions(for: .valueChanged)
+        XCTAssertEqual(settings.tableCellPaddingVertical, 10, accuracy: 0.0001,
+                       "10.4 应该被吸到 10（步进 1）")
+    }
+
     // MARK: - 表格列宽：设置页控件
 
     /// 设置页里该有「最小 / 最大列宽」两个滑块，拖动要写回配置并吸到步进上

@@ -218,7 +218,7 @@ final class MarkdownTableView: UIView {
             return MarkdownTablePresentation(layout: natural, visibleWidth: natural.totalWidth)
         }
         // 2) 超宽，但「每列都按最小宽度」还塞得下 → 等比压缩（几列的表格挤一挤还看得清）
-        let minimumTotal = CGFloat(max(1, data.columnCount)) * style.minColumnWidth
+        let minimumTotal = CGFloat(max(1, data.columnCount)) * Self.minimumColumnWidth(for: style)
         guard minimumTotal > limit else {
             let fitted = makeLayout(data: data, style: style, bodyFont: bodyFont,
                                     headerFont: headerFont, availableWidth: limit,
@@ -230,6 +230,13 @@ final class MarkdownTableView: UIView {
     }
 
     // MARK: 量尺寸
+
+    /// 一列真正的最小宽度（点）。
+    ///
+    /// 至少得放得下左右内边距，再留 12pt 给文字 —— 内边距可以在设置里调大，如果还按 `style.minColumnWidth` 排，`列宽 - 左右内边距` 会算出负数，文字就没地方画了。正常情况下（内边距 20、最小列宽 64）这个下限不起作用。
+    static func minimumColumnWidth(for style: MarkdownTheme.TableStyle) -> CGFloat {
+        max(style.minColumnWidth, style.cellPaddingHorizontal * 2 + 12)
+    }
 
     /// 算列宽和行高。
     ///
@@ -255,6 +262,10 @@ final class MarkdownTableView: UIView {
         let rowCount = max(1, data.rowCount)
         let paddingH = style.cellPaddingHorizontal * 2
         let paddingV = style.cellPaddingVertical * 2
+        // 内边距调大之后，列宽的上下限都得跟着抬：上限要是比下限还小，
+        // `min(max(...))` 会退到上限那一侧，等于又没给文字留地方
+        let minimumWidth = Self.minimumColumnWidth(for: style)
+        let maximumWidth = max(style.maxColumnWidth, minimumWidth)
 
         // 属性字典只建两份，别在每个单元格里现拼一个 —— 几百个格子时这份开销很实在。
         // 单元格自己的富文本里已经带了字体/颜色/行内样式，这里只用它们量「单行高度」。
@@ -276,7 +287,7 @@ final class MarkdownTableView: UIView {
                 widest = max(widest, width)
             }
             let ideal = ceil(widest) + paddingH
-            desired.append(min(max(ideal, style.minColumnWidth), style.maxColumnWidth))
+            desired.append(min(max(ideal, minimumWidth), maximumWidth))
         }
 
         // 2) 够宽就原样用（不放大！一放大 min/max 就白夹了）；
@@ -291,7 +302,7 @@ final class MarkdownTableView: UIView {
 
             // 3) 压完可能把某列压得比 minColumnWidth 还窄（列很多时尤其明显），
             //    给每列保底宽度；保完如果又超了，再整体缩一次（宁可挤一点也不能溢出容器）
-            let floorWidth = min(style.minColumnWidth, limit / CGFloat(columnCount))
+            let floorWidth = min(minimumWidth, limit / CGFloat(columnCount))
             columnWidths = columnWidths.map { max($0, floorWidth) }
             let adjusted = columnWidths.reduce(0, +)
             if adjusted > limit, adjusted > 0 {
@@ -415,8 +426,8 @@ struct MarkdownTableLayoutBox {
                 guard columnX + columnWidth >= band.minX, columnX <= band.maxX else { continue }
                 let textRect = CGRect(x: columnX + style.cellPaddingHorizontal,
                                       y: rowY + style.cellPaddingVertical,
-                                      width: columnWidth - style.cellPaddingHorizontal * 2,
-                                      height: rowHeight - style.cellPaddingVertical * 2)
+                                      width: max(1, columnWidth - style.cellPaddingHorizontal * 2),
+                                      height: max(1, rowHeight - style.cellPaddingVertical * 2))
 
                 let cell = NSMutableAttributedString(
                     attributedString: data.attributedText(row: row, column: column)

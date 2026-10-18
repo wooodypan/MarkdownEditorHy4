@@ -196,6 +196,10 @@ final class SettingsPaneViewController: UIViewController {
             settings.setTableMinColumnWidth(stepped)
         case .tableMaxColumnWidth:
             settings.setTableMaxColumnWidth(stepped)
+        case .tableCellPaddingHorizontal:
+            settings.setTableCellPaddingHorizontal(stepped)
+        case .tableCellPaddingVertical:
+            settings.setTableCellPaddingVertical(stepped)
         case .tableSourceFontSize:
             settings.setTableSourceFontSize(stepped)
         case .imageWidthRatio:
@@ -628,7 +632,9 @@ extension SettingsPaneViewController: UITableViewDataSource, UITableViewDelegate
              .bodyContentWidth, .bulletDiameter,
              .outlineWidthRatio, .outlineWidthPoints,
              .outlineHeightRatio, .outlineMaximumHeight, .outlineBackgroundOpacity,
-             .tableMinColumnWidth, .tableMaxColumnWidth, .tableSourceFontSize,
+             .tableMinColumnWidth, .tableMaxColumnWidth,
+             .tableCellPaddingHorizontal, .tableCellPaddingVertical,
+             .tableSourceFontSize,
              .imageWidthRatio, .imageWidthPoints, .imageMaxHeight:
             return makeSliderCell(for: row)
         }

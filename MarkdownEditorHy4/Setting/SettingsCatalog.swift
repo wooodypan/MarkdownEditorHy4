@@ -72,7 +72,7 @@ enum SettingsSection: Int, CaseIterable {
             return SettingsRow.outlineReservesSpace.isAvailableOnCurrentDevice
                 ? "展开时正文是否让出右侧空间，面板的宽度、高度、背景不透明度"
                 : "面板的宽度、高度、背景不透明度"
-        case .tableLayout: return "列宽、下方源码的字号与文字颜色"
+        case .tableLayout: return "列宽、单元格内边距、下方源码的字号与文字颜色"
         case .imageSize: return "图片画多大：宽度怎么算、最大高度"
         case .imageInsertion: return "粘贴进来的图片存到哪儿、文件叫什么名字"
         case .clipboard: return "粘贴网页内容时先转成 Markdown 源码；网页里的图片要不要一起存到本地"
@@ -104,8 +104,9 @@ enum SettingsSection: Int, CaseIterable {
                                         .outlineBackgroundOpacity]
             return items.filter(\.isAvailableOnCurrentDevice)
         case .tableLayout:
-            // 顺序：先把表格这张图排好（两个列宽），再管图下面那几行源码（字号、颜色）
+            // 顺序：先把表格这张图排好（两个列宽、两个内边距），再管图下面那几行源码（字号、颜色）
             return [.tableMinColumnWidth, .tableMaxColumnWidth,
+                    .tableCellPaddingHorizontal, .tableCellPaddingVertical,
                     .tableSourceFontSize, .tableSourceTextColor]
         case .imageSize:
             // 顺序就是界面上从上到下的顺序：先选「宽度怎么算」，再调两个数值，
@@ -173,6 +174,10 @@ enum SettingsRow: Int, CaseIterable {
     case tableMinColumnWidth
     /// 表格最宽的一列（点）
     case tableMaxColumnWidth
+    /// 单元格文字到左右边框的距离（点）
+    case tableCellPaddingHorizontal
+    /// 单元格文字到上下边框的距离（点）
+    case tableCellPaddingVertical
     /// 表格下方那几行**源码**的字号（点）
     case tableSourceFontSize
     /// 表格下方那几行**源码**的文字颜色（选过才覆盖主题里的那一色）
@@ -257,6 +262,10 @@ enum SettingsRow: Int, CaseIterable {
             return "最小列宽"
         case .tableMaxColumnWidth:
             return "最大列宽"
+        case .tableCellPaddingHorizontal:
+            return "单元格左右内边距"
+        case .tableCellPaddingVertical:
+            return "单元格上下内边距"
         case .tableSourceFontSize:
             return "源码字号"
         case .tableSourceTextColor:
@@ -380,6 +389,12 @@ enum SettingsRow: Int, CaseIterable {
         case .tableMaxColumnWidth:
             return "某一列内容特别长（比如贴了长链接）时，列宽到这里就封顶，"
                 + "多出来的文字自动换行，不把别的列挤没。"
+        case .tableCellPaddingHorizontal:
+            return "单元格文字离左右表格线有多远。调大之后每列都会多留白、表格整体变宽；"
+                + "列宽的下限会跟着一起抬，保证内边距之外还放得下字。"
+        case .tableCellPaddingVertical:
+            return "单元格文字离上下表格线有多远。调大之后每一行都会变高，表格整体变高；"
+                + "内容多的行会按实际行数再撑开。"
         case .tableSourceFontSize:
             return "表格画成一张图之后，下面仍然留着那几行 | 姓名 | 年龄 | 源码，光标能停进去改内容 ——"
                 + "这一项调的就是那几行字的大小。"
@@ -455,6 +470,10 @@ enum SettingsRow: Int, CaseIterable {
             return MarkdownEditorSettings.Limits.outlineBackgroundOpacity
         case .tableMinColumnWidth: return MarkdownEditorSettings.Limits.tableMinColumnWidth
         case .tableMaxColumnWidth: return MarkdownEditorSettings.Limits.tableMaxColumnWidth
+        case .tableCellPaddingHorizontal:
+            return MarkdownEditorSettings.Limits.tableCellPaddingHorizontal
+        case .tableCellPaddingVertical:
+            return MarkdownEditorSettings.Limits.tableCellPaddingVertical
         case .tableSourceFontSize: return MarkdownEditorSettings.Limits.tableSourceFontSize
         case .imageWidthRatio: return MarkdownEditorSettings.Limits.imageWidthRatio
         case .imageWidthPoints: return MarkdownEditorSettings.Limits.imageWidthPoints
@@ -481,6 +500,8 @@ enum SettingsRow: Int, CaseIterable {
         // 一档 5%：这一项量程是 20%~100%，5% 一档拖起来手感和别的比例项一致
         case .outlineBackgroundOpacity: return 0.05
         case .tableMinColumnWidth, .tableMaxColumnWidth: return 8
+        // 内边距一档 1 点：量程只有几十点，粗调会跳过太多位置
+        case .tableCellPaddingHorizontal, .tableCellPaddingVertical: return 1
         // 字号一档 1 点：量程 9~28，一档 2 点就只能挑十个大小了
         case .tableSourceFontSize: return 1
         case .imageWidthRatio: return 0.05
@@ -523,6 +544,8 @@ enum SettingsRow: Int, CaseIterable {
         case .outlineBackgroundOpacity: return settings.outlineBackgroundOpacity
         case .tableMinColumnWidth: return settings.tableMinColumnWidth
         case .tableMaxColumnWidth: return settings.tableMaxColumnWidth
+        case .tableCellPaddingHorizontal: return settings.tableCellPaddingHorizontal
+        case .tableCellPaddingVertical: return settings.tableCellPaddingVertical
         // 从配置读「实际用的字号」：没单独设过时它是「正文 - 1」，滑块的起点才是对的位置
         case .tableSourceFontSize: return settings.tableSourceFontSize
         case .imageWidthRatio: return settings.imageWidthRatio
@@ -557,6 +580,7 @@ enum SettingsRow: Int, CaseIterable {
         case .outlineWidthRatio, .outlineHeightRatio, .outlineBackgroundOpacity:
             return "\(Int((value * 100).rounded()))%"
         case .outlineWidthPoints, .outlineMaximumHeight, .tableMinColumnWidth, .tableMaxColumnWidth,
+             .tableCellPaddingHorizontal, .tableCellPaddingVertical,
              .tableSourceFontSize:
             return "\(Int(value.rounded())) pt"
         case .bulletDiameter:

@@ -299,7 +299,7 @@ struct MarkdownTheme {
     /// 生成 1~6 级标题字体：级别越高字越大，统一加粗
     static func makeHeadingFonts(baseSize: CGFloat) -> [Int: UIFont] {
         // 依次是 H1 ~ H6 的字号增量（15/8/5/2/0/-1）：H1 比正文大 15 点最显眼，往后逐级收敛，到 H6 已经比正文小 1 点
-        let deltas: [CGFloat] = [15, 8, 5, 2, 0, -1]
+        let deltas: [CGFloat] = [17, 11, 6, 3, 0, 0]
         var result: [Int: UIFont] = [:]
         for (index, delta) in deltas.enumerated() {
             let level = index + 1
@@ -695,10 +695,12 @@ extension MarkdownTheme {
         var borderColor: UIColor = .separator
         /// 表格线宽度（1 就是一条细线）
         var borderWidth: CGFloat = 1
-        /// 单元格文字到左右边框的距离
-        var cellPaddingHorizontal: CGFloat = 12
-        /// 单元格文字到上下边框的距离
-        var cellPaddingVertical: CGFloat = 8
+        /// 单元格文字到左右边框的距离（点）。
+        ///
+        /// 它同时决定「一列至少要多宽才能放下内边距」：左右各留这么多，所以列宽的下限会跟着它一起抬（见 `MarkdownTableView.makeLayout`）。设置页里可以单独调，默认 20。
+        var cellPaddingHorizontal: CGFloat = 20
+        /// 单元格文字到上下边框的距离（点）。设置页里可以单独调，默认 15。
+        var cellPaddingVertical: CGFloat = 15
         /// 一列最窄多少（内容再短也不再压缩）
         var minColumnWidth: CGFloat = 64
         /// 一列最宽多少（防止某一列内容特别长，把别的列挤没了）

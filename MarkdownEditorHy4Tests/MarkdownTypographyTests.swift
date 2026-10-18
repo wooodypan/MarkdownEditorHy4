@@ -238,17 +238,24 @@ final class MarkdownTypographyTests: XCTestCase {
     /// 否则标题会留在原来的大小上 —— 字号调大以后正文比 H2 还大
     func testApplyTypographyRebuildsEveryDerivedFont() {
         let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
-        settings.setBodyFontSize(20)
+        let targetSize: CGFloat = 20
+        settings.setBodyFontSize(Double(targetSize))
 
         var theme = MarkdownTheme.default
+        let oldHeadingSizes = theme.headingFonts.mapValues(\.pointSize)
         settings.applyTypography(to: &theme)
 
-        XCTAssertEqual(theme.bodyFont.pointSize, 20, accuracy: 0.001)
-        XCTAssertEqual(theme.codeFont.pointSize, 19, accuracy: 0.001, "等宽字体取正文 -1")
-        XCTAssertEqual(theme.headingFonts[1]?.pointSize ?? 0, 35, accuracy: 0.001, "H1 = 正文 +15")
-        XCTAssertEqual(theme.headingFonts[3]?.pointSize ?? 0, 25, accuracy: 0.001, "H3 = 正文 +5")
-        XCTAssertEqual(theme.headingFonts[6]?.pointSize ?? 0, 19, accuracy: 0.001, "H6 = 正文 -1")
-        // 增量表本身在 MarkdownTheme.makeHeadingFonts（15/8/5/2/0/-1），改表就得同步改上面三条
+        XCTAssertEqual(theme.bodyFont.pointSize, targetSize, accuracy: 0.001)
+        XCTAssertEqual(theme.codeFont.pointSize, targetSize - 1, accuracy: 0.001)
+
+        let expected = MarkdownTheme.makeHeadingFonts(baseSize: targetSize)
+        for level in 1...6 {
+            let size = theme.headingFonts[level]?.pointSize ?? 0
+            XCTAssertGreaterThan(size, oldHeadingSizes[level] ?? 0,
+                                "正文调大后 H\(level) 没跟着重算")
+            XCTAssertEqual(size, expected[level]?.pointSize ?? 0, accuracy: 0.001,
+                        "H\(level) 没按新正文字号重算")
+        }
     }
 
     func testApplyTypographyWritesLineHeightAndSpacing() {

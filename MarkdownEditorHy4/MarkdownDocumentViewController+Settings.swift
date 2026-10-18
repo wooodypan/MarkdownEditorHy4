@@ -48,7 +48,7 @@ extension MarkdownDocumentViewController {
         applyEditorStyle()
     }
 
-    /// 把配色、正文排版、表格（列宽和源码样式）、图片尺寸这几组配置写进编辑器主题，再套上主题外壳（编辑区字号、链接样式、底色）。**不重排。**
+    /// 把配色、正文排版、表格（列宽、内边距、源码样式）、图片尺寸这几组配置写进编辑器主题，再套上主题外壳（编辑区字号、链接样式、底色）。**不重排。**
     ///
     /// 🚨 单拆出来是为了「打开文档」那条路：那边必须在 `setMarkdown` **之前**调它，让文档那一次渲染就用上最终主题。
     /// 顺序反过来（先 `setMarkdown` 再 `refreshTheme()`）会先用默认主题整篇渲一遍，紧接着再用真主题整篇重渲一遍，同一份内容渲染两次，实测各约 155 ms（2026-10-11 的 Time Profiler）。
@@ -66,6 +66,8 @@ extension MarkdownDocumentViewController {
         view.backgroundColor = editor.renderer.theme.editorBackground
         settings.applyTypography(to: &editor.renderer.theme)
         settings.applyTableColumnWidths(to: &editor.renderer.theme)
+        // 单元格内边距影响列宽和行高，和列宽是同一件事的两半：紧跟列宽写进去
+        settings.applyTableCellPadding(to: &editor.renderer.theme)
         // 表格源码的字号 / 颜色：必须排在 `applyColors` 之后，
         // 用户单独指定的那一色才不会被配色表盖掉（理由见 `applyTableSourceStyle`）
         settings.applyTableSourceStyle(to: &editor.renderer.theme)
