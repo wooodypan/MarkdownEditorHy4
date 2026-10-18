@@ -1,13 +1,13 @@
 {
-  "originHash" : "26d76958e327df8469b5fe21a4a8da87fd875d1629d2471f5ea5335a50ccf3ab",
+  "originHash" : "21a5fdd4fa32e931b8576a85ca88ad9c310c63ee4c5fee1563af2a916c9018ed",
   "pins" : [
     {
       "identity" : "iosdemohub",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/wooodypan/iOSDemoHub.git",
       "state" : {
-        "revision" : "fc5871fbdef64ff46d86bd6ac953b472356b33b7",
-        "version" : "1.0.2"
+        "revision" : "14adcd42cb9ecb5b4508a5558621dc25d4648f10",
+        "version" : "1.0.3"
       }
     },
     {

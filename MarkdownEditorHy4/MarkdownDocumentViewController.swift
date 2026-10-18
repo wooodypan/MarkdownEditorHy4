@@ -56,8 +56,11 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     private let menuButton = UIButton(type: .system)
     /// 悬浮目录面板（纯 UI 层，不认识编辑器）
     private let outlineView = MarkdownOutlineView()
-    /// 悬浮在正文上的编辑按钮（半透明小圆点，点开是标题 / 待办 / 列表 / 加粗 / 斜体 / 更多）
+    /// 悬浮在正文上的编辑按钮（半透明小圆点，点开是标题 / 待办 / 列表 / 加粗 / 斜体 / 图片 / 更多）
     private let floatingEditButton = FloatingEditButton()
+    /// 正在挑图片的选择器。挑完 / 取消之前必须强引用着它 ——
+    /// `UIDocumentPickerViewController.delegate` 是 weak，不持有的话回调还没来对象就没了
+    private var imagePicker: MarkdownImagePicker?
     /// 大纲协调者：把编辑器和目录面板连起来
     private let outlineCoordinator = OutlineCoordinator()
     /// 顶部的查找 / 替换横条（纯 UI 层，不认识编辑器）
@@ -162,9 +165,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         giveBackPopGesture()
     }
 
-    /// 窗口尺寸变了（拉窗口、转屏）之后把悬浮圆点拉回可见范围。
+    /// 窗口尺寸变了（拉窗口、转屏）之后把悬浮圆点贴回边上。
     ///
-    /// 圆点是**绝对坐标**摆着的（它要能被拖动，用约束反而绕），窗口一变矮原来的 y 就跑到窗口外面去了。
+    /// 圆点是**绝对坐标**摆着的（它要能被拖动，用约束反而绕），窗口一变原来的位置就可能离边很远，或者跑到窗口外面去。
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         floatingEditButton.clampCenterIntoSuperview()
@@ -311,7 +314,58 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// 「哪个按钮对应哪几个字符」写在 `MarkdownQuickAction` 里，这里只告诉它「动作施加到 `editor` 上」。
     private func setupFloatingEditButton() {
         floatingEditButton.textView = editor
+        // 「图片」这一下要弹系统选择器 —— 按钮层不认识相册 / 文件，所以只把请求转过来。
+        // 选择器、落盘、把路径交给编辑器，全部收在下面 `chooseImageToInsert` 里
+        floatingEditButton.onRequestInsertImage = { [weak self] in
+            self?.chooseImageToInsert()
+        }
         view.addSubview(floatingEditButton)
+    }
+
+    /// 悬浮按钮上「图片」那一下：挑一张图 → 按「插入图片」那组设置落盘 → 把路径交给编辑器。
+    ///
+    /// ### 为什么选择器和落盘都在这一层
+    /// `MarkdownEditor/` 是将来要单独开源的组件，它只提供 `insertImageMarkdown(path:alt:)`：
+    /// 「路径给我，我把它插进 markdown」。从相册 / 文件里挑图、图片存到哪个目录，
+    /// 都是 App 自己的事情，组件里不出现任何图库 API。
+    ///
+    /// ### 为什么挑完还要 `becomeFirstResponder`
+    /// 系统面板一弹，编辑器就丢焦点了；插完把焦点还回去，用户接着敲字才会落在图片后面，
+    /// 不用再点一下正文。
+    private func chooseImageToInsert() {
+        // 只读模式下编辑器会拦下插入；提前说一声，免得用户挑完图才看到「没反应」
+        guard !editor.isReadOnly else {
+            flashStatus("只读模式下不能插入图片")
+            return
+        }
+
+        let picker = MarkdownImagePicker(presenter: self) { [weak self] selection in
+            guard let self else { return }
+            // 不管挑没挑成，这一次选择都结束了 —— 不置空的话每插一次就多留一个对象
+            self.imagePicker = nil
+            // nil = 用户取消（或者没读出数据），当什么都没发生
+            guard let selection else { return }
+
+            // 和粘贴图片走同一套设置：存哪儿、文件叫什么名字都听「插入图片」那一组
+            let outcome = ImageAssetStore.write(selection.data,
+                                                for: self.openedFileURL,
+                                                originalFileName: selection.originalFileName)
+            if let note = outcome.note { self.flashStatus(note) }
+            guard let path = outcome.path else {
+                self.showAlert(title: "插入图片失败",
+                               message: "这张图片没能存到笔记旁边。检查一下笔记所在的目录是不是还能写。")
+                return
+            }
+
+            // 替代文字用图片原来的名字（没有就用「图片」）。文件名里的方括号由组件负责去掉
+            let alt = selection.originalFileName.map { ($0 as NSString).deletingPathExtension } ?? "图片"
+            guard self.editor.insertImageMarkdown(path: path, alt: alt) else { return }
+
+            self.editor.becomeFirstResponder()
+            self.flashStatus("已插入图片 \(path)")
+        }
+        imagePicker = picker
+        picker.start()
     }
 
     /// 显示查找条（⌘F / 菜单里的「查找」都走到这里）

@@ -111,8 +111,11 @@ extension MarkdownTextView {
     /// 我们自己按**源码里改了哪一段**登记一笔（`SourceEditUndo`），撤销时做一次局部替换。
     /// ⚠️ 系统那边还会**照常**替这次替换再记一笔（按渲染坐标），这笔不用管：
     /// `performUndoableModelEdit` 会把两笔包进同一个撤销组，⌘Z 一次整体退掉，不会出现「一次粘贴要按两次 ⌘Z」。
-    func insertMarkdownSourceUndoably(_ source: String) {
-        performUndoableModelEdit(actionName: "粘贴") {
+    ///
+    /// - parameter actionName: 撤销 / 重做菜单上显示的名字，默认「粘贴」。
+    ///   插入图片不是粘贴，调用方可以传自己的名字（见 `insertImageMarkdown(path:alt:)`）
+    func insertMarkdownSourceUndoably(_ source: String, actionName: String = "粘贴") {
+        performUndoableModelEdit(actionName: actionName) {
             insertMarkdownSource(source)
         }
     }

@@ -39,6 +39,13 @@ struct QuickActionPanelItem {
     /// 菜单是不是「点一下就弹」。默认 false —— 默认要长按才弹，单击直接执行动作
     var opensMenuOnTap = false
 
+    /// 不走 `MarkdownQuickAction` 的自定义动作（比如「图片」要弹系统选择器）。
+    ///
+    /// 有它时点一下直接执行，不再看 `action` / `menu`。
+    /// 用闭包而不是 case，是因为这类动作需要宿主（文档页）才能完成，
+    /// 不该塞进「只改 markdown 字符」的动作枚举里。
+    var handler: (() -> Void)?
+
     /// 按 `MarkdownQuickAction` 造一项（标题、图标、备选菜单都从动作自己身上取）。
     ///
     /// `menu` 传空数组时自动用动作自带的备选（标题那六项就是这样挂上去的）。
@@ -48,6 +55,18 @@ struct QuickActionPanelItem {
                              symbol: action.symbolName,
                              titleFont: action.titleFont,
                              menu: menu.isEmpty ? action.alternatives : menu)
+    }
+
+    /// 造一个「自定义入口」：点一下直接执行 `handler`，和 markdown 动作无关。
+    ///
+    /// 「图片」用的就是它 —— 插入图片要先弹系统选择器，那一步不是改字符，
+    /// 没法写成 `MarkdownQuickAction`。
+    static func custom(title: String, symbol: String?, handler: @escaping () -> Void) -> QuickActionPanelItem {
+        QuickActionPanelItem(action: nil,
+                             title: title,
+                             symbol: symbol,
+                             titleFont: nil,
+                             handler: handler)
     }
 
     /// 造一个纯菜单入口（「更多」）：它自己不改文档，点一下弹出 `menu`
@@ -78,6 +97,9 @@ final class QuickActionPanelView: UIView {
     private let items: [QuickActionPanelItem]
     private let axis: NSLayoutConstraint.Axis
 
+    /// 玻璃顶部的一层高光。只有材质没有高光时，面板看起来像一块磨砂塑料
+    private let sheen = CAGradientLayer()
+
     /// 每个按钮连同它对应的那一项、以及「图标到底取到没有」。
     ///
     /// ⚠️ 按**按钮对象本身**配对，不用 tag：tag 得先找一个不会重复的整数，标题重名就配错了。
@@ -97,9 +119,21 @@ final class QuickActionPanelView: UIView {
         super.init(frame: .zero)
 
         // 毛玻璃：透的是**材质**而不是给容器打 alpha —— 给容器打 alpha 会把里面的按钮一起弄成半透明，叠在正文上时底下的字还会透成一片糊（这套浮层的老规矩，见项目记忆）
-        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
         blur.translatesAutoresizingMaskIntoConstraints = false
         addSubview(blur)
+
+        // 从上往下的一道淡高光，给平面材质加一点玻璃的厚度感；压在模糊层上、按钮下面
+        sheen.colors = [
+            UIColor.white.withAlphaComponent(0.3).cgColor,
+            UIColor.white.withAlphaComponent(0.05).cgColor,
+            UIColor.clear.cgColor
+        ]
+        sheen.locations = [0, 0.35, 0.8]
+        sheen.startPoint = CGPoint(x: 0.5, y: 0)
+        sheen.endPoint = CGPoint(x: 0.5, y: 1)
+        sheen.masksToBounds = true
+        layer.addSublayer(sheen)
 
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.axis = axis
@@ -127,10 +161,11 @@ final class QuickActionPanelView: UIView {
         }
 
         layer.cornerRadius = Self.cornerRadius
+        layer.borderWidth = 0.5
         layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.18
-        layer.shadowRadius = 10
-        layer.shadowOffset = CGSize(width: 0, height: 3)
+        layer.shadowOpacity = 0.2
+        layer.shadowRadius = 14
+        layer.shadowOffset = CGSize(width: 0, height: 6)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) 没实现：这个面板只在代码里创建") }
@@ -140,6 +175,10 @@ final class QuickActionPanelView: UIView {
         // 毛玻璃要跟着圆角裁，不然四个角会戳出面板外面
         let radius = min(Self.cornerRadius, bounds.height / 2)
         layer.cornerRadius = radius
+        // 描边和高光都跟着圆角走，换外观时描边颜色也要重新取
+        layer.borderColor = UIColor.label.withAlphaComponent(0.12).cgColor
+        sheen.frame = bounds
+        sheen.cornerRadius = radius
         for subview in subviews where subview is UIVisualEffectView {
             subview.layer.cornerRadius = radius
             subview.clipsToBounds = true
@@ -243,6 +282,11 @@ final class QuickActionPanelView: UIView {
 
     @objc private func buttonTapped(_ sender: UIButton) {
         guard let item = item(for: sender) else { return }
+        // 自定义入口（图片）：交给宿主自己处理，和 markdown 动作 / 菜单两条路都不相干
+        if let handler = item.handler {
+            handler()
+            return
+        }
         if let action = item.action, !item.opensMenuOnTap {
             onSelect?(action, sender)
             return
