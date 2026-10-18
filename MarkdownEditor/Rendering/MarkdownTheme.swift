@@ -753,6 +753,29 @@ extension MarkdownTheme {
 
 // MARK: - UIFont 的字形变体（粗体 / 斜体）
 
+extension Unicode.Scalar {
+    /// 这个字符属不属于「没有斜体字形、需要合成倾斜」的东亚文字。
+    ///
+    /// 覆盖：CJK 统一表意（含扩展区）、日文假名、韩文谚文、全角标点 / 字母。
+    /// 拉丁字母、数字、半角标点都不在内（它们有真斜体）。
+    ///
+    /// 正文渲染和表格单元里的中文斜体都要用这一份判断（见 `MarkdownTheme.cjkItalicSlant`）。
+    var isCJK: Bool {
+        switch value {
+        case 0x1100...0x11FF,       // 谚文字母
+             0x2E80...0x9FFF,       // CJK 部首、注音、假名、CJK 统一表意
+             0xAC00...0xD7AF,       // 谚文音节
+             0xF900...0xFAFF,       // CJK 兼容表意
+             0xFE30...0xFE4F,       // CJK 兼容形式
+             0xFF00...0xFFEF,       // 全角形式（，。！等全角标点也在这一段）
+             0x20000...0x2FA1F:     // CJK 扩展 A~F
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 extension UIFont {
     /// 在现有字体基础上叠加一个字形特征（粗体、斜体…），并保留原有特征。
     /// - parameter trait: 要叠加的特征，比如 `.traitBold`、`.traitItalic`

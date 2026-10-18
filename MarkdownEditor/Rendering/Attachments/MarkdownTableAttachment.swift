@@ -30,8 +30,6 @@ final class MarkdownTableAttachment: NSTextAttachment {
     let style: MarkdownTheme.TableStyle
     /// 单元格字体（同上）
     let bodyFont: UIFont
-    /// 文字颜色（同上）
-    let textColor: UIColor
 
     /// 列多到「每列最小宽度」都塞不进容器 → 交给浮层横向滚动
     var needsHorizontalScroll: Bool { presentation.isScrollable }
@@ -47,7 +45,6 @@ final class MarkdownTableAttachment: NSTextAttachment {
         self.data = data
         self.style = theme.table
         self.bodyFont = theme.bodyFont
-        self.textColor = theme.textColor
         // `availableWidth` 只是「最多能用多宽」，表格按内容算出来可能比它窄得多
         // （列宽受 `TableStyle.min/maxColumnWidth` 限制，不再撑满容器）
         self.presentation = MarkdownTableView.presentation(data: data,
@@ -67,7 +64,6 @@ final class MarkdownTableAttachment: NSTextAttachment {
             image = MarkdownTableView.image(data: data,
                                             style: theme.table,
                                             bodyFont: theme.bodyFont,
-                                            textColor: theme.textColor,
                                             layout: presentation.layout)
             let size = image?.size ?? .zero
             bounds = CGRect(x: 0, y: 0, width: size.width, height: size.height)

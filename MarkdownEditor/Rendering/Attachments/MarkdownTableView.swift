@@ -73,20 +73,19 @@ struct MarkdownTablePresentation {
 /// 表格本身不能交互（表格要改就改它下面那几行源码）。
 /// 唯一例外是**列太多装不下**：这时表格画成完整宽度，由 `MarkdownTableScrollView` 浮在文本上面做横向滚动（见 `MarkdownTablePresentation`）。
 ///
+/// ### 单元格里的行内语法
+/// `MarkdownTableData` 已经把粗体 / 斜体 / 删除线 / 行内代码 / 链接烘成 `NSAttributedString`；
+/// 这里量宽、画字都直接用富文本，标记符不会出现在图里。字体和颜色也是数据自带的，
+/// 所以换主题要重新渲染，不能只改这个 view 的属性。
+///
 /// ### 画的时候只画露出来那一块
 /// 宽表格可能上万点宽（30 列 × 每列最多 280pt），但 `draw(_:)` 拿到的脏矩形只有一屏，所以 `MarkdownTableLayoutBox.draw(in:dirty:)` 会把落在脏矩形外的单元格整格跳过 —— 一次只画一屏的量。
 final class MarkdownTableView: UIView {
 
-    /// 表格内容
+    /// 表格内容（每个单元格的字体、颜色、行内样式都在里面）
     let data: MarkdownTableData
     /// 绘制参数
     let style: MarkdownTheme.TableStyle
-    /// 表头字体（正文加粗）
-    let headerFont: UIFont
-    /// 单元格字体
-    let bodyFont: UIFont
-    /// 文字颜色
-    let textColor: UIColor
     /// 量好的尺寸
     let layout: MarkdownTableLayout
 
@@ -97,13 +96,9 @@ final class MarkdownTableView: UIView {
     init(data: MarkdownTableData,
          style: MarkdownTheme.TableStyle,
          bodyFont: UIFont,
-         textColor: UIColor,
          width: CGFloat) {
         self.data = data
         self.style = style
-        self.bodyFont = bodyFont
-        self.headerFont = bodyFont.adding(.traitBold)
-        self.textColor = textColor
         self.layout = Self.makeLayout(data: data, style: style, bodyFont: bodyFont,
                                       headerFont: bodyFont.adding(.traitBold),
                                       availableWidth: width)
@@ -118,13 +113,9 @@ final class MarkdownTableView: UIView {
     init(data: MarkdownTableData,
          style: MarkdownTheme.TableStyle,
          bodyFont: UIFont,
-         textColor: UIColor,
          layout: MarkdownTableLayout) {
         self.data = data
         self.style = style
-        self.bodyFont = bodyFont
-        self.headerFont = bodyFont.adding(.traitBold)
-        self.textColor = textColor
         self.layout = layout
         super.init(frame: CGRect(x: 0, y: 0,
                                  width: layout.totalWidth,
@@ -159,9 +150,8 @@ final class MarkdownTableView: UIView {
     static func image(data: MarkdownTableData,
                       style: MarkdownTheme.TableStyle,
                       bodyFont: UIFont,
-                      textColor: UIColor,
                       availableWidth: CGFloat) -> UIImage {
-        image(data: data, style: style, bodyFont: bodyFont, textColor: textColor,
+        image(data: data, style: style, bodyFont: bodyFont,
               layout: presentation(data: data, style: style, bodyFont: bodyFont,
                                    availableWidth: availableWidth).layout)
     }
@@ -170,18 +160,13 @@ final class MarkdownTableView: UIView {
     static func image(data: MarkdownTableData,
                       style: MarkdownTheme.TableStyle,
                       bodyFont: UIFont,
-                      textColor: UIColor,
                       layout: MarkdownTableLayout) -> UIImage {
-        let headerFont = bodyFont.adding(.traitBold)
         let size = CGSize(width: layout.totalWidth, height: layout.totalHeight)
         let format = UIGraphicsImageRendererFormat.default()
         format.opaque = false
         let table = MarkdownTableLayoutBox(layout: layout,
                                            data: data,
-                                           style: style,
-                                           headerFont: headerFont,
-                                           bodyFont: bodyFont,
-                                           textColor: textColor)
+                                           style: style)
         return UIGraphicsImageRenderer(size: size, format: format).image { _ in
             table.draw(in: size)
         }
@@ -271,7 +256,8 @@ final class MarkdownTableView: UIView {
         let paddingH = style.cellPaddingHorizontal * 2
         let paddingV = style.cellPaddingVertical * 2
 
-        // 属性字典只建两份，别在每个单元格里现拼一个 —— 几百个格子时这份开销很实在
+        // 属性字典只建两份，别在每个单元格里现拼一个 —— 几百个格子时这份开销很实在。
+        // 单元格自己的富文本里已经带了字体/颜色/行内样式，这里只用它们量「单行高度」。
         let bodyAttributes: [NSAttributedString.Key: Any] = [.font: bodyFont]
         let headerAttributes: [NSAttributedString.Key: Any] = [.font: headerFont]
 
@@ -283,9 +269,9 @@ final class MarkdownTableView: UIView {
         for column in 0..<columnCount {
             var widest: CGFloat = 0
             for row in 0..<rowCount {
-                let text = data.text(row: row, column: column)
-                let attributes = row == 0 ? headerAttributes : bodyAttributes
-                let width = (text as NSString).size(withAttributes: attributes).width
+                // 用富文本量：行内代码是等宽字体、粗体会更宽，按纯文本量列宽会不准
+                let cell = data.attributedText(row: row, column: column)
+                let width = cell.size().width
                 cellWidths[row * columnCount + column] = width
                 widest = max(widest, width)
             }
@@ -315,30 +301,32 @@ final class MarkdownTableView: UIView {
         }
 
         // 4) 行高 = 该行最高的那个单元格（文字要按列宽换行） + 上下内边距
-        // 单行格子的高度只跟字体有关，先各量一次存着；几百个格子就不用每个都跑 boundingRect
+        // 单行格子的高度只跟字体有关，先各量一次存着；几百个格子就不用每个都跑 boundingRect。
+        //
+        // 粗体 / 斜体 / 删除线 / 链接都不改行高；行内代码用的是 `theme.codeFont`
+        // （默认比正文小 1 点），单行也不会比正文高，所以这里用正文字体算上限是安全的。
+        // 以后若允许代码字体比正文大，这里要改成取该格所有字体里的最大单行高。
         let bodyLineHeight = singleLineHeight(attributes: bodyAttributes)
         let headerLineHeight = singleLineHeight(attributes: headerAttributes)
 
         var rowHeights: [CGFloat] = []
         rowHeights.reserveCapacity(rowCount)
         for row in 0..<rowCount {
-            let attributes = row == 0 ? headerAttributes : bodyAttributes
             let lineHeight = row == 0 ? headerLineHeight : bodyLineHeight
             var tallest: CGFloat = 0
             for column in 0..<columnCount {
-                let text = data.text(row: row, column: column)
+                let cell = data.attributedText(row: row, column: column)
                 let textWidth = max(1, columnWidths[column] - paddingH)
                 // 单行且装得下 → 高度就是一行，不用再跑一遍昂贵的 boundingRect
                 // （自然列宽下绝大多数格子走的都是这一条；只有被压缩的列才会真的换行）
-                if !text.contains("\n"),
+                if !cell.string.contains("\n"),
                    cellWidths[row * columnCount + column] <= textWidth {
                     tallest = max(tallest, lineHeight)
                     continue
                 }
-                let rect = (text as NSString).boundingRect(
+                let rect = cell.boundingRect(
                     with: CGSize(width: textWidth, height: .greatestFiniteMagnitude),
                     options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    attributes: attributes,
                     context: nil
                 )
                 tallest = max(tallest, ceil(rect.height))
@@ -369,10 +357,7 @@ final class MarkdownTableView: UIView {
     private func drawTable(in context: CGContext, size: CGSize, dirty: CGRect) {
         MarkdownTableLayoutBox(layout: layout,
                                data: data,
-                               style: style,
-                               headerFont: headerFont,
-                               bodyFont: bodyFont,
-                               textColor: textColor).draw(in: size, dirty: dirty)
+                               style: style).draw(in: size, dirty: dirty)
     }
 }
 
@@ -384,9 +369,6 @@ struct MarkdownTableLayoutBox {
     let layout: MarkdownTableLayout
     let data: MarkdownTableData
     let style: MarkdownTheme.TableStyle
-    let headerFont: UIFont
-    let bodyFont: UIFont
-    let textColor: UIColor
 
     /// - parameter dirty: 只要画这一块（表格坐标系里的矩形）。传 `.null` 或整张大小 = 全画。
     ///             宽表格上万点宽，`draw(_:)` 每次只给一屏，落在它外面的单元格直接跳过，一次就只画一屏的量
@@ -414,7 +396,6 @@ struct MarkdownTableLayoutBox {
             let rowHeight = layout.rowHeights[row]
             // 整行都在脏矩形外面（比如滚到上一屏去了）就整行跳过
             guard rowY + rowHeight >= band.minY, rowY <= band.maxY else { continue }
-            let font = row == 0 ? headerFont : bodyFont
 
             for column in 0..<layout.columnWidths.count {
                 let columnX = layout.x(ofColumn: column)
@@ -425,18 +406,22 @@ struct MarkdownTableLayoutBox {
                                       width: columnWidth - style.cellPaddingHorizontal * 2,
                                       height: rowHeight - style.cellPaddingVertical * 2)
 
+                let cell = NSMutableAttributedString(
+                    attributedString: data.attributedText(row: row, column: column)
+                )
+                guard cell.length > 0 else { continue }
+
+                // 对齐是每列统一的，富文本里不预置段落样式，画的时候按列补上
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.alignment = data.alignment(column: column)
                 paragraph.lineBreakMode = .byWordWrapping
+                cell.addAttribute(.paragraphStyle,
+                                  value: paragraph,
+                                  range: NSRange(location: 0, length: cell.length))
 
-                (data.text(row: row, column: column) as NSString).draw(
-                    with: textRect,
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    attributes: [.font: font,
-                                 .foregroundColor: textColor,
-                                 .paragraphStyle: paragraph],
-                    context: nil
-                )
+                cell.draw(with: textRect,
+                          options: [.usesLineFragmentOrigin, .usesFontLeading],
+                          context: nil)
             }
 
             // 行分隔线（最后一行下面不画，那个位置是外框）

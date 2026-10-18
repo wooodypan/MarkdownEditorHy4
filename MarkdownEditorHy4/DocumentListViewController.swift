@@ -52,6 +52,26 @@ final class DocumentListViewController: UIViewController {
     private let emptyLabel = UILabel()
     private let searchBar = UISearchBar()
 
+    // MARK: - 自己画的滚动条
+
+    /// 列表右边那根细长的圆角条（系统的滚动条已经关掉了，见 `setupTableView`）
+    private let scrollIndicator = UIView()
+    /// 滚动条上边那条约束 —— 滚动时改它的 constant 让它跟着内容滑
+    private var scrollIndicatorTopConstraint: NSLayoutConstraint?
+    /// 滚动条高度那条约束 —— 内容越长它越短，按「看得见的占整篇多少」算
+    private var scrollIndicatorHeightConstraint: NSLayoutConstraint?
+    /// 「停手之后淡出」这件事的待办。每次滚动都取消重排，所以只有真停下来才轮得到它执行
+    private var scrollIndicatorFadeOutWorkItem: DispatchWorkItem?
+
+    /// 滚动条多宽（点）。3 点差不多是系统那根的视觉宽度，再粗就抢眼了
+    private static let scrollIndicatorWidth: CGFloat = 3
+    /// 离右边缘多少点。贴死边缘在 Catalyst 上会被窗口圆角切掉一点
+    private static let scrollIndicatorSideInset: CGFloat = 2
+    /// 滚动条最短多长（点）。长列表按比例算会缩成一根线头，给个下限才看得见
+    private static let scrollIndicatorMinLength: CGFloat = 36
+    /// 停手之后先等这么久再淡出：手指松开、惯性还在滚的时候不该马上消失
+    private static let scrollIndicatorFadeOutDelay: TimeInterval = 0.6
+
     /// 这一页的完整数据（排序 / 过滤之前）。
     /// 对「最近」来说它已经按打开时间倒序排好了（`RecentDocumentsStore.recentURLs`）
     private var allFiles: [URL] = []
@@ -200,6 +220,13 @@ final class DocumentListViewController: UIViewController {
         reloadFiles()
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // 窗口缩放 / 分栏拖动会改变可视高度和表格的上边，滚动条的位置和长度都得跟着重算。
+        // 值没变时 `updateScrollIndicator()` 自己会跳过，不会每次都改约束
+        updateScrollIndicator()
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // 只有「文档」页会在 iPad / Mac 上自动打开第一份。
@@ -237,6 +264,9 @@ final class DocumentListViewController: UIViewController {
         tableView.delegate = self
         // 滚动列表时顺手把搜索键盘收起来
         tableView.keyboardDismissMode = .onDrag
+        // 系统那根滚动条关掉，换成下面 `setupScrollIndicator()` 画的那根：
+        // 系统的在 Catalyst 上是浮层、样式由平台定，和自己画的那根对不上，还会在滑动时一闪一闪
+        tableView.showsVerticalScrollIndicator = false
         // 行高交给系统按内容算：这一行有三行字（文件名 / 预览 / 日期），字号还会跟着系统的
         // 「文字大小」设置变，写死一个数字迟早会在某种字号下把字挤住
         tableView.rowHeight = UITableView.automaticDimension
@@ -251,6 +281,98 @@ final class DocumentListViewController: UIViewController {
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+
+        // 一定要在表格之后加：后加的在上面，才不会被列表盖住
+        setupScrollIndicator()
+    }
+
+    /// 造那根细长的圆角滚动条（位置 / 长度每次滚动由 `updateScrollIndicator()` 算）。
+    ///
+    /// ### 为什么要自己画一根
+    /// 系统那根只给「开 / 关」两个选项，样式归平台管：Catalyst 上它是浮层、iPhone 上粗细也不一样，
+    /// 想让两端看着一致就得自己来。自己画的另一头好处是淡入淡出节奏也能自己定。
+    private func setupScrollIndicator() {
+        scrollIndicator.translatesAutoresizingMaskIntoConstraints = false
+        // 细长 + 两头半圆：圆角取宽度的一半，圆角条的两端才是完整的半圆而不是被削平
+        scrollIndicator.layer.cornerRadius = Self.scrollIndicatorWidth / 2
+        scrollIndicator.backgroundColor = UIColor.label.withAlphaComponent(0.3)
+        // 它只是指示器：盖在列表右边，但不能抢走滑动 / 点击（左滑删除那条手势要靠列表收事件）
+        scrollIndicator.isUserInteractionEnabled = false
+        scrollIndicator.isAccessibilityElement = false
+        // 一开始透明：列表还没动过，不该凭空出现一根条
+        scrollIndicator.alpha = 0
+        view.addSubview(scrollIndicator)
+
+        // 上边和高度都是「变量」：滚动时改 constant 让它滑、让它伸缩，比直接改 frame 更省事
+        let top = scrollIndicator.topAnchor.constraint(equalTo: view.topAnchor)
+        let height = scrollIndicator.heightAnchor.constraint(equalToConstant: 0)
+        scrollIndicatorTopConstraint = top
+        scrollIndicatorHeightConstraint = height
+
+        NSLayoutConstraint.activate([
+            top,
+            height,
+            scrollIndicator.trailingAnchor.constraint(equalTo: view.trailingAnchor,
+                                                      constant: -Self.scrollIndicatorSideInset),
+            scrollIndicator.widthAnchor.constraint(equalToConstant: Self.scrollIndicatorWidth)
+        ])
+    }
+
+    /// 按列表当前的滚动位置，重算滚动条的头在哪、有多长。
+    ///
+    /// - 没得滚（内容比一屏还短、或者列表被藏起来了）→ 高度给 0，等于看不见；
+    /// - 有得滚 → 高度按「看得见的占整篇多少」算，位置按「滚了几成」算。
+    ///
+    /// 值没变就不动：这个方法在每次滚动、每次布局里都会被调，白改一次约束就多跑一轮 Auto Layout。
+    private func updateScrollIndicator() {
+        guard let topConstraint = scrollIndicatorTopConstraint,
+              let heightConstraint = scrollIndicatorHeightConstraint else { return }
+
+        let insets = tableView.adjustedContentInset
+        let visibleHeight = tableView.bounds.height
+        // 内容总高要连内边距一起算，否则带内边距的列表滚动条会偏短
+        let contentHeight = tableView.contentSize.height + insets.top + insets.bottom
+        // 能滚多远：内容比屏幕高出来的那一截。减去可视高度，滚到底时进度才是 1
+        let scrollableDistance = contentHeight - visibleHeight
+
+        guard !tableView.isHidden, visibleHeight > 0, scrollableDistance > 1 else {
+            heightConstraint.constant = 0
+            return
+        }
+
+        // 长度按面积比算（可视高 / 内容高），再夹一个下限，免得长列表里缩成一条线头
+        let length = min(max(Self.scrollIndicatorMinLength,
+                             visibleHeight * visibleHeight / contentHeight),
+                         visibleHeight)
+        // 滚到哪儿了：0 = 最上面，1 = 最下面。滚到顶时 contentOffset.y 是 -insets.top，所以先补回来
+        let progress = min(max((tableView.contentOffset.y + insets.top) / scrollableDistance, 0), 1)
+        // 表格在父视图里的上边就是滚动条的轨道起点，剩下那截（可视高 - 条长）才是它滑的范围
+        let newTop = tableView.frame.minY + progress * (visibleHeight - length)
+
+        if abs(heightConstraint.constant - length) > 0.5 {
+            heightConstraint.constant = length
+        }
+        if abs(topConstraint.constant - newTop) > 0.5 {
+            topConstraint.constant = newTop
+        }
+    }
+
+    /// 滚动条亮起来（已经在亮就不重复动画，免得每帧都开一个动画）
+    private func showScrollIndicator() {
+        guard scrollIndicator.alpha < 1 else { return }
+        // 短一点：手指一动就该看见，拖泥带水反而像卡了
+        UIView.animate(withDuration: 0.15) { self.scrollIndicator.alpha = 1 }
+    }
+
+    /// 排一次「停手后淡出」。每次滚动都取消旧的再排新的，于是只有真停下来那一拍才轮到执行
+    private func scheduleScrollIndicatorFadeOut() {
+        scrollIndicatorFadeOutWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            UIView.animate(withDuration: 0.35) { self?.scrollIndicator.alpha = 0 }
+        }
+        scrollIndicatorFadeOutWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.scrollIndicatorFadeOutDelay,
+                                     execute: workItem)
     }
 
     /// 本来就是空的时候的说明文字（搜索没命中是另一段，见 `updateEmptyState`）
@@ -917,6 +1039,18 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
     /// 一次点击就会开两遍。所以这里只把选中态收掉 —— 顺手也给了「按下」的视觉反馈。
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+    }
+
+    // MARK: - 滚动条
+
+    /// 滚动中：先把那根条摆到新位置，再让它亮着。
+    ///
+    /// 惯性滑行阶段这个方法也在被调用，所以「停手之后」不用另外监听减速结束 ——
+    /// 真停下来时不会再调这里，`scrollIndicatorFadeOutWorkItem` 那份待办才轮得到执行
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateScrollIndicator()
+        showScrollIndicator()
+        scheduleScrollIndicatorFadeOut()
     }
 
     // MARK: - 右键菜单

@@ -485,7 +485,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         var offset = 0
         for scalar in fragment.text.string.unicodeScalars {
             let length = String(scalar).utf16.count
-            if Self.isCJK(scalar) {
+            if scalar.isCJK {
                 if pending == nil {
                     pending = NSRange(location: offset, length: length)
                 } else {
@@ -504,25 +504,6 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                                      at: range.location,
                                                      effectiveRange: nil) as? UIFont else { continue }
             fragment.text.addAttribute(.font, value: font.withSlant(slant), range: range)
-        }
-    }
-
-    /// 这个字符属不属于「没有斜体字形、需要合成倾斜」的东亚文字。
-    ///
-    /// 覆盖：CJK 统一表意（含扩展区）、日文假名、韩文谚文、全角标点 / 字母。
-    /// 拉丁字母、数字、半角标点都不在内（它们有真斜体）。
-    private static func isCJK(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x1100...0x11FF,       // 谚文字母
-             0x2E80...0x9FFF,       // CJK 部首、注音、假名、CJK 统一表意
-             0xAC00...0xD7AF,       // 谚文音节
-             0xF900...0xFAFF,       // CJK 兼容表意
-             0xFE30...0xFE4F,       // CJK 兼容形式
-             0xFF00...0xFFEF,       // 全角形式（，。！等全角标点也在这一段）
-             0x20000...0x2FA1F:     // CJK 扩展 A~F
-            return true
-        default:
-            return false
         }
     }
 
@@ -1056,7 +1037,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
         }
 
         let markdownSource = sourceText(in: range)
-        let data = MarkdownTableData(table)
+        let data = MarkdownTableData(table, theme: theme)
         let maxWidth = max(120, containerWidth - indent - 16)
         let attachment = MarkdownTableAttachment(markdownSource: markdownSource,
                                                  data: data,

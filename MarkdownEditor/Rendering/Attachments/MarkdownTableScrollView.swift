@@ -37,7 +37,6 @@ final class MarkdownTableScrollView: UIScrollView {
         self.canvas = MarkdownTableView(data: attachment.data,
                                         style: attachment.style,
                                         bodyFont: attachment.bodyFont,
-                                        textColor: attachment.textColor,
                                         layout: layout)
         super.init(frame: .zero)
 
