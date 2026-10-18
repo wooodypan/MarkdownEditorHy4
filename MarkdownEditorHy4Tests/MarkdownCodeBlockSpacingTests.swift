@@ -8,7 +8,7 @@
 //  代码正文每行都以 `\n` 结尾，而 `\n` 在 TextKit 里就是**段落分隔符** —— 所以代码的每一行都是独立段落，段前段后各吃一份 `paragraphSpacing`（默认 12），实测行与行之间空出 **24pt**，比正文里软换行的行距大好几倍，代码块看着散成一截一截。
 //  修法是把代码正文的段距归零。
 //
-//  围栏行（` ``` `）不能跟着一起归零：它夹在「外面的正文」和「里面的代码」中间，两个方向要的不一样 —— 对外留正常段距（代码块和上下文分开），对内只留灰底要的那点 padding（贴着灰底，紧凑）。
+//  围栏行（` ``` `）不能跟着一起归零：它夹在「外面的正文」和「里面的代码」中间，两个方向要的不一样 —— 对外至少留 `codeBlockOuterSpacing`（段距更小时兜底，代码块才不会贴住上下文），对内只留灰底要的那点 padding（贴着灰底，紧凑）。
 //  所以开 / 闭两条围栏行是**两套**样式，段前段后正好反着。这里把四个数逐个钉住。
 //
 
@@ -66,7 +66,7 @@ final class MarkdownCodeBlockSpacingTests: XCTestCase {
         XCTAssertEqual(code.style.paragraphSpacing, 0, "代码正文不该有段后间距")
     }
 
-    /// 开围栏（```swift）：**对外**（上面那段正文）留正常段距，**对内**（第一行代码）只留灰底要的 padding
+    /// 开围栏（```swift）：**对外**（上面那段正文）至少留 `codeBlockOuterSpacing`，**对内**（第一行代码）只留灰底要的 padding
     func testOpeningFenceKeepsBlockSpacingOutsideAndPaddingInside() {
         let (text, theme) = render(markdown)
         let styles = codeBlockStyles(in: text)
@@ -74,14 +74,14 @@ final class MarkdownCodeBlockSpacingTests: XCTestCase {
         let opening = styles.first { $0.text.hasPrefix("```") && $0.text.contains("swift") }
         guard let opening else { return XCTFail("没找到开围栏那一行（实到 \(styles.map(\.text))）") }
 
-        XCTAssertEqual(opening.style.paragraphSpacingBefore, max(theme.paragraphSpacing, theme.codeBlockVerticalPadding),
-                       "开围栏上面是正文，要留正常段距")
+        XCTAssertEqual(opening.style.paragraphSpacingBefore, max(theme.paragraphSpacing, theme.codeBlockOuterSpacing),
+                       "开围栏上面是正文，至少留出和上下文分开的距离")
         // 对内是两个 padding：只留一个的话 ``` 那几个字符就压进灰底了（灰底 = 代码正文那个 fragment 的框 ± padding）
         XCTAssertEqual(opening.style.paragraphSpacing, theme.codeBlockVerticalPadding * 2,
                        "开围栏下面是代码，对内留两个 padding")
     }
 
-    /// 闭围栏（```）：和开围栏正好反过来 —— 对内（最后一行代码）留 padding，对外（下一段正文）留正常段距
+    /// 闭围栏（```）：和开围栏正好反过来 —— 对内（最后一行代码）留 padding，对外（下一段正文）至少留 `codeBlockOuterSpacing`
     func testClosingFenceKeepsPaddingInsideAndBlockSpacingOutside() {
         let (text, theme) = render(markdown)
         let styles = codeBlockStyles(in: text)
@@ -92,8 +92,58 @@ final class MarkdownCodeBlockSpacingTests: XCTestCase {
 
         XCTAssertEqual(closing.style.paragraphSpacingBefore, theme.codeBlockVerticalPadding * 2,
                        "闭围栏上面是代码，对内留两个 padding")
-        XCTAssertEqual(closing.style.paragraphSpacing, max(theme.paragraphSpacing, theme.codeBlockVerticalPadding),
-                       "闭围栏下面是正文，要留正常段距")
+        XCTAssertEqual(closing.style.paragraphSpacing, max(theme.paragraphSpacing, theme.codeBlockOuterSpacing),
+                       "闭围栏下面是正文，至少留出和上下文分开的距离")
+    }
+
+    /// 段距调到 0、围栏上下又没有空行时，围栏和正文之间仍然要有真正的空隙。
+    ///
+    /// 只验段落样式不够：TextKit 2 会无视一部分属性，所以这里量的是排版之后两条线的实际距离。
+    /// 旧实现对外只剩 `codeBlockVerticalPadding`（6pt），量出来只有 4pt，肉眼就是贴在一起。
+    @MainActor
+    func testFenceKeepsBreathingRoomWhenParagraphSpacingIsZero() throws {
+        let tight = """
+        正文一段。
+        ```swift
+        let a = 1
+        ```
+        正文二段。
+        """
+        let textView = MarkdownTextView(markdown: tight)
+        textView.renderer.theme.paragraphSpacing = 0
+        textView.setMarkdown(tight)
+        textView.frame = CGRect(x: 0, y: 0, width: 700, height: 400)
+        let window = UIWindow(frame: textView.frame)
+        window.addSubview(textView)
+        window.makeKeyAndVisible()
+        textView.layoutIfNeeded()
+        textView.setNeedsLayout()
+        textView.layoutIfNeeded()
+
+        let string = textView.textStorage.string as NSString
+        let begin = textView.beginningOfDocument
+        func caret(_ needle: String) throws -> CGRect {
+            let range = string.range(of: needle)
+            XCTAssertNotEqual(range.location, NSNotFound, "渲染结果里找不到「\(needle)」")
+            let position = try XCTUnwrap(textView.position(from: begin, offset: range.location))
+            return textView.caretRect(for: position)
+        }
+
+        let previous = try caret("正文一段")
+        let opening = try caret("```swift")
+        let closing = try caret("```\n正文二段")
+        let next = try caret("正文二段")
+
+        let topGap = opening.minY - previous.maxY
+        let bottomGap = next.minY - closing.maxY
+        XCTAssertGreaterThan(topGap, 6, "段距为 0 时开围栏和上一段几乎贴住了（实测 \(topGap)pt）")
+        XCTAssertGreaterThan(bottomGap, 6, "段距为 0 时闭围栏和下一段几乎贴住了（实测 \(bottomGap)pt）")
+
+        let openStyle = try XCTUnwrap(textView.textStorage.attribute(.paragraphStyle,
+                                                                     at: string.range(of: "```swift").location,
+                                                                     effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertEqual(openStyle.paragraphSpacingBefore, textView.renderer.theme.codeBlockOuterSpacing,
+                       accuracy: 0.001, "段距为 0 时该由 codeBlockOuterSpacing 兜底")
     }
 
     /// 未闭合的代码块（末尾没有 ```）：最后一行是**代码正文**，不能被误当成闭围栏套上围栏的样式

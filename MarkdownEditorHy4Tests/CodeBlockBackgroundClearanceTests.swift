@@ -50,20 +50,32 @@ final class CodeBlockBackgroundClearanceTests: XCTestCase {
         return textView
     }
 
-    /// 每段排版出来的文字盒（视图坐标），按文档顺序。
+    /// 每段排版出来的**字形盒**（视图坐标），按文档顺序。
+    ///
+    /// 这里量的是字实际占的高度（基线 ± 字体的 ascender / descender），**不是**行盒。
+    /// 行高倍数多出来的空白全在文字上方，行盒会比字形高出十几点；灰底现在按字形定位，
+    /// 拿行盒来断言就会一直误判成「灰底切进了字里」。
+    ///
     /// 本用例的文档只有一个代码块，所以 `[0]` 是开围栏行、`[count-1]` 是闭围栏行、中间那几个是代码正文（某一行太长被折行时，仍算作**一个**条目，取并集）。
-    private func lineBoxes(in tv: MarkdownTextView) -> [(top: CGFloat, bottom: CGFloat)] {
+    private func glyphBoxes(in tv: MarkdownTextView) -> [(top: CGFloat, bottom: CGFloat)] {
         guard let layoutManager = tv.textLayoutManager,
               let contentStorage = layoutManager.textContentManager as? NSTextContentStorage else { return [] }
         let documentStart = contentStorage.documentRange.location
         var boxes: [(top: CGFloat, bottom: CGFloat)] = []
         layoutManager.enumerateTextLayoutFragments(from: documentStart, options: [.ensuresLayout]) { fragment in
             let rect = fragment.layoutFragmentFrame
+            let fragmentStart = contentStorage.offset(from: documentStart, to: fragment.rangeInElement.location)
+            // 围栏行是 `bodyFont` 的弱化标记，代码正文才是 `codeFont`：按这一段自己的字体量
+            let font = (tv.textStorage.attribute(.font, at: fragmentStart, effectiveRange: nil) as? UIFont)
+                ?? tv.renderer.theme.codeFont
             var top = CGFloat.greatestFiniteMagnitude
             var bottom = -CGFloat.greatestFiniteMagnitude
             for lineFragment in fragment.textLineFragments {
-                top = min(top, rect.minY + lineFragment.typographicBounds.minY)
-                bottom = max(bottom, rect.minY + lineFragment.typographicBounds.maxY)
+                let lineBox = lineFragment.typographicBounds
+                // glyphOrigin 相对**这一行**的盒顶，折行后的第二行还要加上 lineBox.minY
+                let baseline = rect.minY + lineBox.minY + lineFragment.glyphOrigin.y
+                top = min(top, baseline - font.ascender)
+                bottom = max(bottom, baseline - font.descender)
             }
             if top <= bottom {
                 boxes.append((top + tv.textContainerInset.top, bottom + tv.textContainerInset.top))
@@ -78,7 +90,7 @@ final class CodeBlockBackgroundClearanceTests: XCTestCase {
     /// ### 段距这一维是必须扫的
     /// 早先灰底的上下留白是「借」了首尾围栏行自己的段间距：段距默认 12，灰底上下各有 18pt 的留白，看着很正常。
     /// 用户把段距调到 0 时，这点空隙跟着没了 —— 那时那版实现会去「跟围栏行的文字盒取大/小值」，结果夹出来的灰底**切进了正文**：报障原话是「最后一个大括号 `}` 的底部超出了背景大概 10% 的高度」，实测段距 0、正文 60pt 高时 `}` 正好戳出去 6pt = 10.0%。
-    /// 现在灰底按「代码正文那个 fragment 的框 ± padding」算，段距**不再掺和**；围栏行在对内那一侧固定留两个 padding，撑住「灰底不碰围栏行」那条不变式。
+    /// 现在灰底按「代码正文字形顶底 ± padding」算，段距和行高都**不再掺和**；围栏行在对内那一侧固定留两个 padding，撑住「灰底不碰围栏行」那条不变式。
     func testBackgroundNeverCutsCodeTextNorTouchesFenceLines() throws {
         let combinations: [(fontSize: CGFloat, lineHeight: CGFloat, spacing: CGFloat)] = [
             (17, 1.0, 0), (17, 1.0, 4), (17, 1.0, 8), (17, 1.0, 12), (17, 1.0, 40),
@@ -91,7 +103,7 @@ final class CodeBlockBackgroundClearanceTests: XCTestCase {
         for (fontSize, multiple, spacing) in combinations {
             let label = "字号 \(fontSize) / 行高 \(multiple) / 段距 \(spacing)"
             let tv = makeEditor(fontSize: fontSize, lineHeight: multiple, spacing: spacing)
-            let boxes = lineBoxes(in: tv)
+            let boxes = glyphBoxes(in: tv)
             XCTAssertGreaterThanOrEqual(boxes.count, 3, "\(label)：至少要认出首尾围栏行和一段正文")
             let openFence = boxes[0], closeFence = boxes[boxes.count - 1]
             let firstCode = boxes[1], lastCode = boxes[boxes.count - 2]
@@ -121,15 +133,15 @@ final class CodeBlockBackgroundClearanceTests: XCTestCase {
 
     /// 灰底正好贴着代码正文外扩一个 padding：上下都是「文字盒 ± padding」，不再掺进段距。
     ///
-    /// ### 为什么现在只剩一个 padding（以前是两个 padding + 段距）
+    /// ### 为什么上下各只有一个 padding（以前是两个 padding + 段距）
     /// 代码正文的段距归零之后（行与行之间只剩自然行距，见 `MarkdownCodeBlockSpacingTests`），
-    /// fragment 的框就紧贴着文字了 —— 灰底 = 那个框 ± padding，于是上下各留一个 padding。
+    /// 灰底就只按首末行的**字形**顶底外扩一个 padding —— 行高倍数多出来的空白堆在文字上方，按字形量才不会把它算进灰底，文字因此上下留白相等。
     /// 多出来的那段留白由围栏行在对内那一侧的段间距给（也是两个 padding），所以灰底照样碰不到 ` ``` `。
     func testBackgroundSitsOnePaddingOutsideCodeText() throws {
         let tv = makeEditor()
         XCTAssertEqual(tv.renderer.theme.paragraphSpacing, 12, accuracy: 0.01, "默认段落间距应为 12")
 
-        let boxes = lineBoxes(in: tv)
+        let boxes = glyphBoxes(in: tv)
         let frame = try XCTUnwrap(tv.computeCodeBlockFrames().frames.first?.frame)
         let padding = tv.renderer.theme.codeBlockVerticalPadding
 

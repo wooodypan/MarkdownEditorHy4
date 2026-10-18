@@ -112,12 +112,25 @@ struct MarkdownTheme {
     var codeBlockCornerRadius: CGFloat
     /// 代码块矩形比文字上下各多出来的留白
     var codeBlockVerticalPadding: CGFloat
+    /// 代码块与上下正文之间的**最小**距离（点）。
+    ///
+    /// 用户把「段落间距」调到 0 时，围栏行不能再贴着上下文：
+    /// 没有这个下限的话，围栏和正文之间只剩 `codeBlockVerticalPadding` 那点距离，
+    /// 屏幕上看起来就是一条线贴在一起。
+    /// 段间距比它大时以段间距为准，它只在段间距更小时兜底。
+    var codeBlockOuterSpacing: CGFloat = 12
     /// 代码文字相对矩形左边的缩进
     var codeBlockTextInset: CGFloat
     /// 引用块左侧绿条的颜色
     var quoteBarColor: UIColor
     /// 引用块左侧绿条的宽度（相当于 CSS 里的 border-left-width）
     var quoteBarWidth: CGFloat
+    /// 引用竖条 / 引用底色比文字上下各多出来的留白。
+    ///
+    /// 竖条和底色吃的是同一批矩形（见 `computeQuoteBarFrames`），所以这一个值同时决定两者的上下边界。
+    /// 行高倍数多出来的空间全堆在文字上方，矩形本身是按**字形**顶底算的；这里再对称外扩，
+    /// 文字在竖条 / 底色里才是上下留白相等。
+    var quoteBarVerticalPadding: CGFloat = 8
 
     /// 引用块**内容区**（竖条右边那一整片）要不要再铺一层淡背景。
     ///
@@ -287,6 +300,7 @@ struct MarkdownTheme {
             codeBlockTextInset: 10,
             quoteBarColor: UIColor(red: 0.20, green: 0.63, blue: 0.44, alpha: 1.00),
             quoteBarWidth: 5,
+            quoteBarVerticalPadding: 8,
             foldButtonSide: 30,
             foldButtonGap: 2,
             foldGutterWidth: 22,
@@ -501,12 +515,16 @@ struct MarkdownTheme {
         codeStyle(indent: indent, spacingBefore: 0, spacingAfter: 0)
     }
 
-    /// 代码块**开围栏行**（` ```swift `）段落：**上面**是正文（留正常段距），**下面**是代码（只留灰底要的那点 padding）。
+    /// 代码块**开围栏行**（` ```swift `）段落：**上面**是正文（至少留 `codeBlockOuterSpacing`），**下面**是代码（只留灰底要的那点 padding）。
     ///
     /// ### 为什么两条围栏行要分成两套（不能共用一个样式）
     /// 一个段落样式只有「段前 / 段后」两个数，而围栏行夹在「外面的正文」和「里面的代码」中间，两个方向想要的间距不一样：
-    /// 对外要正常段距（代码块和上下文分开），对内只要灰底 padding 那么点（贴着灰底，紧凑）。
+    /// 对外要留出和上下文分开的距离，对内只要灰底 padding 那么点（贴着灰底，紧凑）。
     /// 共用一个样式就只能两头一起松、或一起紧 —— 一起紧的话代码块会贴住上下文，一起松的话代码块里又空得能再塞一行。
+    ///
+    /// ### 对外为什么不用 `max(paragraphSpacing, codeBlockVerticalPadding)`
+    /// 段距调到 0 时那个式子只剩 6pt（`codeBlockVerticalPadding`），围栏文字几乎贴住上一段。
+    /// 改用独立的 `codeBlockOuterSpacing` 兜底，段距为 0 时也能和上下文分开；段距更大时仍以段距为准。
     ///
     /// ### 对内为什么是两个 `codeBlockVerticalPadding`（不能更小）
     /// 灰底矩形是按「代码正文那个 fragment 的框 ± padding」算出来的（见 computeCodeBlockFrames），而 fragment 的框**不含**段前间距 —— 所以「围栏行底」到「灰底顶」的距离 = 对内间距 − padding。
@@ -514,16 +532,16 @@ struct MarkdownTheme {
     /// 留两个 padding，灰底和围栏行之间就还有一个 padding 的间隙。
     func codeFenceOpenParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
         codeStyle(indent: indent,
-                  spacingBefore: max(paragraphSpacing, codeBlockVerticalPadding),
+                  spacingBefore: max(paragraphSpacing, codeBlockOuterSpacing),
                   spacingAfter: codeBlockVerticalPadding * 2)
     }
 
-    /// 代码块**闭围栏行**（` ``` `）段落：**上面**是代码（只留灰底要的 padding），**下面**是正文（留正常段距）。
+    /// 代码块**闭围栏行**（` ``` `）段落：**上面**是代码（只留灰底要的 padding），**下面**是正文（至少留 `codeBlockOuterSpacing`）。
     /// 和开围栏行正好反过来，理由见那里。
     func codeFenceCloseParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
         codeStyle(indent: indent,
                   spacingBefore: codeBlockVerticalPadding * 2,
-                  spacingAfter: max(paragraphSpacing, codeBlockVerticalPadding))
+                  spacingAfter: max(paragraphSpacing, codeBlockOuterSpacing))
     }
 
     /// 代码块段落样式的公共部分

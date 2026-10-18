@@ -338,8 +338,14 @@ extension MarkdownTextView {
                 let isFenceLine = fenceRanges.contains { NSIntersectionRange($0, fragmentRange).length > 0 }
 
                 if !rect.isNull, rect.height > 0, !isFenceLine {
-                    top = min(top ?? rect.minY, rect.minY)
-                    bottom = max(bottom, rect.maxY)
+                    if let glyphs = textGlyphVerticalBounds(of: fragment, fragmentStart: fragmentStart) {
+                        top = min(top ?? glyphs.top, glyphs.top)
+                        bottom = max(bottom, glyphs.bottom)
+                    } else {
+                        // 防御：确实量不到字（空行之类）就退回 fragment 框，至少不会漏画整块
+                        top = min(top ?? rect.minY, rect.minY)
+                        bottom = max(bottom, rect.maxY)
+                    }
                 }
                 // 还没走到这个代码块的结尾就继续（offset > 0 表示 endLocation 在后面）
                 return contentStorage.offset(from: fragment.rangeInElement.endLocation, to: endLocation) > 0
@@ -353,9 +359,14 @@ extension MarkdownTextView {
             // top == nil 说明这个块只有围栏两行（``` 紧接着 ```），没有正文 → 不铺背景
             guard let top else { continue }
 
-            // ### 为什么这里不用再算「躲围栏行」
-            // 灰底上沿 = 正文首行 fragment 顶往上一个 padding，下沿 = 末行 fragment 底往下一个 padding。
-            // 光看这个式子像是在占正文的便宜，其实不是：fragment 里除了字还有正文自己的段间距，而围栏行那边由 `codeFenceParagraphStyle` 兜了至少一个 padding 的空档 —— 两边加起来必然够，所以不用再跟围栏行的文字盒取大/小值（早先那种夹取还有个反向的坑：段距调小以后夹出来的上/下沿会切进正文，实测最后一个 `}` 的底部戳出灰底 6pt，正好是灰底高度的 10%）。
+            // ### 为什么用「字形范围」而不是 fragment 框
+            // 行高倍数多出来的空间，TextKit 全部堆在文字**上方**：1.7 倍行高时，
+            // 一行 34 点高的行盒里，17 号字只占最下面 20 点。fragment 框量的是整个行盒，
+            // 拿它 ± padding 铺灰底，屏幕上就是「上沿离第一行字很远、下沿贴着最后一行字」。
+            // 改成首行 / 末行的**字形**顶底 ± 同样的 padding，文字才在灰底里垂直居中。
+            //
+            // 围栏行那边照旧由 `codeFenceParagraphStyle` 留出至少两个 padding 的空档；
+            // 上沿从行盒顶缩到字形顶之后只会离围栏更远，不会压上去。
             let backgroundTop = top - padding
             let backgroundBottom = bottom + padding
             // 理论上必然成立（top / bottom 都来自真实存在的 fragment）→ 真有异常就宁可不画，也不画一个翻过来的框
@@ -373,6 +384,66 @@ extension MarkdownTextView {
                                         height: backgroundBottom - backgroundTop)))
         }
         return (frames, missingLayout)
+    }
+
+    /// 量一个 fragment 里**文字 / 附件自己**占的纵向范围（fragment 坐标，不含 textContainerInset）。
+    ///
+    /// ### 和 `layoutFragmentFrame` / `typographicBounds` 的区别
+    /// 行高倍数多出来的空间，TextKit 全部堆在文字**上方**：17 号字、1.7 倍行高时，
+    /// 一个 34 点高的行盒里，字形只占最下面约 20 点。背景按行盒铺，就会上沿离字很远、下沿贴着字。
+    ///
+    /// 这里按每一行的基线（行盒顶 + `glyphOrigin`）加上字体度量（ascender / descender）求字形范围，
+    /// 调用方再在上下留**同样多**的 padding，文字才会落在背景的垂直正中。
+    ///
+    /// attachment（图片、表格、圆点）按 `bounds` 算：它们可能比字体高得多，
+    /// 只按字体的 ascender / descender 量会把背景裁进图里。
+    ///
+    /// - parameter fragmentStart: 这个 fragment 在**整篇文本**里的起始 UTF-16 偏移。
+    ///           `NSTextLineFragment.characterRange` 是相对 fragment 起点的，要加它才能查属性。
+    func textGlyphVerticalBounds(of fragment: NSTextLayoutFragment,
+                                 fragmentStart: Int) -> (top: CGFloat, bottom: CGFloat)? {
+        let fragmentTop = fragment.layoutFragmentFrame.minY
+        var top = CGFloat.greatestFiniteMagnitude
+        var bottom = -CGFloat.greatestFiniteMagnitude
+
+        for line in fragment.textLineFragments {
+            let lineBox = line.typographicBounds
+            guard !lineBox.isNull, lineBox.height > 0 else { continue }
+            // glyphOrigin 是相对**这一行**盒顶的偏移，换行后的第二行还要再加上 lineBox.minY
+            let baseline = fragmentTop + lineBox.minY + line.glyphOrigin.y
+
+            var ascent: CGFloat = 0
+            var descent: CGFloat = 0
+            var hasMetric = false
+            let lineRange = NSRange(location: fragmentStart + line.characterRange.location,
+                                    length: line.characterRange.length)
+            if lineRange.length > 0, NSMaxRange(lineRange) <= textStorage.length {
+                textStorage.enumerateAttributes(in: lineRange, options: []) { attributes, _, _ in
+                    if let font = attributes[.font] as? UIFont {
+                        ascent = max(ascent, font.ascender)
+                        descent = max(descent, -font.descender)
+                        hasMetric = true
+                    }
+                    if let attachment = attributes[.attachment] as? NSTextAttachment {
+                        // attachment.bounds 的 y 轴「基线向上为正」：maxY 是字形顶，-minY 是字形底
+                        ascent = max(ascent, attachment.bounds.maxY)
+                        descent = max(descent, -attachment.bounds.minY)
+                        hasMetric = true
+                    }
+                }
+            }
+
+            if hasMetric {
+                top = min(top, baseline - ascent)
+                bottom = max(bottom, baseline + descent)
+            } else {
+                // 空行没有字体 / 附件可量，退回行盒 —— 至少保证竖条 / 背景不会在这一行断掉
+                top = min(top, fragmentTop + lineBox.minY)
+                bottom = max(bottom, fragmentTop + lineBox.maxY)
+            }
+        }
+
+        return top <= bottom ? (top, bottom) : nil
     }
 
     /// 一个代码块里**可能不该铺背景**的行：第一行的 ```lang 和最后一行的 ```。
@@ -542,19 +613,31 @@ extension MarkdownTextView {
             guard let startLocation = contentStorage.location(documentStart, offsetBy: range.location),
                   let endLocation = contentStorage.location(documentStart, offsetBy: NSMaxRange(range)) else { continue }
 
-            // 2) 这段字符覆盖到的所有 fragment 求外接矩形。
-            //    竖条要连续贯穿段距（不象旧版每行一根断成虚线），所以直接并 fragment 矩形，
-            //    不做行过滤 —— 引用没有代码块"围栏行"那种要抠掉的例外
+            // 2) 这段字符覆盖到的所有 fragment 求**字形**外接范围。
+            //    竖条要连续贯穿段距（不象旧版每行一根断成虚线），所以取首行字形顶、末行字形底，
+            //    中间的行距自然被包在中间。
+            //
+            //    ### 为什么不用 fragment 的行盒
+            //    行高倍数多出来的空间全堆在文字上方（见 textGlyphVerticalBounds 的注释）。
+            //    用行盒铺底色 / 竖条，就会「上端多出一大截、下端贴着最后一行字」；
+            //    改用字形顶底再对称外扩 `quoteBarVerticalPadding`，上下留白才是相等的。
             var top: CGFloat?
             var bottom: CGFloat = 0
             var sawFragment = false
 
             layoutManager.enumerateTextLayoutFragments(from: startLocation, options: [.ensuresLayout]) { fragment in
                 let rect = fragment.layoutFragmentFrame
+                let fragmentStart = contentStorage.offset(from: documentStart, to: fragment.rangeInElement.location)
                 sawFragment = true
                 if !rect.isNull, rect.height > 0 {
-                    top = min(top ?? rect.minY, rect.minY)
-                    bottom = max(bottom, rect.maxY)
+                    if let glyphs = textGlyphVerticalBounds(of: fragment, fragmentStart: fragmentStart) {
+                        top = min(top ?? glyphs.top, glyphs.top)
+                        bottom = max(bottom, glyphs.bottom)
+                    } else {
+                        // 防御：量不到字（空行之类）就退回行盒，保证竖条不会在这一段断掉
+                        top = min(top ?? rect.minY, rect.minY)
+                        bottom = max(bottom, rect.maxY)
+                    }
                 }
                 // 还没走到这段的结尾就继续（offset > 0 表示 endLocation 在后面）
                 return contentStorage.offset(from: fragment.rangeInElement.endLocation, to: endLocation) > 0
@@ -569,11 +652,16 @@ extension MarkdownTextView {
             // ### 坐标系换算（详细推导见 computeCodeBlockFrames 里的注释）
             // layoutFragmentFrame 原点是 textContainer 左上角（不含 textContainerInset），
             // 画在 textView 坐标系里 y 要补回 top inset。横向 x 不从 fragment 拿：
-            // 竖条固定画在「该层缩进边界」上，见下面第 4 步
+            // 竖条固定画在「该层缩进边界」上，见下面第 4 步。
+            //
+            // ⚠️ padding 必须在这里加（生成新矩形这一层），不能放到最后输出时加：
+            // 视野外跳过的那几层会把上一轮的 `quoteBarFrames` 原样补回来（见第 4 步），
+            // 那些 frame 已经含 padding，再对称扩一次就会每刷新一轮长高 16pt。
+            let padding = renderer.theme.quoteBarVerticalPadding
             let rect = CGRect(x: 0,
-                              y: top + textContainerInset.top,
+                              y: top + textContainerInset.top - padding,
                               width: 0,
-                              height: bottom - top)
+                              height: bottom - top + padding * 2)
 
             // 3) 链上每一层都各自累计自己的矩形
             for (level, id) in chain.ids.enumerated() {
