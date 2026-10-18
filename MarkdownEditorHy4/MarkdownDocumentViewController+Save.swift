@@ -53,9 +53,18 @@ extension MarkdownDocumentViewController {
     /// - Returns: 写成功了回 true。失败会弹提示，让用户知道「没存上」
     @discardableResult
     func writeCurrentSource(to url: URL) -> Bool {
+        // 容器外的文件可能在这次打开之前就丢了访问权（比如用户从「最近」点开、
+        // 书签又没保存成功）。保存前再要一次权限，能解析书签就顺手解析。
+        guard let readableURL = ExternalDocumentAccess.shared.readableURL(for: url) else {
+            showAlert(title: "保存失败",
+                      message: "「\(url.lastPathComponent)」现在没有访问权限。\n\n"
+                             + "请重新打开这份文件，或者选择把它复制进 App。")
+            return false
+        }
+
         let source = editor.markdownSource
         do {
-            try DocumentsWorkspace.write(source, to: url)
+            try DocumentsWorkspace.write(source, to: readableURL)
         } catch {
             showAlert(title: "保存失败",
                       message: "\(url.lastPathComponent)\n\n\(error.localizedDescription)")

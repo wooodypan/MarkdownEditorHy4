@@ -176,6 +176,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Use this method to release any resources that were specific to the discarded scenes, as they will not return.
     }
 
+    func applicationWillTerminate(_ application: UIApplication) {
+        // 容器外文件的安全作用域是成对申请 / 释放的，退出时统一还回去。
+        // 书签已经落盘，下次启动还能解析出来，不影响「最近」。
+        MarkdownDocumentOpener.shared.stopAccessing()
+    }
 
 }
 

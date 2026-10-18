@@ -515,14 +515,16 @@ final class DocumentListViewController: UIViewController {
     private func sortedByDate(_ urls: [URL],
                               newestFirst: Bool,
                               kind: DateKind) -> [URL] {
-        // 每个文件只读一次属性 —— 放进排序闭包里每比较一次就读一次太浪费
+        // 每个文件只读一次属性 —— 放进排序闭包里每比较一次就读一次太浪费。
+        // 容器外的文件要先拿到访问权，否则日期一律读不到、会被排到最后
         let dates = Dictionary(uniqueKeysWithValues: urls.map { url -> (String, Date) in
+            let readableURL = ExternalDocumentAccess.shared.readableURL(for: url) ?? url
             let date: Date?
             switch kind {
             case .modified:
-                date = DocumentsWorkspace.modificationDate(of: url)
+                date = DocumentsWorkspace.modificationDate(of: readableURL)
             case .created:
-                date = DocumentsWorkspace.creationDate(of: url)
+                date = DocumentsWorkspace.creationDate(of: readableURL)
             }
             return (url.path, date ?? .distantPast)
         })
@@ -659,18 +661,37 @@ final class DocumentListViewController: UIViewController {
 
     /// 把一份磁盘文件交给右侧编辑。
     ///
+    /// ### iOS 上先问一句要不要复制
+    /// 容器外的文件在 iOS 上没有跨启动的访问权，直接编辑原文件容易「这次能开、
+    /// 下次从最近点开就报错」。所以先问用户：复制一份到 App 里（推荐），
+    /// 还是只这次直接打开。Mac Catalyst 有 security-scoped bookmark，不用问。
+    ///
     /// 打开这件事（读内容、记一笔「最近打开」、送给路由）统一在 `DocumentOpening` 里做 ——
     /// 「文档」和「最近」走的是同一条路，两边的行为必须对得上。
     private func open(_ url: URL, mode: PPContentOpenMode) {
-        guard DocumentOpening.open(url, mode: mode, using: router) else {
-            showAlert(title: "打不开文件",
-                      message: "「\(url.lastPathComponent)」读不出来，可能被删掉或者没有访问权限。")
+        #if !targetEnvironment(macCatalyst)
+        // 判断「在不在容器里」用规范化路径；真去申请权限、复制文件时还得用原始 URL ——
+        // 临时通行证是附在原始地址上的，先解析一遍可能就失效了
+        if !ExternalDocumentAccess.shared.isInsideContainer(url) {
+            promptToCopyExternalDocument(url, mode: mode)
+            return
+        }
+        #endif
+
+        performOpen(url, mode: mode)
+    }
+
+    /// 真正的打开动作：拿内容、开 Tab、联动高亮。
+    private func performOpen(_ url: URL, mode: PPContentOpenMode) {
+        guard let openedURL = DocumentOpening.open(url, mode: mode, using: router) else {
+            showOpenFailureAlert(for: url)
             reloadFiles()
             return
         }
         // 打开成功就把这一行点亮（VS Code 式）；iPad / Mac 上右侧切 Tab 时
-        // 还会由 `onSelectedItemChanged` 再同步一次（幂等）
-        setHighlightedItemID(url.path)
+        // 还会由 `onSelectedItemChanged` 再同步一次（幂等）。
+        // 高亮按规范化路径比对 —— 列表里的行存的就是这个，原始访问 URL 可能带着不一样的前缀
+        setHighlightedItemID(ExternalDocumentAccess.shared.canonicalPath(for: openedURL))
 
         switch source {
         case .documents:
@@ -679,6 +700,86 @@ final class DocumentListViewController: UIViewController {
             // 打开过之后这份会重新排到最前面，列表顺序得跟着变
             reloadFiles()
         }
+    }
+
+    #if !targetEnvironment(macCatalyst)
+    /// iOS 上打开容器外文件时的选择框。
+    ///
+    /// 「复制并打开」是推荐项，复制出来的副本会落进 Documents，之后就是一个普通的
+    /// 容器内文档；「直接打开」只借用这次运行期间的临时授权，App 重启后
+    /// 「最近」里的这条记录就不一定还能打开了。
+    private func promptToCopyExternalDocument(_ url: URL, mode: PPContentOpenMode) {
+        // 先确认这次确实拿得到访问权，拿不到就别给用户一个按了会失败的按钮
+        guard ExternalDocumentAccess.shared.readableURL(for: url) != nil else {
+            showOpenFailureAlert(for: url)
+            return
+        }
+
+        let name = DocumentsWorkspace.displayName(for: url)
+        let alert = UIAlertController(
+            title: "这份文件在 App 外面",
+            message: "「\(name)」不在 App 的文档目录里。\n\n"
+                   + "复制一份到 App 里（推荐）：之后改名、删除、重启后从「最近」打开都正常，"
+                   + "但改的是副本，不会写回原文件。\n\n"
+                   + "直接打开：只借用这次运行期间的临时权限，重启后可能就打不开了。",
+            preferredStyle: .alert)
+
+        let copyAction = UIAlertAction(title: "复制并打开", style: .default) { [weak self] _ in
+            // 等选择框退场再干活，失败提示才有地方弹
+            DispatchQueue.main.async { self?.copyExternalDocumentAndOpen(url, mode: mode) }
+        }
+        alert.addAction(copyAction)
+        alert.addAction(UIAlertAction(title: "直接打开", style: .default) { [weak self] _ in
+            DispatchQueue.main.async { self?.performOpen(url, mode: mode) }
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.preferredAction = copyAction
+        // 文件选择器刚选完时，它可能还占着最上层。等一拍再弹，
+        // 免得「present 在一个正在消失的控制器上」
+        DispatchQueue.main.async { [weak self] in
+            self?.presentAlert(alert)
+        }
+    }
+
+    /// 把容器外文件复制进 Documents，再打开副本。
+    private func copyExternalDocumentAndOpen(_ url: URL, mode: PPContentOpenMode) {
+        guard let readableURL = ExternalDocumentAccess.shared.readableURL(for: url) else {
+            showOpenFailureAlert(for: url)
+            return
+        }
+
+        do {
+            let copyURL = try DocumentsWorkspace.importDocument(from: readableURL)
+            // 用户接下来编辑的是副本，原路径的「最近」记录和书签都没用了
+            RecentDocumentsStore.shared.remove(url)
+            NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
+            performOpen(copyURL, mode: mode)
+        } catch {
+            showAlert(title: "复制失败",
+                      message: "「\(url.lastPathComponent)」没能复制进 App：\(error.localizedDescription)")
+        }
+    }
+    #endif
+
+    /// 打不开时给一句能照着做的提示。
+    ///
+    /// 容器外文件最常见的原因是没拿到访问权，光说「读不出来」用户不知道下一步该干嘛。
+    private func showOpenFailureAlert(for url: URL) {
+        let name = url.lastPathComponent
+        let message: String
+        if ExternalDocumentAccess.shared.isInsideContainer(url) {
+            message = "「\(name)」读不出来，可能已经被删掉了。"
+        } else {
+            #if targetEnvironment(macCatalyst)
+            message = "「\(name)」在 App 的文档目录之外，当前没有它的访问权限。\n\n"
+                    + "请用「文件 > 打开…」(⌘O) 重新选一次这份文件，系统会重新授权；"
+                    + "这次打开后会把书签记下来，下次就能直接从「最近」打开。"
+            #else
+            message = "「\(name)」在 App 的文档目录之外，这次没有拿到访问权限。\n\n"
+                    + "请从「文件」App 重新用本 App 打开它，并在提示里选择「复制并打开」。"
+            #endif
+        }
+        showAlert(title: "打不开文件", message: message)
     }
 
     /// 新建一份空白文档，并立刻在右侧开个新 Tab 编辑它（只有「文档」页有这颗按钮）。
@@ -991,7 +1092,29 @@ final class DocumentListViewController: UIViewController {
     private func showAlert(title: String, message: String) {
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "好", style: .default))
-        present(alert, animated: true)
+        presentAlert(alert)
+    }
+
+    /// 弹框要落在用户正看着的那一页上。
+    ///
+    /// iPhone 上编辑页 push 上来之后，左栏列表还在导航栈底下；直接拿列表去
+    /// `present` 会报「不在窗口层级里」。这时改由导航栈当前可见的页面来弹。
+    /// 已经 present 了别的页面（设置、选择器）就继续往上找最顶上的那个。
+    private var alertPresenter: UIViewController {
+        var top: UIViewController = self
+        if let navigationController,
+           let visible = navigationController.visibleViewController,
+           visible !== self {
+            top = visible
+        }
+        while let presented = top.presentedViewController {
+            top = presented
+        }
+        return top
+    }
+
+    private func presentAlert(_ alert: UIAlertController) {
+        alertPresenter.present(alert, animated: true)
     }
 }
 
@@ -1025,9 +1148,13 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
         // 第一行文件名**去掉扩展名**（这里所有文件都是 md，后缀只是噪音），
         // 第二行是文档首行的浅灰预览，第三行是修改日期
         let url = files[indexPath.row]
-        documentCell.configure(name: DocumentsWorkspace.displayName(for: url),
-                               preview: DocumentsWorkspace.previewText(of: url),
-                               date: DocumentsWorkspace.modificationDate(of: url))
+        let readableURL = ExternalDocumentAccess.shared.readableURL(for: url)
+        documentCell.configure(name: DocumentsWorkspace.displayName(for: readableURL ?? url),
+                               // 没有访问权时要说清楚，别让那一行显示成「空文档」——
+                               // 用户会以为文件里真的没内容
+                               preview: readableURL.map { DocumentsWorkspace.previewText(of: $0) }
+                                   ?? "需要重新授权",
+                               date: readableURL.flatMap { DocumentsWorkspace.modificationDate(of: $0) })
         // cell 会被复用，所以每次都要按当前高亮状态重新上色
         documentCell.setHighlighted(url.path == highlightedItemID)
         return documentCell

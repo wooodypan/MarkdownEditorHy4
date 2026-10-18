@@ -14,7 +14,7 @@ import Foundation
 /// 好处是「这份文档还是不是原来那份」的判断永远准确：文件被改名、被移走，
 /// 路径就变了，老记录自然对不上（改名后的那份会重新记一笔）。
 ///
-/// ⚠️ 路径在存之前**必须过一遍 `identityKey(for:)`**：从 Finder /「打开方式」进来的文件，系统给的有可能是「文件引用 URL」（长这样 `file:///.file/id=6571367.12345`），它的 `path` 不是真实路径 —— 原样存进去，下次判断「文件还在吗」会一律说不在，于是这条记录在下次启动时被当成「文件已删除」清掉。规范化成真实路径就没事了。
+/// ⚠️ 路径在存之前**必须过一遍 `ExternalDocumentAccess.canonicalPath(for:)`**：从 Finder /「打开方式」进来的文件，系统给的有可能是「文件引用 URL」（长这样 `file:///.file/id=6571367.12345`），它的 `path` 不是真实路径 —— 原样存进去，下次判断「文件还在吗」会一律说不在，于是这条记录在下次启动时被当成「文件已删除」清掉。规范化成真实路径就没事了。
 ///
 /// ⚠️ **这份记录只记「打开过」，不碰文件本身**：
 /// 「从最近里删掉」删的是这一行记录，磁盘上的文件还在（真要删文件请去「文档」那一页）。
@@ -68,28 +68,30 @@ final class RecentDocumentsStore {
     /// 下一次刷新列表就会自己消失。真正的清理（把记录从磁盘上抹掉）在 `pruneMissingFiles()`。
     func recentURLs() -> [URL] {
         openedAt
-            .filter { FileManager.default.fileExists(atPath: $0.key) }
+            .filter { isAvailable(URL(fileURLWithPath: $0.key)) }
             .sorted { $0.value > $1.value }
             .map { URL(fileURLWithPath: $0.key) }
     }
 
     /// 最后一次打开这份文档的时间。没记过返回 nil
     func lastOpenedAt(for url: URL) -> Date? {
-        openedAt[url.path]
+        openedAt[key(for: url)]
     }
 
     /// 记一笔「这份文档刚刚被打开过」。
     ///
     /// 已经在记录里的就把时间刷新成现在 —— 于是它会重新排到最前面。
     func record(_ url: URL) {
-        openedAt[url.path] = Date()
+        openedAt[key(for: url)] = Date()
         pruneIfNeeded()
         save()
     }
 
     /// 把某份文档从记录里去掉。**只动记录，磁盘上的文件不受影响**
     func remove(_ url: URL) {
-        guard openedAt.removeValue(forKey: url.path) != nil else { return }
+        guard openedAt.removeValue(forKey: key(for: url)) != nil else { return }
+        // 记录都不要了，对应的外部文件书签也一并清掉
+        ExternalDocumentAccess.shared.forgetBookmark(for: url)
         save()
     }
 
@@ -97,22 +99,51 @@ final class RecentDocumentsStore {
     func removeAll() {
         guard !openedAt.isEmpty else { return }
         openedAt.removeAll()
+        // 书签只服务于「最近」和重新打开；清空记录时一起清掉，别留下看不见的授权
+        ExternalDocumentAccess.shared.forgetAllBookmarks()
         save()
     }
 
     /// 把「文件已经不在了」的记录剔掉。
     ///
+    /// 容器外的文件不能只看 `fileExists`：沙盒没授权时它也返回 false，
+    /// 但书签还在，下次仍然能解析出来。所以有书签的容器外记录一律先留着。
+    ///
     /// - Returns: 剔掉了几条（启动时弹提示、或者写日志时用得上；没人要就忽略）
     @discardableResult
     func pruneMissingFiles() -> Int {
         let before = openedAt.count
-        openedAt = openedAt.filter { FileManager.default.fileExists(atPath: $0.key) }
+        openedAt = openedAt.filter { isAvailable(URL(fileURLWithPath: $0.key)) }
         guard openedAt.count != before else { return 0 }
         save()
         return before - openedAt.count
     }
 
     // MARK: 内部
+
+    /// 「最近」的记录按文件的真实路径存。
+    ///
+    /// Finder 递过来的可能是文件引用 URL，直接存 `path` 会得到 `/.file/id=...`，
+    /// 下次判断文件在不在会一律说不在。`ExternalDocumentAccess` 里统一做这层规范化。
+    private func key(for url: URL) -> String {
+        ExternalDocumentAccess.shared.canonicalPath(for: url)
+    }
+
+    /// 这条记录还算不算「文件还在」。
+    ///
+    /// 容器内的文件直接查磁盘；容器外的文件只要还有书签就先留着 ——
+    /// 解析书签、申请访问权是点开时才做的事，列表阶段不该因为没权限就把它删掉。
+    private func isAvailable(_ url: URL) -> Bool {
+        if ExternalDocumentAccess.shared.isInsideContainer(url) {
+            return FileManager.default.fileExists(atPath: url.path)
+        }
+        if ExternalDocumentAccess.shared.hasBookmark(for: url) {
+            return true
+        }
+        // iOS 上没有书签，能看到的外部记录只可能是这次运行里刚打开过的；
+        // 文件真被删了就该清掉
+        return FileManager.default.fileExists(atPath: url.path)
+    }
 
     /// 条数超上限时，按「最久没打开」淘汰，只留最新的那些
     private func pruneIfNeeded() {

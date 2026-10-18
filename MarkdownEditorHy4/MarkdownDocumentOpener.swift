@@ -25,18 +25,6 @@ final class MarkdownDocumentOpener {
     /// 界面还没起来时先攒着的 URL，被取走后清空
     private(set) var pendingURL: URL?
 
-    /// 已经申请到「安全作用域」授权的外部文件。
-    ///
-    /// ### 为什么是一批，不是「只记最后一个」
-    /// 沙盒没开的时候，这个集合写什么都无所谓 —— 反正整个硬盘都能读写。
-    /// 开了沙盒就不一样了：右侧可以同时开着好几份**容器外**的文档（⌘O 挑的、
-    /// Finder 双击进来的），每一份都得留着它自己那张通行证。
-    /// 只记最后一个的话，用户回头在**较早打开**那份上按 ⌘S 就会写不进去。
-    ///
-    /// 授权用过要配对释放，否则系统会一直替这个文件开着口子。这里统一在
-    /// `stopAccessing()` 里还（退出时调用）。
-    private var accessedURLs: Set<URL> = []
-
     private init() {}
 
     // MARK: - 入口
@@ -52,12 +40,14 @@ final class MarkdownDocumentOpener {
             return
         }
 
-        // Finder 传过来的是「安全作用域」URL：不显式申请访问就读不到内容。
-        // 没沙盒时这个调用会返回 false，直接读文件也没问题，不影响。
-        beginAccessing(url)
+        // 打开面板 / Finder 递过来的是「安全作用域」URL。先把访问权拿到手，
+        // Mac 上还会顺手存一份书签，下次从「最近」打开就不用再问用户了。
+        // ⚠️ 申请权限要在**原始 URL**上做（通行证附在它身上），存路径时才换成规范化路径。
+        _ = ExternalDocumentAccess.shared.readableURL(for: url)
+        let canonical = ExternalDocumentAccess.shared.canonicalURL(for: url)
 
-        pendingURL = url
-        NotificationCenter.default.post(name: .markdownDocumentOpenRequested, object: url)
+        pendingURL = canonical
+        NotificationCenter.default.post(name: .markdownDocumentOpenRequested, object: canonical)
     }
 
     /// ViewController 就绪后调用：取走冷启动时攒下的 URL
@@ -66,25 +56,11 @@ final class MarkdownDocumentOpener {
         return pendingURL
     }
 
-    /// 退出 / 关窗口时释放授权
+    /// 退出时释放这一轮申请到的所有安全作用域。
+    ///
+    /// 具体申请 / 释放都归 `ExternalDocumentAccess` 管 —— 编辑页保存时也要靠它
+    /// 重新拿到书签里的权限，放在一处才不会两边各记一套。
     func stopAccessing() {
-        for url in accessedURLs {
-            url.stopAccessingSecurityScopedResource()
-        }
-        accessedURLs.removeAll()
-    }
-
-    // MARK: - 安全作用域
-
-    private func beginAccessing(_ url: URL) {
-        // 同一个文件申请过就别再申请一次 —— 申请两次要还两次，很容易记漏一半
-        guard !accessedURLs.contains(url) else { return }
-
-        // 返回 false 不代表「没戏」：
-        //   - 从 Finder 双击进来的文件，系统在启动时就把权限给足了，这里本来就会返回 false；
-        //   - 真拿不到权限的话，后面读文件就会失败，用户会看到「打不开文件」的提示。
-        if url.startAccessingSecurityScopedResource() {
-            accessedURLs.insert(url)
-        }
+        ExternalDocumentAccess.shared.stopAccessingAll()
     }
 }

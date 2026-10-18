@@ -216,6 +216,20 @@ enum DocumentsWorkspace {
         return url
     }
 
+    /// 把一份容器外的文件复制进文档目录。
+    ///
+    /// 这是 iOS 上「复制并打开」那条路用的。复制完，副本就是一份普通的容器内文档，
+    /// 预览、改名、删除、重启后打开都跟 App 自己建的文档一样，不需要再管授权。
+    ///
+    /// ⚠️ 调用前必须先拿到源文件的访问权（见 `ExternalDocumentAccess.readableURL(for:)`）。
+    ///
+    /// - Returns: 复制出来的新文件地址。重名时自动变成「文档 2.md」这种。
+    static func importDocument(from sourceURL: URL) throws -> URL {
+        let destination = uniqueFileURL(baseName: displayName(for: sourceURL))
+        try FileManager.default.copyItem(at: sourceURL, to: destination)
+        return destination
+    }
+
     /// 读文件内容。读不出来（权限、编码、文件被删）返回 nil，由调用方决定怎么提示
     static func read(_ url: URL) -> String? {
         guard let data = try? Data(contentsOf: url) else { return nil }

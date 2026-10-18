@@ -695,10 +695,11 @@ final class MarkdownEditorSettings {
 
     /// 「复制到指定路径」那一项用的文件夹的**完整路径**。`nil` = 用户还没选过。
     ///
-    /// ### 为什么存路径字符串就够了、不用书签
-    /// 本 App 没有开启沙盒（工程里没有 `.entitlements`），用户挑的目录一直都能读写。
-    /// ⚠️ 哪天给 App 打开沙盒，这里就得改存 security-scoped bookmark ——
-    /// 沙盒下光有路径，重启之后是写不进去的。
+    /// ### 为什么这里只有路径
+    /// App 在 Mac Catalyst 上开了沙盒（见 `MarkdownEditorHy4.entitlements`），
+    /// 用户挑的文件夹在容器外时，这里只记下了路径，没有保存 security-scoped bookmark。
+    /// 结果就是往这个目录写图片会失败，`ImageAssetStore` 会退回 `./assets` 并提示用户。
+    /// 要让它跨启动可用，得在这个回调里补一次授权，再把书签存下来（参考 `ExternalDocumentAccess`）。
     private(set) var imageCustomFolderPath: String?
 
     /// 粘贴 / 插入的图片**文件叫什么名字**。默认「用原始文件名」。三种规则的取舍见 `ImageNameMode`
