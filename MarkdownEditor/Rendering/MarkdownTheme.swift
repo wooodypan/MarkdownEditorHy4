@@ -685,6 +685,12 @@ extension MarkdownTheme {
     struct TableStyle {
         /// 表头行的底色
         var headerBackground: UIColor = UIColor(red: 0.95, green: 0.96, blue: 0.97, alpha: 1.00)
+        /// 数据行斑马纹的底色：第 2、4、6… 个数据行铺这个色，其余留白。
+        ///
+        /// 表头本来就有一层灰色，紧挨着的第 1 个数据行留白，两层灰不叠在一起，
+        /// 往下的数据行再隔行铺浅色，眼睛横向找数字时不容易串行。
+        /// 不想要斑马纹就设成 `.clear`（铺透明等于没铺）。
+        var alternateRowBackground: UIColor = UIColor(red: 0.965, green: 0.972, blue: 0.978, alpha: 1.00)
         /// 表格线和外框的颜色
         var borderColor: UIColor = .separator
         /// 表格线宽度（1 就是一条细线）

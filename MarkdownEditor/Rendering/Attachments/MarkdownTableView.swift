@@ -397,6 +397,18 @@ struct MarkdownTableLayoutBox {
             // 整行都在脏矩形外面（比如滚到上一屏去了）就整行跳过
             guard rowY + rowHeight >= band.minY, rowY <= band.maxY else { continue }
 
+            // 斑马纹：数据行从第 2 行开始隔行铺底色。
+            // 第 1 个数据行留白：表头已经是灰的，紧挨着再铺一层会和表头连成一块。
+            // 只填脏矩形那一段：宽表格整行可能上万点，没必要为滚出来的一屏铺满整行
+            if row > 0, row % 2 == 0 {
+                let stripe = CGRect(x: 0, y: rowY, width: size.width, height: rowHeight)
+                    .intersection(band)
+                if !stripe.isNull {
+                    style.alternateRowBackground.setFill()
+                    context.fill(stripe)
+                }
+            }
+
             for column in 0..<layout.columnWidths.count {
                 let columnX = layout.x(ofColumn: column)
                 let columnWidth = layout.columnWidths[column]
