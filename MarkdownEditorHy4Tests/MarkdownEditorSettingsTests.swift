@@ -828,6 +828,33 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertTrue(settings.showsInlineCodeBacktickBackground, "拨开之后要写回配置")
     }
 
+    // MARK: - 状态栏（字数 / 行列）
+
+    /// 默认要显示：字数、行列这些信息默认就该看得见
+    func testStatusBarIsVisibleByDefault() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        XCTAssertTrue(settings.showsStatusBar, "状态栏默认该是显示的")
+    }
+
+    /// 菜单里拨过之后要落盘，下次打开还是关着的
+    func testStatusBarToggleIsPersisted() {
+        let url = makeTempFileURL()
+        MarkdownEditorSettings(fileURL: url).setShowsStatusBar(false)
+
+        XCTAssertFalse(MarkdownEditorSettings(fileURL: url).showsStatusBar,
+                       "状态栏开关没落盘，下次启动又冒出来了")
+    }
+
+    /// 老配置文件里没有这个字段 → 按默认显示，不能因为缺字段就把它藏起来
+    func testMissingStatusBarFieldDefaultsToVisible() throws {
+        let url = makeTempFileURL()
+        try Data(#"{"remembersScrollPosition": false}"#.utf8).write(to: url)
+
+        let settings = MarkdownEditorSettings(fileURL: url)
+        XCTAssertTrue(settings.showsStatusBar)
+        XCTAssertFalse(settings.remembersScrollPosition, "别的设置不该被带走")
+    }
+
     // MARK: - 图片尺寸：配置本身
 
     /// 需求给的默认：按百分比、50%、固定宽度 200px、最大高度 420pt

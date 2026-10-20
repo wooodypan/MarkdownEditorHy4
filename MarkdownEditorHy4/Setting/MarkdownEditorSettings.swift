@@ -226,6 +226,9 @@ final class MarkdownEditorSettings {
         /// 打开之后能选能复制、也能移动光标，但改不动一个字（理由见 `MarkdownTextView.isReadOnly`）
         static let isReadOnly = false
 
+        /// 「底部状态栏」默认**打开**：字数、行列这些信息默认就该看得见
+        static let showsStatusBar = true
+
         /// 「大纲展开时正文右侧留白」默认**打开**：
         /// 展开的大纲是一张浮在正文上面的卡片，正文让出它那块宽度，字才不会被卡片压住。
         /// ⚠️ 收起成小方块时不让（理由见 `MarkdownDocumentViewController.outlineTrailingInset`）
@@ -412,6 +415,8 @@ final class MarkdownEditorSettings {
         var showsInlineCodeBacktickBackground: Bool?
         /// 只读模式：能选能复制但不能改
         var isReadOnly: Bool?
+        /// 底部状态栏（字数 / 行列）要不要显示
+        var showsStatusBar: Bool?
         /// 大纲展开时，正文要不要往左让出它那块宽度
         var reservesSpaceForOutline: Bool?
         /// 大纲宽度那一组。模式同样存字符串，理由见下面 `outlineHeightMode` 的注释
@@ -525,6 +530,15 @@ final class MarkdownEditorSettings {
     /// 入口在文档页右上角「⋯」菜单里那一条带勾的「只读模式」（`MarkdownDocumentViewController.readOnlyAction`），
     /// 这里是它**存盘**的地方 —— 关掉 App 再回来还是上次的形态。
     private(set) var isReadOnly: Bool
+
+    /// 正文底部那条状态栏要不要显示。默认 `true`（显示）。
+    ///
+    /// 状态栏上写的是「字数 + 光标所在的行 / 列」，手机竖屏上一行也就二十来个字，有人更愿意把这一条让给正文，所以给一个开关。
+    ///
+    /// ### 开关在哪儿
+    /// 文档页右上角「⋯」菜单里的「显示状态栏」（`MarkdownDocumentViewController.statusBarAction`）。
+    /// 和只读模式那些开关一样存盘，下次打开还是上次的样子。
+    private(set) var showsStatusBar: Bool
 
     /// 大纲面板**展开**时，正文要不要往左让出它那一块宽度。默认 `true`（开）。
     ///
@@ -834,6 +848,17 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「显示状态栏」。拨完当场生效，不用重开页面。
+    ///
+    /// ### 为什么这一项也发广播
+    /// 开关是全局的，而每个文档 Tab 各有一条自己的状态栏：不广播的话，别的 Tab 要等到下一次动光标才跟上，看着像「有的页关了、有的页还开着」。代价和「只读模式」那一项一样 —— 收到通知的文档会顺带重排一遍。
+    func setShowsStatusBar(_ value: Bool) {
+        guard value != showsStatusBar else { return }
+        showsStatusBar = value
+        save()
+        postChange()
+    }
+
     /// 改「大纲展开时正文右侧留白」。
     ///
     /// 拨完当场生效：内容页收到通知后重算一次编辑器右边距（见 `applyOutlineAppearance`），
@@ -1112,6 +1137,7 @@ final class MarkdownEditorSettings {
         self.showsQuoteBackground = Default.showsQuoteBackground
         self.showsInlineCodeBacktickBackground = Default.showsInlineCodeBacktickBackground
         self.isReadOnly = Default.isReadOnly
+        self.showsStatusBar = Default.showsStatusBar
         self.reservesSpaceForOutline = Default.reservesSpaceForOutline
         self.outlineWidthMode = Default.outlineWidthMode
         self.outlineWidthRatio = Default.outlineWidthRatio
@@ -1164,6 +1190,7 @@ final class MarkdownEditorSettings {
             showsInlineCodeBacktickBackground = value
         }
         if let value = payload.isReadOnly { isReadOnly = value }
+        if let value = payload.showsStatusBar { showsStatusBar = value }
         if let value = payload.reservesSpaceForOutline { reservesSpaceForOutline = value }
         // 宽度那一组：模式和高度一样存字符串，认不出来就只让这一项退回默认
         if let raw = payload.outlineWidthMode, let value = OutlineWidthMode(rawValue: raw) {
@@ -1270,6 +1297,7 @@ final class MarkdownEditorSettings {
                               showsQuoteBackground: showsQuoteBackground,
                               showsInlineCodeBacktickBackground: showsInlineCodeBacktickBackground,
                               isReadOnly: isReadOnly,
+                              showsStatusBar: showsStatusBar,
                               reservesSpaceForOutline: reservesSpaceForOutline,
                               outlineWidthMode: outlineWidthMode.rawValue,
                               outlineWidthRatio: outlineWidthRatio,

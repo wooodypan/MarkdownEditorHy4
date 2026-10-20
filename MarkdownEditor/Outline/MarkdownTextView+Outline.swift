@@ -342,14 +342,18 @@ extension MarkdownTextView {
     /// 上报的是**源码偏移**而不是光标所在的块 id：这样协调者只要在
     /// 「按源码偏移排好序的标题数组」里二分查找就能判断归属，不需要反过来问编辑器
     /// 「这个块在文档里排第几」，双方的接口更少。
+    ///
+    /// 同一个位置也递给 `onCaretMoved`（状态栏显示行列用）：两处要的完全是同一个数，各排一次防抖、各算一次坐标只会让两个地方对不上。
     func publishOutlineCursor() {
-        guard outlineEventSink != nil else { return }
+        guard outlineEventSink != nil || onCaretMoved != nil else { return }
 
         // 尾部防抖：连续触发时只保留最后一次
         outlineCursorWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, let sink = self.outlineEventSink else { return }
-            sink.editorDidMoveCursor(sourceOffset: self.cursorSourceOffset)
+            guard let self else { return }
+            let offset = self.cursorSourceOffset
+            self.outlineEventSink?.editorDidMoveCursor(sourceOffset: offset)
+            self.onCaretMoved?(offset)
         }
         outlineCursorWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)

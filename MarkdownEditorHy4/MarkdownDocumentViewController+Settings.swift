@@ -44,6 +44,10 @@ extension MarkdownDocumentViewController {
     }
 
     @objc func settingsDidChange() {
+        // 先摆状态栏：「显示状态栏」这类开关改的是界面本身，跟重排文字无关，先摆完再说。
+        // 勾也顺手对齐一次 —— 开关是全局的，别的 Tab 拨过之后这一页的勾还停在旧状态
+        syncStatusBarActionState()
+        applyStatusBarVisibility()
         applyOutlineAppearance()
         applyEditorStyle()
     }

@@ -129,7 +129,17 @@ extension MarkdownDocumentViewController {
         }
         // md 里的图片多是相对路径，基准目录要指向文件所在目录，否则图片全裂
         editor.imageBaseURL = url.deletingLastPathComponent()
+        // 同一份文档被重新配置（预览 Tab 复用回它自己）时，光标要留在原处。
+        // `setMarkdown` 是「整篇换内容」，按约定会把光标归零（换文档时正需要这个效果）；
+        // 这里先把当前光标换成源码坐标存一笔，装完再换算回去，用户正在读的地方不会被顶走。
+        let caretSourceBeforeReload = isSameDocument
+            ? editor.documentStore.sourceCaret(forRenderedOffset: editor.selectedRange.location)
+            : nil
         editor.setMarkdown(item.body)
+        if let caretSourceBeforeReload {
+            let caret = editor.documentStore.renderedCaret(forSourceOffset: caretSourceBeforeReload)
+            editor.selectedRange = NSRange(location: min(caret, (editor.text as NSString).length), length: 0)
+        }
 
         refreshStatus()
         updateWindowTitle()

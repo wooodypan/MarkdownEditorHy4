@@ -82,6 +82,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 所以不能标 `private`（跨文件扩展够不到）—— 它只在本模块内可见，不外泄。
     var outlineCursorWork: DispatchWorkItem?
 
+    /// 光标位置变了之后的回调，参数是**源码**偏移（UTF-16）。
+    ///
+    /// 编辑器自己不用它，是留给外面「界面上有东西要跟着光标走」的场景 —— 现在唯一的使用方是文档页底部那条状态栏（显示光标在第几行第几列）。
+    /// 它和大纲那一路共用同一个防抖和同一套坐标换算，所以两边说的永远是同一个位置。
+    var onCaretMoved: ((Int) -> Void)?
+
     // MARK: 查找 / 替换
 
     /// 查找事件的出口（同样是协议，理由和大纲那边的完全一致）。
@@ -522,6 +528,12 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         pendingFullReplace = false
         isApplyingModelChange = true
         replaceWholeStorage(with: documentStore.attributedDocument)
+        // ⚠️ 整篇换内容时光标必须归零，不能留着上一份文档的位置。
+        // `replaceCharacters` 只会把旧的 `selectedRange` 夹进新文本长度里，不会自己清掉。
+        // 于是换文档后光标还停在上一份文档那个偏移上（在新文档里就是随机一个位置）。
+        // 用户滚到文末按回车时，换行就插进了文档中间，看起来像「光标突然跳过去」。
+        // 撤销的整篇恢复不受影响：`restoreDocument` 在这之后会自己把光标设到该去的地方。
+        selectedRange = NSRange(location: 0, length: 0)
         isApplyingModelChange = false
     }
 

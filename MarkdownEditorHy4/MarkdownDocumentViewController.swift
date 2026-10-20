@@ -120,6 +120,21 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     weak var popGesturePreviousDelegate: UIGestureRecognizerDelegate?
     /// 临时提示（比如「已保存」）显示完要恢复成常规状态栏
     private var statusResetWork: DispatchWorkItem?
+    /// 状态栏重算的防抖任务。
+    ///
+    /// 打字每敲一个键、拖光标每一帧都会想让状态栏重算一次，而算一次要扫全篇源码（字数）。
+    /// 合并成 0.12 秒一次的尾部触发，中间那些全丢掉。
+    private var statusRefreshWork: DispatchWorkItem?
+
+    /// 状态栏那条高度。固定的 22 点（字号 11 加一点呼吸），不随设置变
+    private static let statusBarHeight: CGFloat = 22
+
+    /// 上一次统计用的源码。字数、行首表都挂在它上面 —— 光标移动时源码一个字都没变，没必要把全篇再扫一遍（`String` 的相等比较是先比长度再走 memcmp，比逐字扫快得多）
+    private var statsSource: String?
+    /// 上面那份源码的字数（去掉空白后的字符数）
+    private var statsCharacterCount = 0
+    /// 上面那份源码里每一行的起始偏移（UTF-16）。光标一动只要二分一下就知道在第几行
+    private var statsLineStarts: [Int] = [0]
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -280,14 +295,19 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         statusLabel.textAlignment = .center
         statusLabel.numberOfLines = 1
         statusLabel.backgroundColor = UIColor.secondarySystemBackground.withAlphaComponent(0.9)
+        // 字数、行列这些数字随时在变，读屏软件念这个标签时得先说清它是干什么的
+        statusLabel.accessibilityLabel = "文档状态"
         view.addSubview(statusLabel)
 
+        let height = statusLabel.heightAnchor.constraint(equalToConstant: Self.statusBarHeight)
         NSLayoutConstraint.activate([
             statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
-            statusLabel.heightAnchor.constraint(equalToConstant: 22)
+            height
         ])
+        // 用户可能在上一次会话里把状态栏关掉了，建完就地按配置摆好
+        applyStatusBarVisibility()
     }
 
     // MARK: 键盘工具条
@@ -460,6 +480,39 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         flashStatus(isOn ? "只读模式：能选能复制，键盘也不再弹出来" : "已退出只读模式，可以编辑了")
     }
 
+    // MARK: 状态栏开关
+
+    /// 菜单里那个「显示状态栏」开关（打开时左边带一个勾）。
+    ///
+    /// 理由同 `readOnlyAction`：勾记在 action 对象自己身上，每次现造一个的话会永远停在初始值。
+    private lazy var statusBarAction = UIAction(
+        title: "显示状态栏",
+        image: UIImage(systemName: "character.cursor.ibeam"),
+        state: settings.showsStatusBar ? .on : .off
+    ) { [weak self] action in
+        self?.toggleStatusBar(action)
+    }
+
+    /// 拨一下「显示状态栏」：写配置，当场收起 / 展开底下那条带子。
+    ///
+    /// 关掉时它要显示的「字数 / 行列」也一并停算（见 `refreshStatus`），省得白扫全篇。
+    /// 打开时立刻算一次 —— 不然要等第一次动光标才有数字。
+    private func toggleStatusBar(_ action: UIAction) {
+        let isOn = !settings.showsStatusBar
+        settings.setShowsStatusBar(isOn)
+        action.state = isOn ? .on : .off
+        applyStatusBarVisibility()
+        if isOn { refreshStatus() }
+    }
+
+    /// 把菜单里那个勾对齐到当前配置。
+    ///
+    /// 开关是全局的：别的 Tab 拨过之后，这一页菜单里还挂着旧的勾。
+    /// 不同步的话勾停在旧状态，用户点一下想关、实际却是开，看着像「点了没反应」。
+    func syncStatusBarActionState() {
+        statusBarAction.state = settings.showsStatusBar ? .on : .off
+    }
+
     // MARK: 调试菜单项
 
     /// 「TextKit 调试层」开关（只在 Debug 版本里存在）。
@@ -530,6 +583,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             },
             // 「只读模式」带勾开关：一开，这份文档就只能看不能改了（见 toggleReadOnly）
             readOnlyAction,
+            // 「显示状态栏」带勾开关：底下那条「字数 · 行列」的带子可以整条收掉
+            statusBarAction,
             // 导出（图片 / HTML / PDF）收成一项子菜单，展开才选格式。
             // 这一组菜单项由 `DocumentExporter` 生成，左栏右键那个「导出」是同一份，两处永远一致
             exporter.exportMenu { [weak self] in self?.exportSource() },
@@ -626,6 +681,11 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             name: UITextView.textDidChangeNotification,
             object: editor
         )
+        // 光标一动就刷状态栏上的「行 / 列」。
+        // 编辑器那边已经做过防抖（0.12 秒一次），这里不必再叠一层
+        editor.onCaretMoved = { [weak self] _ in
+            self?.refreshStatus()
+        }
     }
 
     @objc private func editorContentChanged() {
@@ -633,6 +693,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         reportEditedStateIfNeeded()
         // 刚敲进去的字也是一笔可以撤销的账，键盘条上那两粒按钮跟着变
         refreshKeyboardBarButtons()
+        // 字数变了。同样拖一下再算：每敲一个键就扫一遍全篇不值当
+        scheduleStatusRefresh()
     }
 
     /// 「我改过了」这件事只上报一次，让宿主把这一页从「预览 Tab」固定成正式 Tab。
@@ -644,10 +706,90 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         contentHost?.contentViewController(self, didChangeEditedState: true)
     }
 
+    /// 重算底部状态栏：字数 + 光标所在的行 / 列（有没保存的改动再标一句）。
+    ///
+    /// ### 「字数」怎么数
+    /// 数的是**源码**里去掉空白（空格、换行、Tab）之后的字符数，标点和 markdown 语法符号都算在内。
+    /// 这是中文写作工具里「字数」的常规口径；按渲染串数会漏掉被折叠的章节，按 UTF-16 单元数又会把 emoji 算成两个。
+    ///
+    /// ### 为什么要缓存
+    /// 拖光标 / 打字时这里会被高频调到，而「第几行」得从源码开头数起。
+    /// 每行的起始偏移按源码内容缓存一份，光标一动只要二分一次（见 `accumulateStatsIfNeeded`）。
     func refreshStatus() {
-        let name = documentDisplayName
-        let dirty = isDirty ? " · 已修改（⌘S 保存）" : ""
-        statusLabel.text = "\(name)\(dirty) · 块数 \(editor.documentStore.blocks.count) · 源码 \(editor.markdownSource.utf16.count) 字符 · 渲染 \(editor.documentStore.renderedLength) 字符"
+        applyStatusBarVisibility()
+        // 状态栏关着就什么都不算：字数要扫全篇，光标每动一下就白跑一遍不值当
+        guard settings.showsStatusBar else { return }
+
+        let source = editor.markdownSource
+        accumulateStatsIfNeeded(for: source)
+        let position = lineAndColumn(ofSourceOffset: editor.cursorSourceOffset)
+
+        var parts = ["字数 \(statsCharacterCount.formatted())",
+                     "行 \(position.line) 列 \(position.column)"]
+        if isDirty { parts.append("已修改") }
+        statusLabel.text = parts.joined(separator: " · ")
+    }
+
+    /// 把状态栏的重算拖到 0.12 秒之后（连续打字 / 拖光标时只算最后一次）。
+    ///
+    /// 每敲一个键都当场算的话，长文档上每个键都要扫一遍源码，纯属浪费；
+    /// 数字晚 0.12 秒跳一下，没人看得出来。
+    func scheduleStatusRefresh() {
+        statusRefreshWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.refreshStatus() }
+        statusRefreshWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    /// 按配置显示 / 收起状态栏。
+    ///
+    /// 只切 `isHidden`：正文的底边钉在 `view.bottomAnchor`，状态栏只是浮在它上面的一条带子，藏起来之后正文本来就已经铺满，没有哪块高度要还回去。
+    func applyStatusBarVisibility() {
+        statusLabel.isHidden = !settings.showsStatusBar
+    }
+
+    /// 把源码统计一遍（字数 + 每行的起始偏移），源码没变就直接用上一次的结果。
+    ///
+    /// `String` 的 `==` 先比长度、再比内容（memcmp），比逐字算一遍快得多 —— 打字时源码变了才真的重算，光标移动时几乎零开销。
+    private func accumulateStatsIfNeeded(for source: String) {
+        guard source != statsSource else { return }
+
+        statsCharacterCount = source.reduce(0) { $1.isWhitespace ? $0 : $0 + 1 }
+
+        var starts = [0]
+        let text = source as NSString
+        var scanned = 0
+        while scanned < text.length {
+            let found = text.range(of: "\n", options: [],
+                                   range: NSRange(location: scanned, length: text.length - scanned))
+            if found.location == NSNotFound { break }
+            starts.append(found.location + 1)
+            scanned = found.location + 1
+        }
+        statsLineStarts = starts
+        statsSource = source
+    }
+
+    /// 源码偏移（UTF-16）在第几行第几列，都从 1 开始数。
+    ///
+    /// ⚠️ 列按 UTF-16 单元数：中文、英文一个字符一个单元，和人眼看到的列数一致；
+    /// 只有 emoji 这类「一个字符两个单元」的会多算一列。
+    private func lineAndColumn(ofSourceOffset offset: Int) -> (line: Int, column: Int) {
+        let starts = statsLineStarts
+        // 二分找「起始位置 <= 光标」的最后一行；光标停在文末的空行上也照样落得进去
+        var low = 0
+        var high = starts.count - 1
+        var lineIndex = 0
+        while low <= high {
+            let mid = (low + high) / 2
+            if starts[mid] <= offset {
+                lineIndex = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return (lineIndex + 1, offset - starts[lineIndex] + 1)
     }
 
     /// 状态栏上闪一句提示，1.5 秒后自动恢复成常规信息
