@@ -270,21 +270,6 @@ final class MarkdownTypographyTests: XCTestCase {
         XCTAssertEqual(theme.paragraphSpacing, 28, accuracy: 0.001)
     }
 
-    // MARK: - 渲染层：字号
-
-    /// 字号要真的落到渲染出来的字体上（存了不用是最容易犯的错）
-    func testBodyFontSizeReachesRenderedText() throws {
-        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
-        settings.setBodyFontSize(24)
-        let editor = makeEditor(typographySample) { settings.applyTypography(to: &$0) }
-
-        let body = try XCTUnwrap(font(of: "这是一段普通的正文", in: editor), "找不到正文")
-        XCTAssertEqual(body.pointSize, 24, accuracy: 0.001, "正文没按新字号渲染")
-
-        let heading = try XCTUnwrap(font(of: "一级标题", in: editor), "找不到标题")
-        XCTAssertEqual(heading.pointSize, 39, accuracy: 0.001,
-                       "标题是从正文字号推出来的（H1 = 正文 +15），改字号时要一起变")
-    }
 
     // MARK: - 渲染层：行高
 

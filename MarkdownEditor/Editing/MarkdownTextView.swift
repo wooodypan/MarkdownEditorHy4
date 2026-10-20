@@ -212,6 +212,11 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     var decorationSettleWork: DispatchWorkItem?
     /// 上一次「重算视野附近的装饰」时的滚动位置，用来节流（见 refreshDecorationsNearViewport）
     var lastNearViewportRefreshOffset: CGFloat = -.greatestFiniteMagnitude
+    /// 上一次重算时的 contentSize 高度。
+    ///
+    /// contentSize 一变，说明 TextKit 刚修正了屏幕外的高度估算 —— 缓存里那些按估算值算的矩形也跟着过时了。
+    /// 光按「滚过 40pt 才重算」节流会漏掉这种修正（详见 refreshDecorationsNearViewport）。
+    var lastNearViewportRefreshHeight: CGFloat = -1
     /// 滚动触发的那一轮布局有没有已经排上（一帧最多一次，见 scheduleScrollLayout）
     var scrollLayoutScheduled = false
 
@@ -653,6 +658,54 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 整篇重排会重建所有块（UUID 也跟着全换新），目录那边必须整份换掉，
         // 否则它会拿着一批已经不存在的旧 id 去做高亮
         publishOutlineItems()
+    }
+
+    // MARK: 光标
+
+    /// 把光标高度夹回「行高倍数没生效时的样子」，不让它跟着行高一起变长。
+    ///
+    /// ### 为什么需要
+    /// 行高倍数（`lineHeightMultiple`）在 TextKit 里是把多出来的行距**全堆在文字上方**：
+    /// 1.7 倍时一行 34 点的行盒里，字形只占最下面约 20 点（见 `textGlyphVerticalBounds` 的注释）。
+    /// 系统默认的光标按**整个行盒**画，于是行高调大以后光标被拉得老长，
+    /// 上端戳进上一行、看着像一根竖杠压住了上面的字。
+    ///
+    /// ### 怎么夹
+    /// 多出来的那段行距 = `(倍数 − 1) × 字体自然行高`，它整段落在光标**顶部**。
+    /// 把这段从光标高度里减掉、**底边不动**（字形本来就贴着行盒底），
+    /// 得到的光标就和「行高倍数没生效时」逐像素一致 —— 高度、以及相对字形的上下位置都不变。
+    ///
+    /// ### 为什么读段落样式里的倍数，而不是主题里的全局值
+    /// 图片、公式块这些段落样式**主动把倍数清成了 0**（见 `MarkupToAttributedRenderer` 里的
+    /// `blockAttachmentParagraphStyle`、`mathBlockParagraphStyle`）—— 它们本来就没吃行高、
+    /// 光标也没被拉长。要是照主题的全局值去减，这些行的光标会被无端削矮。按每段**实际生效**的倍数来算才对。
+    ///
+    /// ### 为什么用「减去多出来的量」而不是「夹到 font.lineHeight」
+    /// 系统默认光标比 `font.lineHeight` 略高（含基线下方一点 padding）。直接夹到 `font.lineHeight`
+    /// 会让高行高下的光标反而比默认状态**更矮、且整体下沉**，两种行高之间不一致。
+    /// 减去多出来的量则保证任何行高下光标都和默认状态一模一样。
+    override func caretRect(for position: UITextPosition) -> CGRect {
+        let rect = super.caretRect(for: position)
+        guard textStorage.length > 0 else { return rect }
+
+        let offset = self.offset(from: beginningOfDocument, to: position)
+        let attributeIndex = max(0, min(offset, textStorage.length - 1))
+
+        // 这一段实际生效的行高倍数（≤ 1 表示没吃行高，光标不用动）
+        guard let style = textStorage.attribute(.paragraphStyle, at: attributeIndex, effectiveRange: nil) as? NSParagraphStyle,
+              style.lineHeightMultiple > 1 else { return rect }
+
+        // 按这个位置自己的字体（正文 / 代码 / 标题各不同）算多出来的量
+        let font = (textStorage.attribute(.font, at: attributeIndex, effectiveRange: nil) as? UIFont)
+            ?? renderer.theme.bodyFont
+
+        // 行高倍数比自然行高多撑出来的那一段，全落在光标顶部
+        let extraLeading = (style.lineHeightMultiple - 1) * font.lineHeight
+        var clamped = rect
+        let bottom = rect.maxY                          // 底边不动（字形贴着行盒底）
+        clamped.size.height = max(1, rect.height - extraLeading)
+        clamped.origin.y = bottom - clamped.height      // 顶边往下收，收掉那段空白
+        return clamped
     }
 
     // MARK: - 编辑管线

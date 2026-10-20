@@ -1,6 +1,9 @@
 {
   "//": "主题样例：只写想改的几色，其余继续用所选内置主题的颜色。挑文件时只认 .json，键名见 MarkdownColorPalette（App 里「主题 → 逐色调整 → 导出」也能导出一份现成的对照明细）。",
   "//写法": "十六进制，#RGB / #RRGGBB / #RRGGBBAA 都行；8 位的后两位是不透明度（斜线开头的这几行是注释，会被忽略）",
+  "//name": "主题名，建议和文件名保持一致（如 ClaudeCode.json 写 \"ClaudeCode\"）。App 目前拿文件名当显示名，这个字段先按规范写进来，解码时会忽略不认识的键；将来要认它，只需给 MarkdownColorPalette 加一个 name 字段。",
+
+  "name": "ClaudeCode",
 
   "editorBackground": "#ffffff",
   "text": "#34495e",

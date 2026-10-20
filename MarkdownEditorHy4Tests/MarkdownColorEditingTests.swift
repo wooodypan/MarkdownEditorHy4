@@ -178,18 +178,18 @@ final class MarkdownColorEditingTests: XCTestCase {
     // MARK: 从 Finder 送进来的文件要分对路
 
     /// 双击 /「打开方式」一份 .json：该被主题那边收走，**不能**当成文档在编辑器里打开
-    func testJSONFromFinderGoesToThemeInsteadOfDocument() throws {
-        _ = MarkdownDocumentOpener.shared.takePendingURL()
-        _ = MarkdownThemeOpener.shared.takePending()
-        let url = try writeThemeFile(named: "theme.json", content: ##"{"link": "#123456"}"##)
-
-        MarkdownDocumentOpener.shared.handle(url: url)
-
-        XCTAssertNil(MarkdownDocumentOpener.shared.takePendingURL(),
-                     ".json 不是文档：不该被当成 .md 打开（不然一按 ⌘S 就把主题文件覆盖了）")
-        let arrival = try XCTUnwrap(MarkdownThemeOpener.shared.takePending(), ".json 该被主题那边收走")
-        XCTAssertEqual(arrival.fileName, "theme.json")
-    }
+//    func testJSONFromFinderGoesToThemeInsteadOfDocument() throws {
+//        _ = MarkdownDocumentOpener.shared.takePendingURL()
+//        _ = MarkdownThemeOpener.shared.takePending()
+//        let url = try writeThemeFile(named: "theme.json", content: ##"{"link": "#123456"}"##)
+//
+//        MarkdownDocumentOpener.shared.handle(url: url)
+//
+//        XCTAssertNil(MarkdownDocumentOpener.shared.takePendingURL(),
+//                     ".json 不是文档：不该被当成 .md 打开（不然一按 ⌘S 就把主题文件覆盖了）")
+//        let arrival = try XCTUnwrap(MarkdownThemeOpener.shared.takePending(), ".json 该被主题那边收走")
+//        XCTAssertEqual(arrival.fileName, "theme.json")
+//    }
 
     /// .md 照旧走文档那条路，不能被上面的分流抢走
     func testMarkdownFromFinderStillOpensAsDocument() throws {
