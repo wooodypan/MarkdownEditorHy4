@@ -828,6 +828,33 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertTrue(settings.showsInlineCodeBacktickBackground, "拨开之后要写回配置")
     }
 
+    // MARK: - 打字机模式
+
+    /// 默认关：绝大多数人习惯了光标往下走，打字机模式要主动开
+    func testTypewriterModeIsOffByDefault() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        XCTAssertFalse(settings.isTypewriterMode, "打字机模式默认该是关的")
+    }
+
+    /// 菜单里拨过之后要落盘，下次打开还是开着的
+    func testTypewriterModeToggleIsPersisted() {
+        let url = makeTempFileURL()
+        MarkdownEditorSettings(fileURL: url).setIsTypewriterMode(true)
+
+        XCTAssertTrue(MarkdownEditorSettings(fileURL: url).isTypewriterMode,
+                      "打字机模式开关没落盘，下次启动又变回普通模式")
+    }
+
+    /// 老配置文件里没有这个字段 → 按默认关，不能因为缺字段就打开
+    func testMissingTypewriterModeFieldDefaultsToOff() throws {
+        let url = makeTempFileURL()
+        try Data(#"{"remembersScrollPosition": false}"#.utf8).write(to: url)
+
+        let settings = MarkdownEditorSettings(fileURL: url)
+        XCTAssertFalse(settings.isTypewriterMode)
+        XCTAssertFalse(settings.remembersScrollPosition, "别的设置不该被带走")
+    }
+
     // MARK: - 状态栏（字数 / 行列）
 
     /// 默认要显示：字数、行列这些信息默认就该看得见

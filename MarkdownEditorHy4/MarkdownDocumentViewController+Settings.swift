@@ -47,6 +47,7 @@ extension MarkdownDocumentViewController {
         // 先摆状态栏：「显示状态栏」这类开关改的是界面本身，跟重排文字无关，先摆完再说。
         // 勾也顺手对齐一次 —— 开关是全局的，别的 Tab 拨过之后这一页的勾还停在旧状态
         syncStatusBarActionState()
+        syncTypewriterActionState()
         applyStatusBarVisibility()
         applyOutlineAppearance()
         applyEditorStyle()
@@ -82,6 +83,8 @@ extension MarkdownDocumentViewController {
         editor.showsLineNumbers = settings.showsLineNumbers
         // 只读模式是编辑器的行为开关（能不能改），和长什么样无关，单独赋值一次
         editor.isReadOnly = settings.isReadOnly
+        // 打字机模式同理：它只改滚动位置，不碰一个字的排版
+        editor.isTypewriterMode = settings.isTypewriterMode
         // 「引用内容加底色」是渲染期读的开关，改完要整篇重渲染才见效。
         // 从设置页过来那条路会走到 `applyEditorStyle()`（里面有刷新），不用在这儿再排一遍
         editor.renderer.theme.showsQuoteBackground = settings.showsQuoteBackground

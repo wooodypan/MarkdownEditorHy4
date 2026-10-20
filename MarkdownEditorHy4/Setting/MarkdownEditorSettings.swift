@@ -222,6 +222,10 @@ final class MarkdownEditorSettings {
         /// 默认灰块只包住代码正文，反引号留在外面，一眼能分出「哪是语法、哪是内容」
         static let showsInlineCodeBacktickBackground = false
 
+        /// 「打字机模式」默认**关闭**：默认是普通编辑（光标一路往下走，到底了才滚）。
+        /// 打开之后每次输入都把光标拉回屏幕中间，正文持续往上滚（见 `MarkdownTextView.isTypewriterMode`）
+        static let isTypewriterMode = false
+
         /// 「只读模式」默认**关闭**：默认是能正常编辑的。
         /// 打开之后能选能复制、也能移动光标，但改不动一个字（理由见 `MarkdownTextView.isReadOnly`）
         static let isReadOnly = false
@@ -413,6 +417,8 @@ final class MarkdownEditorSettings {
         var showsQuoteBackground: Bool?
         /// 行内代码两侧的反引号要不要跟着代码正文一起铺底色
         var showsInlineCodeBacktickBackground: Bool?
+        /// 打字机模式：光标钉在屏幕中间
+        var isTypewriterMode: Bool?
         /// 只读模式：能选能复制但不能改
         var isReadOnly: Bool?
         /// 底部状态栏（字数 / 行列）要不要显示
@@ -520,6 +526,15 @@ final class MarkdownEditorSettings {
     ///
     /// ⚠️ 它和颜色 / 字号一样是**渲染时**烙进富文本的，改完得整篇重新渲染才生效。
     private(set) var showsInlineCodeBacktickBackground: Bool
+
+    /// 打字机模式。默认 `false`（关），也就是普通编辑：光标一路往下走，到屏幕底下才滚。
+    ///
+    /// 打开后每输入一个字就把光标拉回屏幕中间，正文跟着往上滚一行（实现见 `MarkdownTextView+Typewriter.swift`）。
+    /// 只改「滚动位置」，不碰文字、不碰排版，所以切开关不需要重渲染。
+    ///
+    /// ### 开关在哪儿
+    /// 文档页右上角「⋯」菜单里的「打字机模式」（`MarkdownDocumentViewController.typewriterAction`），排在「只读模式」上面。和只读模式一样存盘 —— 关掉 App 再回来还是上次的形态。
+    private(set) var isTypewriterMode: Bool
 
     /// 只读模式。默认 `false`（关），也就是正常编辑。
     ///
@@ -840,6 +855,18 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「打字机模式」。拨完当场生效，不用重开页面。
+    ///
+    /// ### 为什么这一项也发广播
+    /// 开关是全局的：别的文档 Tab 拨过之后，这一页的菜单勾和编辑器行为都得跟上，否则会出现「这页还是普通模式、那页已经打字机了」。
+    /// 代价和「只读模式」那一项一样 —— 收到通知的文档会顺带重排一遍。
+    func setIsTypewriterMode(_ value: Bool) {
+        guard value != isTypewriterMode else { return }
+        isTypewriterMode = value
+        save()
+        postChange()
+    }
+
     /// 改「只读模式」。拨了之后输入框还看得见光标、也还能选中复制，就是改不动内容
     func setIsReadOnly(_ value: Bool) {
         guard value != isReadOnly else { return }
@@ -1136,6 +1163,7 @@ final class MarkdownEditorSettings {
         self.showsLineNumbers = Default.showsLineNumbers
         self.showsQuoteBackground = Default.showsQuoteBackground
         self.showsInlineCodeBacktickBackground = Default.showsInlineCodeBacktickBackground
+        self.isTypewriterMode = Default.isTypewriterMode
         self.isReadOnly = Default.isReadOnly
         self.showsStatusBar = Default.showsStatusBar
         self.reservesSpaceForOutline = Default.reservesSpaceForOutline
@@ -1189,6 +1217,7 @@ final class MarkdownEditorSettings {
         if let value = payload.showsInlineCodeBacktickBackground {
             showsInlineCodeBacktickBackground = value
         }
+        if let value = payload.isTypewriterMode { isTypewriterMode = value }
         if let value = payload.isReadOnly { isReadOnly = value }
         if let value = payload.showsStatusBar { showsStatusBar = value }
         if let value = payload.reservesSpaceForOutline { reservesSpaceForOutline = value }
@@ -1296,6 +1325,7 @@ final class MarkdownEditorSettings {
                               showsLineNumbers: showsLineNumbers,
                               showsQuoteBackground: showsQuoteBackground,
                               showsInlineCodeBacktickBackground: showsInlineCodeBacktickBackground,
+                              isTypewriterMode: isTypewriterMode,
                               isReadOnly: isReadOnly,
                               showsStatusBar: showsStatusBar,
                               reservesSpaceForOutline: reservesSpaceForOutline,

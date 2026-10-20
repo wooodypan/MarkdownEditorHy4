@@ -43,6 +43,8 @@ final class MarkdownEditController: NSObject, UITextViewDelegate {
     /// 文本内容变了（敲键、自动纠错、粘贴、删除…都会走到这里）
     func textViewDidChange(_ textView: UITextView) {
         self.textView?.reconcileFromTextChange()
+        // 打字机模式：敲完这一下把光标拉回屏幕中间（里面自己判断开关、方向和时机）
+        self.textView?.keepCaretNearScreenCenterIfNeeded()
     }
 
     /// 光标变了。顺便在这里补一次排版：
@@ -50,9 +52,12 @@ final class MarkdownEditController: NSObject, UITextViewDelegate {
     ///
     /// 另外把光标位置报给大纲（目录高亮跟着光标走）。上报内部做了防抖，
     /// 拖光标 / 快速打字时不会把目录刷爆。
+    ///
+    /// 打字机模式下还要把光标摆回屏幕中间：点另一行、按 ↑↓ 都只动光标不动文本，光靠 `textViewDidChange` 那条接不住（它只在内容真的变了时才响）。
     func textViewDidChangeSelection(_ textView: UITextView) {
         self.textView?.reconcileIfNeededAfterComposition()
         self.textView?.publishOutlineCursor()
+        self.textView?.keepCaretNearScreenCenterIfNeeded()
     }
 
     /// 结束编辑时也补一次，防止输入法相关的改动漏掉

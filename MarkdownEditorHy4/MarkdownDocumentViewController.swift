@@ -451,6 +451,38 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         navigationItem.leftBarButtonItem = item
     }
 
+    // MARK: 打字机模式
+
+    /// 菜单里那个「打字机模式」开关（打开时左边带一个勾）。
+    ///
+    /// 理由同下面 `readOnlyAction`：勾记在 action 对象自己身上，每次现造一个的话会永远停在初始值。
+    private lazy var typewriterAction = UIAction(
+        title: "打字机模式",
+        image: UIImage(systemName: "text.aligncenter"),
+        state: settings.isTypewriterMode ? .on : .off
+    ) { [weak self] action in
+        self?.toggleTypewriter(action)
+    }
+
+    /// 拨一下「打字机模式」：写配置、告诉编辑器、改勾。
+    ///
+    /// ### 为什么也手动再赋一次 `editor.isTypewriterMode`
+    /// 和「只读模式」同一个理由：这只是个滚动行为开关，一个字都不用重排，没必要等设置广播那条重活。
+    private func toggleTypewriter(_ action: UIAction) {
+        let isOn = !settings.isTypewriterMode
+        settings.setIsTypewriterMode(isOn)
+        editor.isTypewriterMode = isOn
+        action.state = isOn ? .on : .off
+        flashStatus(isOn ? "打字机模式：光标始终停在屏幕中间" : "已退出打字机模式")
+    }
+
+    /// 把菜单里那个勾对齐到当前配置（开关是全局的，别的 Tab 拨过之后这一页要跟上）。
+    func syncTypewriterActionState() {
+        typewriterAction.state = settings.isTypewriterMode ? .on : .off
+        // 勾改了还得重挂一次菜单，否则挂在上面的旧快照还带着上一轮的勾
+        refreshActionMenu()
+    }
+
     // MARK: 只读模式
 
     /// 动作菜单里那个「只读模式」开关（打开了左边带一个勾）。
@@ -477,6 +509,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         settings.setIsReadOnly(isOn)
         editor.isReadOnly = isOn
         action.state = isOn ? .on : .off
+        // 只读模式没有自己的 sync 方法，勾在这里改，菜单也在这里重挂
+        refreshActionMenu()
         flashStatus(isOn ? "只读模式：能选能复制，键盘也不再弹出来" : "已退出只读模式，可以编辑了")
     }
 
@@ -511,6 +545,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// 不同步的话勾停在旧状态，用户点一下想关、实际却是开，看着像「点了没反应」。
     func syncStatusBarActionState() {
         statusBarAction.state = settings.showsStatusBar ? .on : .off
+        // 同「打字机模式」：改完勾要重挂菜单
+        refreshActionMenu()
     }
 
     // MARK: 调试菜单项
@@ -529,6 +565,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 返回值就是「现在开着吗」：true = 刚装上，false = 刚摘掉
         let isOn = self.editor.installLineFragmentDebugOverlay()
         action.state = isOn ? .on : .off
+        // 和其它带勾的开关一样，改完勾要重挂菜单
+        self.refreshActionMenu()
         self.flashStatus(isOn ? "已显示：红=行框 蓝=usedRect 绿=附件 橙=容器" : "已隐藏 TextKit 调试层")
     }
     #endif
@@ -573,6 +611,15 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     }
     #endif
 
+    /// 重新挂一遍「⋯」菜单，让那几个开关的勾当场刷新。
+    ///
+    /// ### 为什么改完 `state` 还得重挂
+    /// 按钮上挂着的 `UIMenu` 是**照着当时那份 action 状态拍下来的快照**：就地改 `UIAction.state` 不会让已经挂上去的菜单重画。
+    /// 只改不重挂的症状就是「开关明明已经关了，菜单里还带着勾」。所以凡是改勾的地方，改完都得走这一趟。
+    private func refreshActionMenu() {
+        menuButton.menu = makeActionMenu()
+    }
+
     /// 组装弹出菜单里的条目。
     /// 每一项就是一行：标题 + 图标 + 点击后要执行的代码（`UIAction`），或者一个带下级菜单的入口（`UIMenu`，「导出」就是这种）。
     private func makeActionMenu() -> UIMenu {
@@ -581,6 +628,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
                 // 顶部滑出查找 / 替换横条
                 self?.showFindBar()
             },
+            // 「打字机模式」带勾开关：光标始终停在屏幕中间，正文跟着光标滚（见 toggleTypewriter）
+            typewriterAction,
             // 「只读模式」带勾开关：一开，这份文档就只能看不能改了（见 toggleReadOnly）
             readOnlyAction,
             // 「显示状态栏」带勾开关：底下那条「字数 · 行列」的带子可以整条收掉

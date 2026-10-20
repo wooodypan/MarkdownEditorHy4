@@ -193,6 +193,41 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         }
     }
 
+    // MARK: 打字机模式
+
+    /// 打字机模式：**开着的时候，每输入一个字就把光标拉回屏幕中间**，正文跟着往上滚一行（默认 `false`，也就是普通编辑）。
+    ///
+    /// ### 它解决什么
+    /// 普通模式下光标一路往屏幕底下走，写到最底下那几行时，眼睛得跟着往下瞟，视线在「刚写的字」和「屏幕下方」之间来回跑。
+    /// 打开之后光标始终停在中间那条线上，新写的内容在眼前，上面写过的自动往上退 —— 这是长文写作的常见习惯。
+    ///
+    /// ### 光标走到哪儿，正文就跟到哪儿
+    /// 往下打字、按 ↑ 往回走、鼠标点上面那一行，三种都算：光标一离开中线附近就把滚动位置挪过来，视觉上光标像钉在中间那一行。
+    /// 只处理「往下越界」的话，按住 ↑ 时屏幕纹丝不动，光标很快就贴到顶栏下面了。
+    /// 唯一不跟的是**有选区**的时候 —— 拖选时系统自己会滚，我们再插一脚会两边打架。
+    ///
+    /// ### 还要给底部留半屏空白
+    /// 不留的话，文档最后几行永远滚不到中间（内容就到那儿为止，`UIScrollView` 不给再往下滚）。
+    /// 留白由 `applyTypewriterInset()` 维护，跟着视口高度走。
+    ///
+    /// 开关在文档页「⋯」菜单里（`MarkdownDocumentViewController.typewriterAction`）。
+    var isTypewriterMode = false {
+        didSet {
+            guard isTypewriterMode != oldValue else { return }
+            applyTypewriterInset()
+            // 打开的那一下就把光标摆到中间，不用等用户敲第一个字才生效。
+            // 打开文档时那次赋值不算：那时正文还没进去（`setMarkdown` 排在后面），这时候居中会跟「恢复上次阅读位置」抢滚动位置
+            if documentStore.renderedLength > 0 {
+                keepCaretNearScreenCenterIfNeeded()
+            }
+        }
+    }
+
+    /// 已经排了一次「下一拍把光标拉回中线」的队。
+    ///
+    /// 快速打字时每个字符都会来一次，合并成一次就够 —— 每次执行时读的都是**当时**的光标位置，中间那几次没必要各算一遍。读写发生在 `MarkdownTextView+Typewriter.swift`，所以不能标 `private`。
+    var typewriterScrollScheduled = false
+
     // MARK: 代码块装饰（整块背景矩形 + 右上角复制按钮）
     //
     // ⚠️ 这一节的属性都没标 `private`：画它们、算矩形、摆位的代码在 `MarkdownTextView+Decorations.swift` 里，跨文件够不到 `private`。
@@ -632,6 +667,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         // 第一件事就是把左右内边距按当前宽度定下来 —— 下面算代码块背景、折叠三角、
         // 图片宽度全都要读它，晚一步就会有一帧画在旧位置
         updateTextContainerInsetIfNeeded()
+
+        // 打字机模式的底部留白按视口高度算（半屏）：转屏、拉窗口之后这个数要跟着变
+        applyTypewriterInset()
 
         // 有整篇内容等着写入：现在就写（这一步必须在布局阶段做，见 applyPendingFullReplace 的注释）
         if pendingFullReplace { applyPendingFullReplace() }
