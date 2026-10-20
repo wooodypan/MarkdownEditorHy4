@@ -465,6 +465,24 @@ struct MarkdownTheme {
         [.font: tableSourceFont, .foregroundColor: table.sourceTextColor]
     }
 
+    /// 表格 / Mermaid 图下面那几行**弱化源码**的段落样式：行与行之间只剩自然行距。
+    ///
+    /// ### 段距为什么是 0（跟代码块同一个理由）
+    /// 源码的每一行都以 `\n` 结尾，而 `\n` 在 TextKit 里就是**段落分隔符** —— 每行都是独立段落，段后各吃一份 `paragraphSpacing`（默认 12），几行源码之间就空得跟两段正文一样。实测表格源码相邻两行相距 30pt（12 段距 + 18 自然行高），而同字号下一段长文本折行只有 18pt 左右。
+    /// 归零之后行与行只剩字体自带的自然行距，和「一段长文本折行」一个观感。
+    ///
+    /// ### 缩进 / 行高照旧
+    /// `headIndent` 那两行不能省：列表里的表格要靠它对齐；`applyLineHeight` 也不能省，用户调过行高的话源码要跟着走。
+    func tableSourceParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.headIndent = indent
+        style.firstLineHeadIndent = indent
+        style.paragraphSpacingBefore = 0
+        style.paragraphSpacing = 0
+        applyLineHeight(to: style)
+        return style
+    }
+
     // MARK: 段落样式
 
     /// 把「行高倍数」写进段落样式。

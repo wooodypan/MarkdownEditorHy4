@@ -902,12 +902,12 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
 
         // 图下面弱化显示源码（含围栏两行），和 `visitTable` 一模一样：
         // 光标能停进去改内容，复制时靠 `lastSourceEnd` 去重，整段只输出一次。
-        // 段落样式不能省 —— 源码有好几行，没有它的话缩进（列表里的图）和行距都不对。
+        // 段落样式用「源码专用」那套（段距归零），理由见 `MarkdownTheme.tableSourceParagraphStyle`。
         //
         // （`tableSourceAttributes` 是表格那边现成的「弱化源码」样式，图直接复用。
         // 名字带 table 有点别扭，将来要么改名通用化，要么另加一个 `diagramSourceAttributes`。）
         var sourceAttributes = theme.tableSourceAttributes
-        sourceAttributes[.paragraphStyle] = theme.paragraphStyle(indent: indent)
+        sourceAttributes[.paragraphStyle] = theme.tableSourceParagraphStyle(indent: indent)
         out.append(.decoration("\n", attributes: sourceAttributes))
         out.append(.sourceHint(sourceText(in: range),
                                sourceStart: range.location,
@@ -1051,9 +1051,9 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                                sourceLength: range.length,
                                attributes: [.paragraphStyle: style, .font: theme.bodyFont]))
         // 表格下面弱化显示源码：等宽 + 浅灰，方便对照真实语法改内容。
-        // 段落样式不能省：源码有好几行，没有它的话缩进（列表里的表格）和行距都不对
+        // 段落样式用「源码专用」那套：缩进和行高照旧，但段距归零 —— 源码每行都是独立段落，沿用正文段距的话几行之间会空得跟两段正文一样（理由见 `MarkdownTheme.tableSourceParagraphStyle`）
         var sourceAttributes = theme.tableSourceAttributes
-        sourceAttributes[.paragraphStyle] = theme.paragraphStyle(indent: indent)
+        sourceAttributes[.paragraphStyle] = theme.tableSourceParagraphStyle(indent: indent)
         out.append(.decoration("\n", attributes: sourceAttributes))
         out.append(.sourceHint(markdownSource,
                                sourceStart: range.location,
