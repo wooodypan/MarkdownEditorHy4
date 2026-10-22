@@ -660,6 +660,14 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             UIAction(title: "校验", image: UIImage(systemName: "checkmark.seal")) { [weak self] _ in
                 // 全选复制，比对复制出来的文本和源码是否逐字符一致
                 self?.verifyRoundTrip()
+            },
+            UIAction(title: "当前文件路径", image: UIImage(systemName: "checkmark.seal")) { [weak self] _ in
+                let alert = UIAlertController(title: "1",
+                                              message: self?.openedFileURL?.absoluteString,
+                                              preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "好", style: .default))
+                self?.present(alert, animated: true)
+                
             }
         ]
 

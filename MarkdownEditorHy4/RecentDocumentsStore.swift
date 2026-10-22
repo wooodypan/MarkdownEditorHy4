@@ -95,6 +95,41 @@ final class RecentDocumentsStore {
         save()
     }
 
+    /// 文件夹改名时，把这些路径前缀下的记录一起搬到新前缀下。
+    ///
+    /// 记录按完整路径存，文件夹一改名，里面每份文档的 key 都成了「不存在的文件」，下次刷新会被当成垃圾清掉。迁过去比清掉好 —— 用户还能从「最近」点回去。
+    ///
+    /// - Parameters:
+    ///   - fromPrefix: 旧目录的完整路径（结尾不带 `/`）
+    ///   - toPrefix: 新目录的完整路径
+    func migrate(fromPrefix: String, toPrefix: String) {
+        let head = fromPrefix + "/"
+        var migrated = openedAt
+        var didChange = false
+        for (path, date) in openedAt where path.hasPrefix(head) {
+            let suffix = String(path.dropFirst(head.count))
+            migrated.removeValue(forKey: path)
+            migrated[toPrefix + "/" + suffix] = date
+            didChange = true
+        }
+        guard didChange else { return }
+        openedAt = migrated
+        save()
+    }
+
+    /// 文件夹被删掉时，把里面所有文档的记录一起清掉（文件都没了，留着只是白占位置）。
+    ///
+    /// - Returns: 清掉了几条
+    @discardableResult
+    func removeAll(underPrefix prefix: String) -> Int {
+        let head = prefix + "/"
+        let before = openedAt.count
+        openedAt = openedAt.filter { !$0.key.hasPrefix(head) }
+        guard openedAt.count != before else { return 0 }
+        save()
+        return before - openedAt.count
+    }
+
     /// 清空全部记录。**只动记录，一份文件都不会删**
     func removeAll() {
         guard !openedAt.isEmpty else { return }

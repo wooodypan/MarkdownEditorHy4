@@ -6,6 +6,10 @@
 //
 
 import UIKit
+// 只在 Debug 构建里引入：Release 用不到这套调试面板，别让它的代码进正式包。
+#if DEBUG
+//import DebugSwift
+#endif
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -145,6 +149,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         if let url = launchOptions?[.url] as? URL {
             MarkdownDocumentOpener.shared.handle(url: url)
         }
+        #if DEBUG
+        // DebugSwift 调试窗口：`setup()` 注册各个调试面板，`show()` 把屏幕上那个可拖动的入口显示出来。想关掉某个开销大的面板就写成 `DebugSwift().setup(disable: [.leaksDetector]).show()`。
+        // 把包依赖规则从「按版本号 Up to Next Major」改成「固定到某个提交」，钉在 rc-1.20.7 对应的那个 commit（bccfb16ff6c116b15cde8e2918a1ed1f126c9e53）。这样 Catalyst 就能编过了
+//        DebugSwift().setup().show()
+        #endif
         return true
     }
 

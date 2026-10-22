@@ -15,8 +15,13 @@ import MultiTabController
 /// 列表长什么样（标题 / 首行预览 / 修改日期）、单击双击怎么打开、搜索、排序、
 /// 右侧切换 Tab 时怎么跟着高亮，全都一样。写两份迟早会改漏一边，所以收成一个类：
 ///
-/// - `.documents`：扫文档目录（`DocumentsWorkspace.documentURLs`），右键里是重命名 / 导出 / 删除；
+/// - `.documents`：扫当前目录（`DocumentsWorkspace.entries(in:)`），右键里是重命名 / 导出 / 删除；
 /// - `.recent`：列「打开过什么」（`RecentDocumentsStore`），右键里只有「从最近打开中移除」。
+///
+/// ### 子文件夹怎么走
+/// 「文档」页可以往下走：文件夹也作为一行列出来，点一下把 `currentDirectory` 换成它再重扫一层，不做 push（理由见 `currentDirectory`）。顶上那条返回带负责回上一级；文件夹永远排在文件前面，和 Finder / VS Code 一致。
+///
+/// 搜索是**递归**的：关键词非空时扫当前目录以下整棵树，命中行的标题显示相对路径，否则子文件夹里的同名文件根本分不清是哪一个。
 ///
 /// ### 单击 / 双击的两种「打开」
 /// 跟 `MultiTabController` 的示例一致，对应它那套类 VS Code 的 Tab 策略：
@@ -27,8 +32,8 @@ import MultiTabController
 ///
 /// ### 一行里显示什么
 /// 文件名 + 浅灰的**预览**（文档首行文字，一行放不下从尾巴省略）+ 文件的**修改日期**。
-/// 后两样是每次填 cell 时现读的（`DocumentsWorkspace.previewText` / `modificationDate`），
-/// 所以 Mac 上「在右栏改完按 ⌘S」，左栏这两行会跟着变 —— 存盘时也会发一条目录变更通知。
+/// 后两样都得读盘，所以**不在 `cellForRowAt` 里同步取**：主线程只查 `DocumentListRowCache` 里现成的值，没命中就先空着，后台读完再回填。
+/// 存盘 / 增删文件时目录会重扫一遍，缓存按「修改时间有没有变」自己失效，所以 Mac 上「在右栏改完按 ⌘S」，左栏那两行照样跟着变。
 ///
 /// ### 搜索与排序
 /// 两页都有：顶上搜索框按文件名过滤（忽略大小写），导航条「⋯」里按修改时间 /
@@ -52,6 +57,15 @@ final class DocumentListViewController: UIViewController {
     private let emptyLabel = UILabel()
     private let searchBar = UISearchBar()
 
+    // MARK: - 返回上级
+
+    /// 子文件夹里顶上那条导航带：左边「返回上级」，右边当前路径
+    private let breadcrumbBar = UIView()
+    private let backButton = UIButton(type: .system)
+    private let pathLabel = UILabel()
+    /// 返回条高度。0 = 收起来（停在根目录），34 = 正常显示
+    private var breadcrumbHeightConstraint: NSLayoutConstraint?
+
     // MARK: - 自己画的滚动条
 
     /// 列表右边那根细长的圆角条（系统的滚动条已经关掉了，见 `setupTableView`）
@@ -72,12 +86,23 @@ final class DocumentListViewController: UIViewController {
     /// 停手之后先等这么久再淡出：手指松开、惯性还在滚的时候不该马上消失
     private static let scrollIndicatorFadeOutDelay: TimeInterval = 0.6
 
+    /// 「文档」页当前停在哪个目录。默认就是 App 文档根目录。
+    ///
+    /// ### 为什么是「就地换目录」而不是 push 一页新的
+    /// 左栏本身是 `PPTabBarController` 里的一页，push 等于把标签页容器压进导航栈；而且外层导航条只同步了右键（`WorkspaceCoordinator.syncNavigationItem`），push 之后标题和返回键都得另做一套。就地换一份数据，三个平台行为完全一致。
+    ///
+    /// 「最近」页不用它 —— 那一页列的是跨目录的记录，没有「当前目录」这回事。
+    private(set) var currentDirectory: URL = DocumentsWorkspace.folderURL
+
     /// 这一页的完整数据（排序 / 过滤之前）。
     /// 对「最近」来说它已经按打开时间倒序排好了（`RecentDocumentsStore.recentURLs`）
-    private var allFiles: [URL] = []
+    private var allFiles: [DocumentsWorkspace.Entry] = []
 
-    /// 当前**展示**的文件（已经过排序和搜索过滤）
-    private var files: [URL] = []
+    /// 当前**展示**的行（已经过排序和搜索过滤）
+    private var files: [DocumentsWorkspace.Entry] = []
+
+    /// 每行的副标题和日期。首行预览要读盘、文件夹要列子目录，这些都不能在 `cellForRowAt` 里同步做
+    private let rowCache = DocumentListRowCache()
 
     // MARK: - 选中行高亮（与右侧选中的 Tab 联动）
 
@@ -86,7 +111,7 @@ final class DocumentListViewController: UIViewController {
 
     /// 这一页里有没有这条内容。右栏切换 Tab、联动高亮时用它判断该亮哪一页
     func containsItem(withID id: String) -> Bool {
-        allFiles.contains { $0.path == id }
+        allFiles.contains { !$0.isDirectory && $0.url.path == id }
     }
 
     /// 设置 / 清除高亮行（传 `nil` 清除）。
@@ -94,11 +119,35 @@ final class DocumentListViewController: UIViewController {
     /// - Parameter scrollToSelection: 目标行不在屏幕内时要不要滚过去。
     ///   自己点击时传 false（本来就在眼前）；右侧切 Tab 联动时传 true，更接近 VS Code。
     func setHighlightedItemID(_ id: String?, scrollToSelection: Bool = false) {
+        // 右侧切到一份「不在当前目录里」的文档时，先把左栏带到它所在的文件夹。
+        // 少了这一步，「右边切哪个、左边亮哪个」进了子文件夹就失效了
+        if let id, revealDirectoryIfNeeded(for: id) {
+            reloadFiles()
+        }
         guard id != highlightedItemID else { return }
         highlightedItemID = id
         // 视图还没加载时只记状态，首次 `cellForRowAt` 会按它上色
         guard isViewLoaded else { return }
         applyHighlight(scrollToSelection: scrollToSelection)
+    }
+
+    /// 高亮的那份不在当前目录里时，把列表切到它所在的文件夹。
+    ///
+    /// - Returns: 真的换了目录才回 true（调用方据此重扫一遍）
+    private func revealDirectoryIfNeeded(for id: String) -> Bool {
+        guard source == .documents else { return false }
+        // 只认文档根目录底下的路径：从 Finder 打开的外部文件跟这一页没有关系
+        let root = ExternalDocumentAccess.shared.canonicalPath(for: DocumentsWorkspace.folderURL)
+        let path = ExternalDocumentAccess.shared.canonicalPath(for: URL(fileURLWithPath: id))
+        guard path.hasPrefix(root + "/"),
+              // 路径已经不存在（Tab 刚关掉、文件被删）就别拿它当理由跳目录
+              FileManager.default.fileExists(atPath: path) else { return false }
+
+        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
+        guard directory.path != currentDirectory.path else { return false }
+        currentDirectory = directory
+        updateBreadcrumb()
+        return true
     }
 
     /// 把高亮状态套到当前可见的 cell 上；看不见的行等滚动出现时由 `cellForRowAt` 上色
@@ -117,12 +166,12 @@ final class DocumentListViewController: UIViewController {
 
     private func highlightedIndexPath() -> IndexPath? {
         guard let id = highlightedItemID,
-              let row = files.firstIndex(where: { $0.path == id }) else { return nil }
+              let row = files.firstIndex(where: { $0.url.path == id }) else { return nil }
         return IndexPath(row: row, section: 0)
     }
 
     private func updateHighlightAppearance(of cell: UITableViewCell, at indexPath: IndexPath) {
-        (cell as? DocumentListCell)?.setHighlighted(files[indexPath.row].path == highlightedItemID)
+        (cell as? DocumentListCell)?.setHighlighted(files[indexPath.row].url.path == highlightedItemID)
     }
 
     // MARK: - 排序
@@ -206,11 +255,13 @@ final class DocumentListViewController: UIViewController {
         view.backgroundColor = .systemBackground
 
         setupSearchBar()
+        setupBreadcrumbBar()
         setupTableView()
         setupEmptyLabel()
         setupTapGestures()
         observeWorkspaceChanges()
 
+        updateBreadcrumb()
         reloadFiles()
     }
 
@@ -258,6 +309,108 @@ final class DocumentListViewController: UIViewController {
         ])
     }
 
+    /// 子文件夹里顶上那条：左边「上级」，右边当前路径。
+    ///
+    /// ### 为什么不挂在导航条上
+    /// 这一页挂在 `PPTabBarController` 里面，外层导航条只搬了右键（见 `WorkspaceCoordinator.syncNavigationItem`）；而 iPhone 上 push 了编辑页之后，左键是系统的返回键，再塞一颗「上级」会跟它打架。
+    ///
+    /// ### 为什么不用 `tableHeaderView`
+    /// 那个会跟着列表一起滚走 —— 越往下翻越找不到返回入口。这里是一条固定的条，高度约束在 0 和 34 之间切，根目录时等于不存在。
+    private func setupBreadcrumbBar() {
+        breadcrumbBar.translatesAutoresizingMaskIntoConstraints = false
+        // 高度收成 0 时把内容裁掉，免得那两颗控件从 0 高度里露出来
+        breadcrumbBar.clipsToBounds = true
+        view.addSubview(breadcrumbBar)
+
+        backButton.translatesAutoresizingMaskIntoConstraints = false
+        backButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
+        backButton.setTitle("上级", for: .normal)
+        backButton.titleLabel?.font = .preferredFont(forTextStyle: .subheadline)
+        backButton.tintColor = .secondaryLabel
+        backButton.accessibilityLabel = "返回上级文件夹"
+        backButton.addTarget(self, action: #selector(goToParentDirectory), for: .touchUpInside)
+        breadcrumbBar.addSubview(backButton)
+
+        pathLabel.translatesAutoresizingMaskIntoConstraints = false
+        pathLabel.font = .preferredFont(forTextStyle: .caption1)
+        pathLabel.adjustsFontForContentSizeCategory = true
+        pathLabel.textColor = .tertiaryLabel
+        pathLabel.textAlignment = .right
+        // 路径长的时候从**开头**省略：结尾那段（当前文件夹名）才是最有用的
+        pathLabel.lineBreakMode = .byTruncatingHead
+        breadcrumbBar.addSubview(pathLabel)
+
+        let height = breadcrumbBar.heightAnchor.constraint(equalToConstant: 0)
+        breadcrumbHeightConstraint = height
+
+        NSLayoutConstraint.activate([
+            breadcrumbBar.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
+            breadcrumbBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            breadcrumbBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            height,
+
+            backButton.leadingAnchor.constraint(equalTo: breadcrumbBar.leadingAnchor, constant: 16),
+            backButton.centerYAnchor.constraint(equalTo: breadcrumbBar.centerYAnchor),
+            backButton.heightAnchor.constraint(equalToConstant: 28),
+
+            pathLabel.leadingAnchor.constraint(greaterThanOrEqualTo: backButton.trailingAnchor, constant: 8),
+            pathLabel.trailingAnchor.constraint(equalTo: breadcrumbBar.trailingAnchor, constant: -16),
+            pathLabel.centerYAnchor.constraint(equalTo: breadcrumbBar.centerYAnchor)
+        ])
+    }
+
+    /// 按当前目录决定返回条显不显示、路径写什么。
+    private func updateBreadcrumb() {
+        let root = DocumentsWorkspace.folderURL.standardizedFileURL.path
+        let path = currentDirectory.standardizedFileURL.path
+        let isRoot = path == root
+        let shouldShow = source == .documents && !isRoot
+
+        breadcrumbHeightConstraint?.constant = shouldShow ? 34 : 0
+        breadcrumbBar.isHidden = !shouldShow
+        guard shouldShow else { return }
+
+        // 这里**不能**用 `relativeDisplayName`：它会去掉最后一段的扩展名，而文件夹名里的点只是名字的一部分（`v1.0` 砍成 `v1` 就认不出来了）
+        pathLabel.text = path.hasPrefix(root + "/")
+            ? String(path.dropFirst(root.count + 1))
+            : currentDirectory.lastPathComponent
+    }
+
+    /// 进入一个文件夹（退回上级也走它）。
+    private func enterDirectory(_ directory: URL) {
+        guard source == .documents else { return }
+
+        // ⚠️ 符号链接可以指向文档目录外面，进去之后列的就是 App 别处的文件了
+        let resolved = directory.resolvingSymlinksInPath().standardizedFileURL
+        let root = DocumentsWorkspace.folderURL.resolvingSymlinksInPath().standardizedFileURL
+        guard resolved.path == root.path || resolved.path.hasPrefix(root.path + "/") else { return }
+
+        currentDirectory = directory
+        // 搜索词必须清掉：上一个目录里搜的词带到新目录，十有八九一条都不命中，用户看到的就是「这个文件夹是空的」——很像坏了
+        searchBar.text = ""
+        searchBar.resignFirstResponder()
+
+        updateBreadcrumb()
+        reloadFiles()
+
+        // 换了目录就从头看起，停在上一层的滚动位置没有意义
+        if !files.isEmpty {
+            tableView.scrollToRow(at: IndexPath(row: 0, section: 0), at: .top, animated: false)
+        }
+    }
+
+    /// 返回条上那颗「上级」。
+    @objc private func goToParentDirectory() {
+        let root = DocumentsWorkspace.folderURL.standardizedFileURL.path
+        let current = currentDirectory.standardizedFileURL.path
+        guard current != root else { return }
+
+        let parent = currentDirectory.deletingLastPathComponent().standardizedFileURL.path
+        // 正常点不到这一层，防御一下：别退到文档根目录外面去
+        guard parent == root || parent.hasPrefix(root + "/") else { return }
+        enterDirectory(currentDirectory.deletingLastPathComponent())
+    }
+
     private func setupTableView() {
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.dataSource = self
@@ -276,7 +429,7 @@ final class DocumentListViewController: UIViewController {
         view.addSubview(tableView)
 
         NSLayoutConstraint.activate([
-            tableView.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
+            tableView.topAnchor.constraint(equalTo: breadcrumbBar.bottomAnchor),
             tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
@@ -379,6 +532,11 @@ final class DocumentListViewController: UIViewController {
     private var emptyDirectoryMessage: String {
         switch source {
         case .documents:
+            // 子文件夹里的空和根目录的空不是一回事：根目录还能教用户怎么把文件弄进来，子文件夹里只该说「在这儿新建一份」
+            let root = DocumentsWorkspace.folderURL.standardizedFileURL.path
+            if currentDirectory.standardizedFileURL.path != root {
+                return "这个文件夹里还没有文档\n\n点右上角的「+」就在这里新建一份。"
+            }
             // 开了 App 沙盒之后，这个文档目录藏在 App 自己的容器里，两个平台「把文件弄进来」
             // 的办法也就不一样了：
             // - Mac 上 Finder 里不方便直接拖到容器里，教用户走「文件 > 打开…」（⌘O）；
@@ -451,15 +609,22 @@ final class DocumentListViewController: UIViewController {
     private func reloadFiles() {
         switch source {
         case .documents:
-            allFiles = DocumentsWorkspace.documentURLs()
+            // 只列当前目录这一层：子文件夹作为「能进去的一行」一起出来
+            allFiles = DocumentsWorkspace.entries(in: currentDirectory)
         case .recent:
-            allFiles = RecentDocumentsStore.shared.recentURLs()
+            // 「最近」列的是跨目录的记录，永远只有文件。
+            // 走 `entry(for:)` 是为了把修改时间一起读出来（按时间排序要用），那是每条一次 stat —— 记录条数很少，比逐行填 cell 时再 stat 划算得多
+            allFiles = RecentDocumentsStore.shared.recentURLs().map { DocumentsWorkspace.entry(for: $0) }
         }
+
+        // 重扫完了：缓存里那些「修改时间对不上」或「已经不在这一层」的行作废。
+        // 没变的行继续用，切回左栏时不会整片重新闪一遍
+        rowCache.invalidate(against: allFiles)
 
         // 高亮的那份如果已经不在了（被删 / 改名 / 从记录里移除），别让状态一直挂着
         // 一个不存在的路径。注意看的是 `allFiles` 而不是过滤后的 `files`：
         // 只是被搜索藏起来的行，清空搜索后还该亮着
-        if let id = highlightedItemID, !allFiles.contains(where: { $0.path == id }) {
+        if let id = highlightedItemID, !allFiles.contains(where: { $0.url.path == id }) {
             highlightedItemID = nil
         }
 
@@ -471,38 +636,65 @@ final class DocumentListViewController: UIViewController {
         applySortAndFilter()
     }
 
-    /// 按当前排序方式 + 搜索框里的关键词，重算 `files` 并刷新列表
+    /// 按当前排序方式 + 搜索框里的关键词，重算 `files` 并刷新列表。
+    ///
+    /// ### 「文档」页的搜索是递归的
+    /// 进了子文件夹之后只搜这一层，用户得一层层点进去才找得到东西，搜索框基本就废了。
+    /// 所以关键词非空时会把当前目录以下整棵树扫一遍，命中行的标题显示相对路径（`日记/2026-10`），这样同名文件也能分清是哪一个。
+    ///
+    /// 「最近」页还是只过滤它自己那份记录 —— 那些记录本来就是跨目录的，没有「当前目录」可言。
     private func applySortAndFilter() {
         let query = (searchBar.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let matched = query.isEmpty ? allFiles : allFiles.filter { url in
-            // 匹配的是界面上显示的标题（去掉扩展名），忽略大小写；
-            // 带上 diacriticInsensitive，英文名带重音也能搜到
-            DocumentsWorkspace.displayName(for: url)
-                .range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+
+        let matched: [DocumentsWorkspace.Entry]
+        if query.isEmpty {
+            matched = allFiles
+        } else if source == .documents {
+            matched = DocumentsWorkspace.searchDocuments(in: currentDirectory, matching: query)
+        } else {
+            matched = allFiles.filter { entry in
+                // 匹配的是界面上显示的标题（去掉扩展名），忽略大小写；
+                // 带上 diacriticInsensitive，英文名带重音也能搜到
+                entry.name.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
         }
+
         files = sorted(matched)
         updateEmptyState(query: query)
         tableView.reloadData()
     }
 
-    /// 按 `sortOrder` 排一份拷贝
-    private func sorted(_ urls: [URL]) -> [URL] {
+    /// 按 `sortOrder` 排一份拷贝。
+    ///
+    /// ### 文件夹永远排在最前面
+    /// 和 Finder / VS Code 一样：进目录是「往下走」，混在文件中间会让人每次都要在两种东西里挑。
+    /// 分组之后两组各自按当前排序方式排，组内规则仍然听用户的。
+    private func sorted(_ entries: [DocumentsWorkspace.Entry]) -> [DocumentsWorkspace.Entry] {
+        let folders = entries.filter { $0.isDirectory }
+        let documents = entries.filter { !$0.isDirectory }
+        return sortedWithinGroup(folders) + sortedWithinGroup(documents)
+    }
+
+    private func sortedWithinGroup(_ entries: [DocumentsWorkspace.Entry]) -> [DocumentsWorkspace.Entry] {
+        // 空组（「最近」页的文件夹组永远是空的）直接返回，省掉后面那几趟遍历
+        guard entries.count > 1 else { return entries }
+
         switch sortOrder {
         case .recentlyOpened:
             // `allFiles` 本来就是按「最近打开」倒序的，过滤只保持原顺序，不用再排
-            return urls
+            return entries
         case .titleAscending:
-            return urls.sorted { compareNames($0, $1) == .orderedAscending }
+            return entries.sorted { compareNames($0, $1) == .orderedAscending }
         case .titleDescending:
-            return urls.sorted { compareNames($0, $1) == .orderedDescending }
+            return entries.sorted { compareNames($0, $1) == .orderedDescending }
         case .modifiedNewestFirst:
-            return sortedByDate(urls, newestFirst: true, kind: .modified)
+            return sortedByDate(entries, newestFirst: true, kind: .modified)
         case .modifiedOldestFirst:
-            return sortedByDate(urls, newestFirst: false, kind: .modified)
+            return sortedByDate(entries, newestFirst: false, kind: .modified)
         case .createdNewestFirst:
-            return sortedByDate(urls, newestFirst: true, kind: .created)
+            return sortedByDate(entries, newestFirst: true, kind: .created)
         case .createdOldestFirst:
-            return sortedByDate(urls, newestFirst: false, kind: .created)
+            return sortedByDate(entries, newestFirst: false, kind: .created)
         }
     }
 
@@ -512,25 +704,23 @@ final class DocumentListViewController: UIViewController {
     }
 
     /// 按时间排；时间一样时退回按标题升序，保证顺序稳定、可预期
-    private func sortedByDate(_ urls: [URL],
+    private func sortedByDate(_ entries: [DocumentsWorkspace.Entry],
                               newestFirst: Bool,
-                              kind: DateKind) -> [URL] {
-        // 每个文件只读一次属性 —— 放进排序闭包里每比较一次就读一次太浪费。
-        // 容器外的文件要先拿到访问权，否则日期一律读不到、会被排到最后
-        let dates = Dictionary(uniqueKeysWithValues: urls.map { url -> (String, Date) in
-            let readableURL = ExternalDocumentAccess.shared.readableURL(for: url) ?? url
+                              kind: DateKind) -> [DocumentsWorkspace.Entry] {
+        // 时间直接用扫描目录时顺手读到的那份（`Entry.modifiedDate` / `createdDate`），不再每条都去 stat、更不用为每条申请一次外部文件访问权 —— 那两项在长目录上很贵
+        let dates = Dictionary(uniqueKeysWithValues: entries.map { entry -> (String, Date) in
             let date: Date?
             switch kind {
             case .modified:
-                date = DocumentsWorkspace.modificationDate(of: readableURL)
+                date = entry.modifiedDate
             case .created:
-                date = DocumentsWorkspace.creationDate(of: readableURL)
+                date = entry.createdDate
             }
-            return (url.path, date ?? .distantPast)
+            return (entry.url.path, date ?? .distantPast)
         })
-        return urls.sorted { lhs, rhs in
-            let lhsDate = dates[lhs.path] ?? .distantPast
-            let rhsDate = dates[rhs.path] ?? .distantPast
+        return entries.sorted { lhs, rhs in
+            let lhsDate = dates[lhs.url.path] ?? .distantPast
+            let rhsDate = dates[rhs.url.path] ?? .distantPast
             if lhsDate != rhsDate {
                 return newestFirst ? lhsDate > rhsDate : lhsDate < rhsDate
             }
@@ -539,9 +729,9 @@ final class DocumentListViewController: UIViewController {
     }
 
     /// 标题比较用 `localizedStandardCompare`：中文 / 数字排法才符合直觉
-    private func compareNames(_ lhs: URL, _ rhs: URL) -> ComparisonResult {
-        DocumentsWorkspace.displayName(for: lhs)
-            .localizedStandardCompare(DocumentsWorkspace.displayName(for: rhs))
+    private func compareNames(_ lhs: DocumentsWorkspace.Entry,
+                              _ rhs: DocumentsWorkspace.Entry) -> ComparisonResult {
+        lhs.name.localizedStandardCompare(rhs.name)
     }
 
     /// 列表空了时该显示哪段说明：本来就没有文件，还是搜索没命中
@@ -550,7 +740,9 @@ final class DocumentListViewController: UIViewController {
         tableView.isHidden = isEmpty
         emptyLabel.isHidden = !isEmpty
         guard isEmpty else { return }
-        emptyLabel.text = allFiles.isEmpty
+        // 有关键词就是「没搜到」，没有关键词才是「这一层本来就是空的」。
+        // 不能拿 `allFiles.isEmpty` 判：搜索是递归的，当前层空、子目录里有东西时它会答错
+        emptyLabel.text = query.isEmpty
             ? emptyDirectoryMessage
             : "没有找到「\(query)」\n\n换个关键词试试。"
     }
@@ -655,8 +847,10 @@ final class DocumentListViewController: UIViewController {
             open(pending, mode: .newTab)
             return
         }
-        guard DeviceHelper.currentLayout == .iPadOrMac, let first = files.first else { return }
-        open(first, mode: .preview)
+        // ⚠️ 第一行可能是文件夹（目录永远排前面），那不是能打开的东西 —— 不筛掉的话，冷启动第一件事就是对着文件夹弹一个「打不开文件」
+        guard DeviceHelper.currentLayout == .iPadOrMac,
+              let first = files.first(where: { !$0.isDirectory }) else { return }
+        open(first.url, mode: .preview)
     }
 
     /// 把一份磁盘文件交给右侧编辑。
@@ -790,9 +984,21 @@ final class DocumentListViewController: UIViewController {
     /// 这会儿它还顶着「未命名」这个占位名；等用户在右栏第一次按 ⌘S，
     /// 编辑页会弹框请他起个正式名字（见 `MarkdownDocumentViewController.saveDocument`）。
     @objc private func createNewDocument() {
+        createDocument(in: currentDirectory)
+    }
+
+    /// 在指定文件夹里新建一份并立刻打开（右上角的「+」和文件夹右键菜单都走它）。
+    ///
+    /// - Parameter directory: 建到哪个文件夹。用户在子文件夹里按「+」时就该建在眼前这一层，
+    ///   而不是又跑回根目录去 —— 那会让人以为「新建没成功」
+    private func createDocument(in directory: URL) {
         guard source == .documents else { return }
         do {
-            let url = try DocumentsWorkspace.createEmptyDocument()
+            let url = try DocumentsWorkspace.createEmptyDocument(in: directory)
+            // 在别的文件夹里建的，先切过去，否则用户看不到刚建好的那一份
+            if directory.standardizedFileURL.path != currentDirectory.standardizedFileURL.path {
+                enterDirectory(directory)
+            }
             NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
             open(url, mode: .newTab)
         } catch {
@@ -802,22 +1008,33 @@ final class DocumentListViewController: UIViewController {
 
     @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
         guard gesture.state == .ended,
-              let url = fileURL(at: gesture) else { return }
+              let item = entry(at: gesture) else { return }
+        // 文件夹没有「预览 / 正式」之分，点一下就是进去
+        if item.isDirectory {
+            enterDirectory(item.url)
+            return
+        }
         // iPhone 上没有「预览槽位」这个概念（它是导航栈），开新 Tab 就等于 push 一页。
         // 这个判断跟库里示例的写法一致
         let mode: PPContentOpenMode = DeviceHelper.currentLayout == .iPadOrMac ? .preview : .newTab
-        open(url, mode: mode)
+        open(item.url, mode: mode)
     }
 
     @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
         guard gesture.state == .ended,
-              // 双击「正式打开」只在有 Tab 的环境里有意义；iPhone 上忽略
-              DeviceHelper.currentLayout == .iPadOrMac,
-              let url = fileURL(at: gesture) else { return }
-        open(url, mode: .newTab)
+              let item = entry(at: gesture) else { return }
+        // ⚠️ 文件夹在这一下里也必须「进入」而不是「打开」：
+        // 往下走 `DocumentOpening.open` 会去读一个目录、读失败，然后弹一句「打不开文件」，很吓人
+        if item.isDirectory {
+            enterDirectory(item.url)
+            return
+        }
+        // 双击「正式打开」只在有 Tab 的环境里有意义；iPhone 上忽略
+        guard DeviceHelper.currentLayout == .iPadOrMac else { return }
+        open(item.url, mode: .newTab)
     }
 
-    private func fileURL(at gesture: UITapGestureRecognizer) -> URL? {
+    private func entry(at gesture: UITapGestureRecognizer) -> DocumentsWorkspace.Entry? {
         guard let indexPath = tableView.indexPathForRow(at: gesture.location(in: tableView)),
               files.indices.contains(indexPath.row) else { return nil }
         return files[indexPath.row]
@@ -831,8 +1048,13 @@ final class DocumentListViewController: UIViewController {
     func contextMenu(for url: URL) -> UIMenu {
         switch source {
         case .documents:
+            let entry = DocumentsWorkspace.entry(for: url)
+            // 文件夹没有「导出」可言，能做的只有新建 / 改名 / 删除
+            if entry.isDirectory {
+                return folderMenu(for: entry)
+            }
             // 菜单顶上的小标题用文件名：右键的时候正好再确认一眼点的是哪一份
-            return UIMenu(title: DocumentsWorkspace.displayName(for: url),
+            return UIMenu(title: entry.name,
                           children: [
                               renameAction(for: url),
                               // 「导出」是个子菜单（图片 / HTML / PDF），整块由 `DocumentExporter` 生成 ——编辑页那个菜单用的是同一个方法，所以两处的选项永远一致
@@ -843,6 +1065,20 @@ final class DocumentListViewController: UIViewController {
             // 「最近」里只动记录，不动文件
             return removeMenu(for: url)
         }
+    }
+
+    /// 文件夹的右键菜单。
+    private func folderMenu(for entry: DocumentsWorkspace.Entry) -> UIMenu {
+        let newDocument = UIAction(title: "在此新建文档",
+                                   image: UIImage(systemName: "square.and.pencil")) { [weak self] _ in
+            self?.createDocument(in: entry.url)
+        }
+        return UIMenu(title: entry.name,
+                      children: [
+                          newDocument,
+                          renameAction(for: entry.url),
+                          deleteAction(for: entry.url)
+                      ])
     }
 
     // MARK: - 文档页：重命名 / 导出 / 删除
@@ -864,21 +1100,24 @@ final class DocumentListViewController: UIViewController {
         }
     }
 
-    /// 弹「给文档改个名字」的输入框。
+    /// 弹「改个名字」的输入框。文件和文件夹共用这一个。
     ///
     /// ### 为什么在 App 里改，而不是让用户去 Finder / 「文件」里改
     /// 在 App 里改完名，那些按路径存的记录能顺手一起收拾（「上次读到哪儿」「最近打开」，还有正开着这份文档的编辑页 —— 见 `performRename`）。在 App 外面改，App 这边只会看到「那份文件不见了、又多出一份新的」，两边的账就对不上了。
     ///
     /// - Parameter suggested: 预填进输入框的名字。用户因为重名被打回来重弹时填他上一次输的，改一个字就能接着来
     private func promptForRename(_ url: URL, suggested: String? = nil) {
-        let defaultName = suggested ?? DocumentsWorkspace.displayName(for: url)
+        let isDirectory = DocumentsWorkspace.isDirectory(url)
+        // ⚠️ 文件夹名不能去掉「扩展名」：`v2.0` 是名字，不是后缀。按文件那套处理会把预填值改成 `v2`
+        let currentName = isDirectory ? url.lastPathComponent : DocumentsWorkspace.displayName(for: url)
+        let defaultName = suggested ?? currentName
 
         let alert = UIAlertController(title: "重命名",
-                                      message: "给「\(DocumentsWorkspace.displayName(for: url))」换个名字，内容不会动。",
+                                      message: "给「\(currentName)」换个名字，内容不会动。",
                                       preferredStyle: .alert)
         alert.addTextField { field in
             field.text = defaultName
-            field.placeholder = "文件名"
+            field.placeholder = isDirectory ? "文件夹名" : "文件名"
             field.clearButtonMode = .whileEditing
             field.returnKeyType = .done
         }
@@ -916,6 +1155,18 @@ final class DocumentListViewController: UIViewController {
     /// - Throws: 名字是空的（`WorkspaceError.emptyName`）、撞上重名（`WorkspaceError.nameTaken`）、或者文件系统本身报错
     @discardableResult
     func rename(_ url: URL, toBaseName rawName: String) throws -> URL {
+        // 文件夹和文档走两条路：文件夹不改扩展名，而且一改就是整棵子树换前缀
+        if DocumentsWorkspace.isDirectory(url) {
+            let newURL = try DocumentsWorkspace.renameDirectory(url, toBaseName: rawName)
+            // 两个按路径记账的地方都要整片搬走。不搬的话，「最近」里这些记录下次刷新会被当成「文件已经不存在」清掉，「读到哪儿」也全部作废
+            DocumentScrollMemory.shared.migrate(fromPrefix: url.path, toPrefix: newURL.path)
+            RecentDocumentsStore.shared.migrate(fromPrefix: url.path, toPrefix: newURL.path)
+            // 用户正停在被改名的文件夹里（或它下面）时，当前目录跟着换 —— 否则列表会去扫一个已经不存在的路径，看起来就像「里面的东西全没了」
+            relocateCurrentDirectory(from: url, to: newURL)
+            NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
+            return newURL
+        }
+
         let newURL = try DocumentsWorkspace.rename(url, toBaseName: rawName)
 
         // 「这份文档上次读到哪儿」是按路径存的，旧路径那条没人用了。
@@ -927,6 +1178,21 @@ final class DocumentListViewController: UIViewController {
         // ⚠️ 正开着这份文档的编辑页**不用**在这儿通知：`DocumentsWorkspace.rename` 自己会发 `didRenameNotification`（带上新旧路径），它靠那条把路径换过去
         NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
         return newURL
+    }
+
+    /// 当前目录正好在被改名的文件夹里（或就是它本人）时，把 `currentDirectory` 换到新位置。
+    private func relocateCurrentDirectory(from oldURL: URL, to newURL: URL) {
+        guard source == .documents else { return }
+        let oldPrefix = oldURL.standardizedFileURL.path
+        let current = currentDirectory.standardizedFileURL.path
+        guard current == oldPrefix || current.hasPrefix(oldPrefix + "/") else { return }
+
+        // 只替换前缀，剩下那截（可能还有好几层）原样接上
+        let suffix = String(current.dropFirst(oldPrefix.count))
+        currentDirectory = URL(fileURLWithPath: newURL.standardizedFileURL.path + suffix,
+                               isDirectory: true)
+        updateBreadcrumb()
+        reloadFiles()
     }
 
     /// 名字用不了（空的 / 重名）时的提示，带一个「重新起名」的入口。
@@ -969,7 +1235,11 @@ final class DocumentListViewController: UIViewController {
     ///
     /// - Parameter completion: 真删掉了回 true。滑动手势要靠它决定「这一行收不收回原位」。
     private func confirmDelete(_ url: URL, completion: ((Bool) -> Void)? = nil) {
-        let alert = UIAlertController(title: "删除「\(DocumentsWorkspace.displayName(for: url))」？",
+        // 文件夹要显示全名（`v2.0` 去掉尾巴就成了另一个名字）
+        let name = DocumentsWorkspace.isDirectory(url)
+            ? url.lastPathComponent
+            : DocumentsWorkspace.displayName(for: url)
+        let alert = UIAlertController(title: "删除「\(name)」？",
                                       message: deletionWarning(for: url),
                                       preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in completion?(false) })
@@ -1001,8 +1271,23 @@ final class DocumentListViewController: UIViewController {
         completion?(didDelete)
     }
 
-    /// 确认框里那两句话：一句说「文件去哪儿了」，一句说「删完右侧那个标签页怎么办」
+    /// 确认框里那两句 / 三句话：一句说「东西去哪儿了」，一句说「删完右侧那个标签页怎么办」
     private func deletionWarning(for url: URL) -> String {
+        // 删文件夹必须把「里面的文档也会一起没」说在最前面，这是最容易后悔的一种删除
+        if DocumentsWorkspace.isDirectory(url) {
+            let summary = DocumentsWorkspace.summary(ofDirectory: url)
+            var inside = "\(summary.documents) 份文档"
+            if summary.folders > 0 { inside += "和 \(summary.folders) 个子文件夹" }
+            var folderLines = ["整个文件夹「\(url.lastPathComponent)」都会删掉，里面的 \(inside) 一起没。"
+                               + (DocumentsWorkspace.deletionGoesToTrash
+                                  ? "它先进系统废纸篓，反悔了可以去那儿「放回原处」。"
+                                  : "删掉就找不回来了。")]
+            if DeviceHelper.currentLayout == .iPadOrMac {
+                folderLines.append("右侧标签页如果正开着里面的文档，删完请点标签上的 × 关掉。")
+            }
+            return folderLines.joined(separator: "\n\n")
+        }
+
         var lines = ["\(url.lastPathComponent) 会从文档目录里移走。"
                      + (DocumentsWorkspace.deletionGoesToTrash
                         ? "它先进系统废纸篓，反悔了可以去那儿「放回原处」。"
@@ -1022,6 +1307,8 @@ final class DocumentListViewController: UIViewController {
     /// - Returns: 删成功回 true；失败会弹一句提示，让用户知道「没删掉」而不是以为删了
     @discardableResult
     private func performDelete(_ url: URL) -> Bool {
+        let isDirectory = DocumentsWorkspace.isDirectory(url)
+
         do {
             // 走 deleteFile 而不是直接调 DocumentsWorkspace：测试要能换成「直接删」
             try deleteFile(url)
@@ -1031,13 +1318,32 @@ final class DocumentListViewController: UIViewController {
             return false
         }
 
-        // 顺手忘掉「这份文档上次读到哪儿」：文件名以后可能被重新用上，
-        // 那时不该莫名其妙跳到文档中间
-        DocumentScrollMemory.shared.forget(key: url.path)
+        if isDirectory {
+            // 文件夹里所有文档一起没了：两本按路径记的账都要整片清掉
+            DocumentScrollMemory.shared.forgetAll(underPrefix: url.path)
+            RecentDocumentsStore.shared.removeAll(underPrefix: url.path)
+            // 用户正停在这个文件夹里（或它下面）时，退回文档根目录
+            resetCurrentDirectoryIfDeleted(url)
+        } else {
+            // 顺手忘掉「这份文档上次读到哪儿」：文件名以后可能被重新用上，那时不该莫名其妙跳到文档中间
+            DocumentScrollMemory.shared.forget(key: url.path)
+        }
 
         // 说一声，列表自己会重新扫一遍目录（照旧走通知这一条路，别在这儿直接刷）
         NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
         return true
+    }
+
+    /// 当前目录正好在被删掉的文件夹里（或就是它本人）时，退回文档根目录。
+    private func resetCurrentDirectoryIfDeleted(_ url: URL) {
+        guard source == .documents else { return }
+        let prefix = url.standardizedFileURL.path
+        let current = currentDirectory.standardizedFileURL.path
+        guard current == prefix || current.hasPrefix(prefix + "/") else { return }
+
+        currentDirectory = DocumentsWorkspace.folderURL
+        updateBreadcrumb()
+        reloadFiles()
     }
 
     // MARK: - 最近页：移除 / 清空
@@ -1145,19 +1451,41 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
         // 上面注册的就是 DocumentListCell，这里一定转得成；真转不成说明那行注册被改坏了
         guard let documentCell = cell as? DocumentListCell else { return cell }
 
-        // 第一行文件名**去掉扩展名**（这里所有文件都是 md，后缀只是噪音），
-        // 第二行是文档首行的浅灰预览，第三行是修改日期
-        let url = files[indexPath.row]
-        let readableURL = ExternalDocumentAccess.shared.readableURL(for: url)
-        documentCell.configure(name: DocumentsWorkspace.displayName(for: readableURL ?? url),
-                               // 没有访问权时要说清楚，别让那一行显示成「空文档」——
-                               // 用户会以为文件里真的没内容
-                               preview: readableURL.map { DocumentsWorkspace.previewText(of: $0) }
-                                   ?? "需要重新授权",
-                               date: readableURL.flatMap { DocumentsWorkspace.modificationDate(of: $0) })
-        // cell 会被复用，所以每次都要按当前高亮状态重新上色
-        documentCell.setHighlighted(url.path == highlightedItemID)
+        let entry = files[indexPath.row]
+        if let info = rowCache.cached(for: entry.url) {
+            // 已经读好的：纯内存操作，这一格不再碰盘
+            documentCell.configure(name: info.name,
+                                   preview: info.preview,
+                                   date: info.date,
+                                   isDirectory: entry.isDirectory)
+        } else {
+            // 还没读过：先把能立刻给出去的填上（名字 + 扫描时顺手读到的日期），副标题留空，交给后台读完再回填。⚠️ 这里千万别同步读盘 —— 一滚列表就会卡
+            documentCell.configure(name: entry.name,
+                                   preview: nil,
+                                   date: entry.modifiedDate,
+                                   isDirectory: entry.isDirectory)
+            requestRowInfo(for: entry)
+        }
+        // cell 会被复用，所以每次都要按当前高亮状态重新上色。文件夹不是「当前编辑的那一份」，永远不点亮
+        documentCell.setHighlighted(!entry.isDirectory && entry.url.path == highlightedItemID)
         return documentCell
+    }
+
+    /// 让后台把这一行的副标题读出来，读完回填到对应单元格上。
+    ///
+    /// 读完时列表可能已经换了内容（重扫、搜索、切目录、排序），所以**按路径重新找行**，而不是拿老的下标去填 —— 下标早就指向别人了。找不到（被过滤掉、行不在屏幕上）就什么都不做，值已经进了缓存，下次滚回来直接用。
+    private func requestRowInfo(for entry: DocumentsWorkspace.Entry) {
+        rowCache.request(for: entry) { [weak self] info in
+            guard let self,
+                  let row = self.files.firstIndex(where: { $0.url.path == entry.url.path }),
+                  let cell = self.tableView.cellForRow(at: IndexPath(row: row, section: 0)) as? DocumentListCell
+            else { return }
+            cell.configure(name: info.name,
+                           preview: info.preview,
+                           date: info.date,
+                           isDirectory: entry.isDirectory)
+            cell.setHighlighted(!entry.isDirectory && entry.url.path == self.highlightedItemID)
+        }
     }
 
     /// ⚠️ 这里**故意不打开文档**。
@@ -1189,7 +1517,7 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
                    contextMenuConfigurationForRowAt indexPath: IndexPath,
                    point: CGPoint) -> UIContextMenuConfiguration? {
         guard files.indices.contains(indexPath.row) else { return nil }
-        let url = files[indexPath.row]
+        let url = files[indexPath.row].url
         // previewProvider 传 nil：不要那个「按下去浮起一张预览图」的效果，
         // 右键列表就想要一个干脆的菜单
         return UIContextMenuConfiguration(identifier: url.path as NSString,
@@ -1202,7 +1530,7 @@ extension DocumentListViewController: UITableViewDataSource, UITableViewDelegate
     func tableView(_ tableView: UITableView,
                    trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
         guard files.indices.contains(indexPath.row) else { return nil }
-        let url = files[indexPath.row]
+        let url = files[indexPath.row].url
 
         let action: UIContextualAction
         switch source {

@@ -350,6 +350,18 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 它们滚动的是**同一个 textView**，目标只能有一个。共用一个序号意味着「点了标题」会自动作废上一次「查找下一个」的滚动，反之亦然 —— 正是想要的效果。
     var jumpToken = 0
 
+    /// 最近一次「程序化滚动」发生的时刻（`CACurrentMediaTime()`）。
+    ///
+    /// 程序化滚动 = 目录跳转 / 查找下一个 / 脚注跳转 / 恢复阅读位置，它们都靠 `jumpStep` 一轮一轮滚。
+    /// 每滚一轮就刷新这个时刻（见 `MarkdownTextView+Outline.swift` 里 `jumpStep` 的开头）。
+    ///
+    /// ### 谁读它
+    /// 打字机居中（`MarkdownTextView+Typewriter.swift` 的 `centerCaretIfNeeded`）：它和程序化滚动改的是**同一个 `contentOffset`**，
+    /// 两条路同时跑会互相拉扯、画面来回跳。所以居中前先看看这个时刻，刚滚过就避让一会儿（见 `typewriterProgrammaticScrollCooldown`）。
+    ///
+    /// 读写都在别的文件里，所以不能标 `private`。初值用 `-infinity` 是为了「从没滚过」时冷却判断一定通过。
+    var lastProgrammaticScrollTime: CFTimeInterval = -.infinity
+
     // MARK: 初始化
 
     init(markdown: String = "") {

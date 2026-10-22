@@ -63,6 +63,11 @@ extension MarkdownDocumentViewController {
                                                selector: #selector(documentDidRename(_:)),
                                                name: DocumentsWorkspace.didRenameNotification,
                                                object: nil)
+        // 整个文件夹被改名：里面所有文档的路径都变了，包括我这份
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(documentDirectoryDidRename(_:)),
+                                               name: DocumentsWorkspace.didRenameDirectoryNotification,
+                                               object: nil)
     }
 
     /// 左栏右键「重命名」改的是磁盘上的路径，这边把路径记在 `openedFileURL` 里，当「⌘S 写回哪儿」用。
@@ -89,6 +94,41 @@ extension MarkdownDocumentViewController {
         updateWindowTitle()
         refreshStatus()
         flashStatus("已改名为 \(DocumentsWorkspace.displayName(for: to))")
+    }
+
+    /// 整个文件夹被改名了（左栏对文件夹点「重命名」）。
+    ///
+    /// ### 和单个文件改名的区别就在判断方式
+    /// 文件是一对一，用等号比就行；文件夹换的是**路径前缀**，得看「我这份是不是在旧目录底下」。
+    ///
+    /// ### 不跟着换会出什么事
+    /// 用户回到正文按一次 ⌘S，内容会写回旧路径 —— 那个目录已经不存在了，轻则保存失败，重则凭空造出一份重复文件。所以路径、图片基准目录、标题都得跟着搬。
+    @objc func documentDirectoryDidRename(_ notification: Notification) {
+        guard let from = notification.userInfo?[DocumentsWorkspace.renameFromURLKey] as? URL,
+              let to = notification.userInfo?[DocumentsWorkspace.renameToURLKey] as? URL,
+              let opened = openedFileURL else { return }
+
+        // 统一成真实路径再比：`openedFileURL` 存的是规范化过的路径，而改名通知里带的是磁盘上的原始 URL，`/var` 和 `/private/var` 这种同义写法得抹平
+        let oldPrefix = from.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let openedPath = opened.resolvingSymlinksInPath().standardizedFileURL.path
+        guard openedPath.hasPrefix(oldPrefix) else { return }
+
+        let suffix = String(openedPath.dropFirst(oldPrefix.count))
+        let moved = URL(fileURLWithPath: to.resolvingSymlinksInPath().standardizedFileURL.path + "/" + suffix)
+        let oldKey = openedPath
+
+        openedFileURL = moved
+        // 「读到哪儿」的钥匙也是完整路径，一起搬过去。列表那边会整片迁一遍，这里只补自己这一份 —— 重复迁是幂等的，找不到旧 key 就什么都不做
+        if let offset = scrollMemory.sourceOffset(for: oldKey) {
+            scrollMemory.remember(sourceOffset: offset, for: moved.path)
+            scrollMemory.forget(key: oldKey)
+        }
+
+        // 界面还没建好（Tab 先建、后显示）时只改路径就够了，剩下的等 viewDidLoad 走正常流程
+        guard isViewLoaded else { return }
+        editor.imageBaseURL = moved.deletingLastPathComponent()
+        updateWindowTitle()
+        refreshStatus()
     }
 
     // MARK: - PPContentDisplaying（宿主 → 内容页）

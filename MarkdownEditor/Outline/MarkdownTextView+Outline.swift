@@ -178,6 +178,9 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
                           topPadding: CGFloat) {
         guard token == jumpToken, round <= Self.maxJumpRounds else { return }
         guard markedTextRange == nil else { return }
+        // 每一轮都刷新「最近一次程序化滚动的时刻」：打字机居中据此避让，
+        // 免得它和这次跳转抢同一个 contentOffset（跳转每 0.06s 一轮，会一直把打字机压到跳转结束）。
+        lastProgrammaticScrollTime = CACurrentMediaTime()
         guard let viewport = renderedRangeInViewport() else {
             // 量不到视口（还没排版完）—— 退回系统的最小滚动，至少保证光标可见
             scrollRangeToVisible(selectedRange)

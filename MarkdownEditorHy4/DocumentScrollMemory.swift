@@ -88,6 +88,41 @@ final class DocumentScrollMemory {
         save()
     }
 
+    /// 文件夹改名时，把「读到哪儿」的钥匙整片换掉。
+    ///
+    /// key 是完整路径，文件夹一改名，里面所有文档的 key 都成了旧路径。不搬的话下次打开这些文档都会从开头开始 —— 记录其实还在，只是没人再拿旧路径来查它。
+    ///
+    /// - Parameters:
+    ///   - fromPrefix: 旧目录的完整路径（结尾不带 `/`）
+    ///   - toPrefix: 新目录的完整路径
+    func migrate(fromPrefix: String, toPrefix: String) {
+        let head = fromPrefix + "/"
+        var migrated = entries
+        var didChange = false
+        for (key, entry) in entries where key.hasPrefix(head) {
+            let suffix = String(key.dropFirst(head.count))
+            migrated.removeValue(forKey: key)
+            migrated[toPrefix + "/" + suffix] = entry
+            didChange = true
+        }
+        guard didChange else { return }
+        entries = migrated
+        save()
+    }
+
+    /// 文件夹被删掉时，把里面所有文档的记录一起清掉（文件都没了，留着只是白占位置）。
+    ///
+    /// - Returns: 清掉了几条
+    @discardableResult
+    func forgetAll(underPrefix prefix: String) -> Int {
+        let head = prefix + "/"
+        let before = entries.count
+        entries = entries.filter { !$0.key.hasPrefix(head) }
+        guard entries.count != before else { return 0 }
+        save()
+        return before - entries.count
+    }
+
     /// 清空全部记录
     func forgetAll() {
         guard !entries.isEmpty else { return }

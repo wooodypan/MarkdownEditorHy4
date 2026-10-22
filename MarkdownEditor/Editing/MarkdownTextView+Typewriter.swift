@@ -68,10 +68,17 @@ extension MarkdownTextView {
     ///
     /// ### 有选区时不动
     /// 拖选时系统自己会把选区末端滚进视野，我们再插一脚只会两边打架；用户正在选东西，画面也别乱跳。
+    ///
+    /// ### 程序化滚动刚发生时也不动
+    /// 目录跳转 / 查找下一个 / 脚注跳转 / 恢复阅读位置都在改同一个 `contentOffset`，
+    /// 它们通过 `jumpStep` 一轮一轮滚（每轮刷新 `lastProgrammaticScrollTime`）。
+    /// 这时打字机再插一脚就会和跳转抢位置、画面来回跳，所以避让一个冷却窗口（见 `typewriterProgrammaticScrollCooldown`）。
     private func centerCaretIfNeeded() {
         guard isTypewriterMode, !isApplyingModelChange, markedTextRange == nil else { return }
         guard bounds.height > 0, window != nil else { return }
         guard selectedRange.length == 0 else { return }
+        // 刚被程序化滚动动过（跳转还在飞、或刚停下没多久）→ 让它先收敛，别抢
+        guard CACurrentMediaTime() - lastProgrammaticScrollTime > Self.typewriterProgrammaticScrollCooldown else { return }
 
         let middle = visibleAreaCenterY()
         // ### 为什么要滚一轮、再量一轮（这步最关键）
@@ -109,16 +116,39 @@ extension MarkdownTextView {
     /// 迭代几次就收手：一般两轮就收敛，第三轮是给「图片 / 表格这种一屏放不下几行」的极端情况兜底
     private static let typewriterCenterMaxRounds = 3
 
+    /// 程序化滚动（目录 / 查找 / 脚注跳转、恢复阅读位置）停下之后，打字机还要再避让这么久才恢复居中。
+    ///
+    /// ### 为什么是这个值
+    /// 跳转靠 `jumpStep` 一轮一轮滚，每轮间隔 `jumpStepDelay`（0.06s），每轮都会刷新 `lastProgrammaticScrollTime`。
+    /// 只要还在滚，这个时间差就一直接近 0，打字机全程被压住；跳转收敛后不再刷新，时间差才开始累积。
+    /// 取一个略大于轮间隔的值：跳转一停就尽快把居中还给打字机，又不会因为两轮之间的空隙误判成「已经停了」。
+    private static let typewriterProgrammaticScrollCooldown: CFTimeInterval = 0.12
+
     /// 屏幕上「真正看得见的那一块」的纵向中点。
     ///
-    /// ### 为什么不能直接用 `bounds.height / 2`
-    /// iPhone / iPad 上键盘弹出来会盖住下半屏。这时候照整屏算中点，光标会被「居中」到键盘后面 —— 用户打字时眼前什么都没有。
-    /// 有键盘就按键盘上沿算，没键盘（Catalyst、外接键盘）时 `keyboardLayoutGuide` 贴在底边，结果和整屏一致。
+    /// ### 为什么不能直接写 bounds.height / 2
+    /// 现在的键盘避让是把编辑器顶短（`keyboardFrameChanged` 改 `bottomConstraint`），这时 bounds.height 就是可见高度，直接写没问题。
+    /// 但只要哪天换成「编辑器不动、键盘盖在上面」，bounds.height 就包含了被盖住的那段，光标会被送到键盘背后。
+    /// 所以这里两种布局都算得对，不依赖外面怎么避让。
+    ///
+    /// ### 为什么只读 minY
+    /// layoutFrame 在滚动视图里是内容坐标（实测 896.33 = 滚动偏移 274.33 + 视口高度 622），minY 才是键盘上沿，maxY 是屏幕底边，读它拿不到任何东西。
+    ///
+    /// ### 为什么要减 bounds.origin.y
+    /// 内容坐标的原点在文档开头，减掉滚动偏移才是「离可视区顶部多远」。
     private func visibleAreaCenterY() -> CGFloat {
-        let keyboardTop = keyboardLayoutGuide.layoutFrame.minY
-        let visibleHeight = keyboardTop > 1 ? min(bounds.height, keyboardTop) : bounds.height
+        let guide = keyboardLayoutGuide.layoutFrame
+
+        // 键盘收起时 guide 缩成贴底边的一条，高度正好等于底部安全区，这时读它会把中心点抬高十几点，不如直接用整个视口。
+        guard guide.height > safeAreaInsets.bottom + 0.5 else { return bounds.height / 2 }
+
+        let keyboardTop = guide.minY - bounds.origin.y
+        // 只有落在视口里面才有参考价值：等于视口高度说明键盘正好在编辑器下方（编辑器已经被顶短的正常情况），
+        // 算成负数或超出视口说明坐标系和预期不一样，这两种都退回整个视口，宁可偏一点也不要把光标送到看不见的地方。
+        let visibleHeight = (keyboardTop > 1 && keyboardTop < bounds.height) ? keyboardTop : bounds.height
         return visibleHeight / 2
     }
+
 
     /// 当前光标那个位置的矩形（拿不到位置就返回 nil）
     private func caretRectAtCaret() -> CGRect? {

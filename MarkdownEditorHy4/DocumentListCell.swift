@@ -31,6 +31,9 @@ final class DocumentListCell: UITableViewCell {
     /// 不这么做的话那一行会是一片空白，看着像布局坏了 —— 空白和「空文档」得能分得出来。
     static let emptyPreviewText = "空文档"
 
+    /// 空文件夹的副标题。理由同上：不能让那一行空着
+    static let emptyFolderText = "空文件夹"
+
     /// 选中行的灰底，模仿 VS Code 资源管理器：浅色下中性灰，深色下比背景亮一档。
     /// 和 `MultiTabController` 示例里的 `pp_selectedRowBackground` 取同一组数值。
     private static let highlightedBackgroundColor = UIColor { traits in
@@ -66,12 +69,25 @@ final class DocumentListCell: UITableViewCell {
     /// 把一行的内容填进去。
     ///
     /// - Parameters:
-    ///   - name: 文件名（已经去掉扩展名）
-    ///   - preview: 预览文字。传空串会显示「空文档」
+    ///   - name: 文件名（已经去掉扩展名），或者文件夹名（原样）
+    ///   - preview: 副标题。文件传首行预览，文件夹传「N 份文档」这类摘要。传空串会显示占位文字；
+    ///     传 nil 表示**还没读到**（正在后台读），先占一行空白
     ///   - date: 修改日期。取不到时传 nil，那一行日期会整行收掉
-    func configure(name: String, preview: String, date: Date?) {
+    ///   - isDirectory: 这一行是不是文件夹。它决定图标、有没有右侧箭头，以及空白时那句占位话
+    func configure(name: String, preview: String?, date: Date?, isDirectory: Bool = false) {
         nameLabel.text = name
-        previewLabel.text = preview.isEmpty ? Self.emptyPreviewText : preview
+        if let preview {
+            previewLabel.text = preview.isEmpty
+                ? (isDirectory ? Self.emptyFolderText : Self.emptyPreviewText)
+                : preview
+        } else {
+            // 还没读到：留一个空格把这一行占住。**不能**显示「空文档」—— 那是「读完了、里面确实没字」，跟「还没读」是两件事，混了会让人以为文件是空的
+            previewLabel.text = " "
+        }
+
+        iconView.image = UIImage(systemName: isDirectory ? "folder" : "doc.text")
+        // 文件夹给个箭头，暗示「点一下能进去」。⚠️ 文件必须显式清掉：cell 是复用的，上一行要是个文件夹，这颗箭头会一直挂在这一行上
+        accessoryType = isDirectory ? .disclosureIndicator : .none
 
         if let date {
             dateLabel.text = Self.dateFormatter.string(from: date)

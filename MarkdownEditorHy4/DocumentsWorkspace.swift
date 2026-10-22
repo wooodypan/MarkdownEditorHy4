@@ -61,6 +61,196 @@ enum DocumentsWorkspace {
             }
     }
 
+    // MARK: - 列表里的一行：文档还是文件夹
+
+    /// 左栏列表的一行。
+    ///
+    /// ### 为什么不直接用 `URL`
+    /// 「这是文件夹还是文档」要现查磁盘，而排序、搜索、填 cell 时每条路径都要问好几次；名字也不一样 —— 文件要去掉 `.md`，文件夹必须原样（`v1.0` 砍掉尾巴就成了 `v1`）。
+    /// 这些都算好放进结构体，上层拿去直接用，不用每条路径都重算一遍。
+    struct Entry: Equatable {
+        let url: URL
+        /// 文件夹（能进去）还是文档（能打开）
+        let isDirectory: Bool
+        /// 界面上显示的名字
+        let name: String
+        /// 修改时间。**扫描目录时顺手读到的**，不用上层再 stat 一次
+        let modifiedDate: Date?
+        /// 创建时间，同上
+        let createdDate: Date?
+
+        init(url: URL,
+             isDirectory: Bool,
+             name: String,
+             modifiedDate: Date? = nil,
+             createdDate: Date? = nil) {
+            self.url = url
+            self.isDirectory = isDirectory
+            self.name = name
+            self.modifiedDate = modifiedDate
+            self.createdDate = createdDate
+        }
+    }
+
+    /// 列一个目录里的一层东西：文件夹 + 认得出的文档。
+    ///
+    /// 排序交给调用方（左栏有「目录优先」和用户选的排序方式），这里只按名字排一份稳定顺序。
+    ///
+    /// ⚠️ **判断顺序是「先看是不是目录」**，不是「先看扩展名」：`xxx.md` 这种名字的文件夹在磁盘上确实能存在，按扩展名先判会把它当成一份打不开的文档。
+    static func entries(in directory: URL) -> [Entry] {
+        let manager = FileManager.default
+        // ⚠️ 时间也一并要过来：`contentsOfDirectory` 会在**同一次枚举**里把属性读好，之后 `resourceValues` 直接命中缓存。少了这两个键，每份文档都要单独 stat 一次
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey,
+                                      .contentModificationDateKey, .creationDateKey]
+        let urls = (try? manager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        return urls.compactMap { url -> Entry? in
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            if values?.isDirectory == true {
+                return Entry(url: url,
+                             isDirectory: true,
+                             name: url.lastPathComponent,
+                             modifiedDate: values?.contentModificationDate,
+                             createdDate: values?.creationDate)
+            }
+            guard isDocument(url), values?.isRegularFile == true else { return nil }
+            return Entry(url: url,
+                         isDirectory: false,
+                         name: displayName(for: url),
+                         modifiedDate: values?.contentModificationDate,
+                         createdDate: values?.creationDate)
+        }
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// 这个 URL 现在是不是一个目录。
+    ///
+    /// 右键菜单、重命名、删除都要按它分流：同一个动作对「文件」和「文件夹」做的事不一样。
+    static func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+    }
+
+    /// 按 URL 现造一个列表行（不知道是文件还是文件夹时用）。
+    static func entry(for url: URL) -> Entry {
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey,
+                                                      .contentModificationDateKey,
+                                                      .creationDateKey])
+        return values?.isDirectory == true
+            ? Entry(url: url,
+                    isDirectory: true,
+                    name: url.lastPathComponent,
+                    modifiedDate: values?.contentModificationDate,
+                    createdDate: values?.creationDate)
+            : Entry(url: url,
+                    isDirectory: false,
+                    name: displayName(for: url),
+                    modifiedDate: values?.contentModificationDate,
+                    createdDate: values?.creationDate)
+    }
+
+    /// 文件夹里有几份文档、几个子文件夹。只看这一层：数字用来填列表副标题，递归数会慢得没必要。
+    static func summary(ofDirectory url: URL) -> (documents: Int, folders: Int) {
+        let items = entries(in: url)
+        return (items.filter { !$0.isDirectory }.count, items.filter { $0.isDirectory }.count)
+    }
+
+    /// 这个目录里（含所有子文件夹）到底有没有文档。
+    ///
+    /// ### 为什么不能只看顶层
+    /// 用户把文档都整理进子文件夹之后，顶层一份都没有。按顶层判空的话，下次启动会以为「这是个空目录」，又塞一份示例文档进来。
+    static func containsAnyDocument(in directory: URL) -> Bool {
+        let manager = FileManager.default
+        guard let enumerator = manager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return false }
+
+        for case let url as URL in enumerator where isDocument(url) {
+            if isRegularFile(url, manager: manager) { return true }
+        }
+        return false
+    }
+
+    /// 递归搜索：从 `directory` 往下找名字匹配的文档。
+    ///
+    /// - Parameters:
+    ///   - query: 关键词，忽略大小写和重音
+    ///   - maxDepth: 最多往下钻几层。误建出来的深目录不该把主线程拖住
+    ///   - limit: 最多返回多少条
+    /// - Returns: 命中的行（文件夹和文档都算），`name` 是**相对 `directory` 的路径**
+    ///   （`日记/2026-10`）—— 子文件夹里有同名文件时，光看文件名分不出是哪一个
+    static func searchDocuments(in directory: URL,
+                                matching query: String,
+                                maxDepth: Int = 8,
+                                limit: Int = 2000) -> [Entry] {
+        let manager = FileManager.default
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey,
+                                      .contentModificationDateKey, .creationDateKey]
+        guard let enumerator = manager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [] }
+
+        func matches(_ text: String) -> Bool {
+            text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+
+        var results: [Entry] = []
+        for case let url as URL in enumerator {
+            // 太深的层级整枝跳过，省得一条条比下去
+            if enumerator.level > maxDepth {
+                enumerator.skipDescendants()
+                continue
+            }
+
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            if values?.isDirectory == true {
+                // 文件夹也参与匹配：用户搜「日记」很可能就是在找那个文件夹。
+                // 它的名字用相对路径，且**不去扩展名**（`v2.0` 是名字的一部分）
+                let relative = relativePath(of: url, in: directory)
+                if matches(relative) {
+                    results.append(Entry(url: url,
+                                         isDirectory: true,
+                                         name: relative,
+                                         modifiedDate: values?.contentModificationDate,
+                                         createdDate: values?.creationDate))
+                }
+                continue
+            }
+
+            guard isDocument(url), values?.isRegularFile == true else { continue }
+            let relative = relativeDisplayName(of: url, in: directory)
+            guard matches(relative) else { continue }
+            results.append(Entry(url: url,
+                                 isDirectory: false,
+                                 name: relative,
+                                 modifiedDate: values?.contentModificationDate,
+                                 createdDate: values?.creationDate))
+            if results.count >= limit { break }
+        }
+        return results
+    }
+
+    /// `directory` 底下这份东西的相对路径（原样，不动扩展名）。
+    static func relativePath(of url: URL, in directory: URL) -> String {
+        let base = directory.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix(base + "/")
+            ? String(path.dropFirst(base.count + 1))
+            : url.lastPathComponent
+    }
+
+    /// `directory` 底下这份文档的相对路径（去掉扩展名）。
+    static func relativeDisplayName(of url: URL, in directory: URL) -> String {
+        (relativePath(of: url, in: directory) as NSString).deletingPathExtension
+    }
+
     /// 这个是能编辑的文档吗（按扩展名认）
     static func isDocument(_ url: URL) -> Bool {
         documentExtensions.contains(url.pathExtension.lowercased())
@@ -86,10 +276,12 @@ enum DocumentsWorkspace {
     /// 因为 Documents 里可能已经躺着别的东西 —— 编辑器粘贴图片时会存 png 进来 ——
     /// 那种情况下列表仍然是空的，还是该给一份示例。
     ///
+    /// 而且这个「没有」是**递归**判的：用户把文档都整理进子文件夹之后，顶层是空的，但那是他自己整理出来的，不该再给他塞一份示例。
+    ///
     /// - Returns: 复制出来的文件地址；什么都没做（本来就有文档 / 包里的示例丢了）时返回 nil
     @discardableResult
     static func installSampleIfNeeded() -> URL? {
-        guard documentURLs().isEmpty else { return nil }
+        guard !containsAnyDocument(in: folderURL) else { return nil }
         guard let sourceURL = Bundle.main.url(forResource: sampleResourceName, withExtension: "md") else {
             return nil
         }
@@ -113,13 +305,15 @@ enum DocumentsWorkspace {
     static let untitledBaseName = "未命名"
 
     /// 造一个还没被占用的文件名：`未命名.md`、`未命名 2.md`、`未命名 3.md`……
-    static func uniqueFileURL(baseName: String? = nil) -> URL {
+    ///
+    /// - Parameter directory: 建到哪个目录里。默认文档根目录；用户进了子文件夹就传那个文件夹，新建的文档才会落在眼前这一层，而不是又跑回根目录去。
+    static func uniqueFileURL(in directory: URL = folderURL, baseName: String? = nil) -> URL {
         let base = baseName ?? untitledBaseName
         let manager = FileManager.default
-        var candidate = folderURL.appendingPathComponent("\(base).md")
+        var candidate = directory.appendingPathComponent("\(base).md")
         var sequence = 2
         while manager.fileExists(atPath: candidate.path) {
-            candidate = folderURL.appendingPathComponent("\(base) \(sequence).md")
+            candidate = directory.appendingPathComponent("\(base) \(sequence).md")
             sequence += 1
         }
         return candidate
@@ -202,6 +396,52 @@ enum DocumentsWorkspace {
         return destination
     }
 
+    /// 把**文件夹**改成另一个名字（整棵子树跟着走）。
+    ///
+    /// ### 和 `rename(_:toBaseName:)` 的两点不同
+    /// - 不补 `.md` 后缀（文件夹不是文档）；
+    /// - 名字以 `.md` 结尾也不砍（`草稿.md` 是个合法的文件夹名）。
+    ///
+    /// ⚠️ 改名一换，**里面所有文档的路径都变了**。正在编辑的子文档、按路径存的「最近打开」和「读到哪儿」都会对不上，所以这里必须把新旧目录一起报出去 —— 而且报的是**目录**，接收方要按前缀替换，不是像文件改名那样用等号比。
+    ///
+    /// - Returns: 改名后的新地址。名字没变时原样返回（不白跑一趟移动）。
+    /// - Throws: 名字是空的时候抛 `.emptyName`；同名文件夹已存在时抛 `.nameTaken`。
+    @discardableResult
+    static func renameDirectory(_ url: URL, toBaseName rawName: String) throws -> URL {
+        let name = sanitizedFolderName(rawName)
+        guard !name.isEmpty else { throw WorkspaceError.emptyName }
+
+        let destination = url.deletingLastPathComponent()
+            .appendingPathComponent(name, isDirectory: true)
+        guard destination.path != url.path else { return url }
+
+        // 和文件改名同一条规矩：重名必须报错，绝不能悄悄把另一个文件夹盖掉
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw WorkspaceError.nameTaken(name)
+        }
+
+        try FileManager.default.moveItem(at: url, to: destination)
+
+        NotificationCenter.default.post(name: didRenameDirectoryNotification,
+                                        object: nil,
+                                        userInfo: [renameFromURLKey: url, renameToURLKey: destination])
+        return destination
+    }
+
+    /// 把用户输的名字收拾成能当**文件夹**名用的样子。
+    ///
+    /// 规则比文件名的 `sanitizedFileName` 少一条：不碰 `.md` 后缀 —— 文件夹叫 `v2.0` 或者 `草稿.md` 都合法，砍掉尾巴反而把它改成了别的名字。
+    static func sanitizedFolderName(_ raw: String) -> String {
+        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        name = name.replacingOccurrences(of: "/", with: "-")
+        name = name.replacingOccurrences(of: ":", with: "-")
+        // 点开头的是隐藏文件夹，用户在列表里看不见它，建了也找不回来
+        while name.hasPrefix(".") {
+            name.removeFirst()
+        }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// 新建一份空白文档。
     ///
     /// 先在磁盘上把文件建出来（而不是先摆一份内存里的草稿）：
@@ -209,9 +449,11 @@ enum DocumentsWorkspace {
     ///
     /// 建出来的是**占位名**（`未命名.md`）—— 用户第一次按 ⌘S 时，
     /// 编辑页会请他起个正式名字，那时调 `rename(_:toBaseName:)`。
+    ///
+    /// - Parameter directory: 建到哪个目录里。默认文档根目录；用户正停在某个子文件夹里时传它。
     @discardableResult
-    static func createEmptyDocument() throws -> URL {
-        let url = uniqueFileURL()
+    static func createEmptyDocument(in directory: URL = folderURL) throws -> URL {
+        let url = uniqueFileURL(in: directory)
         try "".write(to: url, atomically: true, encoding: .utf8)
         return url
     }
@@ -247,8 +489,7 @@ enum DocumentsWorkspace {
     /// 为了拿「首行」最多读这么多字节。
     ///
     /// 只想要第一行文字，没必要把整份文档读进来 —— 一份几百 KB 的笔记，首行一定在前 4 KB 之内。
-    /// 这也是为什么这里**不缓存**：读这么一小块跟查一次文件属性差不多贵，
-    /// 加缓存反而要多管一份「什么时候该失效」的账（改完名、存完盘都得清）。
+    /// 这里是**一遍真读盘**（开文件 + 读 + 解码），所以调用方不能在 `cellForRowAt` 里同步调它，缓存和后台读取都归左栏的 `DocumentListRowCache` 管。
     private static let previewByteLimit = 4 * 1024
 
     /// 列表行上那行浅灰预览：文档的**首行文字**。
@@ -334,6 +575,11 @@ enum DocumentsWorkspace {
     ///
     /// 为什么要专门发一条：改名换的是文件路径，而正开着这份文档的编辑页把路径记在自己身上（那是它 ⌘S 要写回的地方）。不通知的话它会继续往旧路径写，等于把文件「改回去 + 留一份重复」。
     static let didRenameNotification = Notification.Name("MarkdownDocumentDidRename")
+
+    /// 有人把**文件夹**改了名（在 `renameDirectory` 里发）。
+    ///
+    /// 和 `didRenameNotification` 分开是有原因的：那条带的是一对一的新旧**文件**路径，编辑页用等号就能判断「改的是不是我」；文件夹改名换的是整棵子树的前缀，编辑页得按「我的路径是不是以旧目录开头」来换，判断方式不一样。
+    static let didRenameDirectoryNotification = Notification.Name("MarkdownDocumentDirectoryDidRename")
 
     /// `didRenameNotification` 里旧路径用的键（`userInfo` 里是个 `URL`）
     static let renameFromURLKey = "fromURL"
