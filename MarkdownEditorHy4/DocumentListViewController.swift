@@ -420,6 +420,8 @@ final class DocumentListViewController: UIViewController {
         // 系统那根滚动条关掉，换成下面 `setupScrollIndicator()` 画的那根：
         // 系统的在 Catalyst 上是浮层、样式由平台定，和自己画的那根对不上，还会在滑动时一闪一闪
         tableView.showsVerticalScrollIndicator = false
+        tableView.separatorStyle = .none
+//        tableView.separatorInset = UIEdgeInsets(top: 0, left: 48, bottom: 0, right: 44)
         // 行高交给系统按内容算：这一行有三行字（文件名 / 预览 / 日期），字号还会跟着系统的
         // 「文字大小」设置变，写死一个数字迟早会在某种字号下把字挤住
         tableView.rowHeight = UITableView.automaticDimension
@@ -847,6 +849,8 @@ final class DocumentListViewController: UIViewController {
             open(pending, mode: .newTab)
             return
         }
+        // 有存档时不再自动打开第一份文档。恢复发生在详情宿主的 viewDidLoad，比这里的 viewDidAppear 早，所以此刻存档还没被改写。
+        guard !MarkdownTabRestoration.willRestoreTabsOnLaunch else { return }
         // ⚠️ 第一行可能是文件夹（目录永远排前面），那不是能打开的东西 —— 不筛掉的话，冷启动第一件事就是对着文件夹弹一个「打不开文件」
         guard DeviceHelper.currentLayout == .iPadOrMac,
               let first = files.first(where: { !$0.isDirectory }) else { return }

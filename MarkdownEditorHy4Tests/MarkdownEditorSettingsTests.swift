@@ -699,11 +699,16 @@ final class MarkdownEditorSettingsTests: XCTestCase {
                        "设置里挑的色该盖过配色表")
 
         // 清掉覆盖 → 回到配色表给的那一色
+        // 期望值不能直接取 `MarkdownTheme.default` 的初始值：外观是深色时，「默认」这套配色会换成 darkDefault 打底（见 `MarkdownEditorSettings.palette(base:merging:)`），初始值里的 tertiaryLabel 早就被配色表盖掉了。
+        // 按当前外观算出真正该是什么色再比。
         settings.setTableSourceTextColor(nil)
         var reset = MarkdownTheme.default
         settings.applyColors(to: &reset, customPalette: nil)
         settings.applyTableSourceStyle(to: &reset)
-        XCTAssertEqual(reset.table.sourceTextColor, MarkdownTheme.default.table.sourceTextColor)
+        let expectedColor = settings.palette(base: .default, merging: nil).tableSourceText?.color
+            ?? MarkdownTheme.default.table.sourceTextColor
+        XCTAssertEqual(MarkdownHexColor.string(from: reset.table.sourceTextColor),
+                       MarkdownHexColor.string(from: expectedColor))
     }
 
     /// 端到端：设置里挑的颜色 / 字号要真的出现在**渲染出来的表格源码**上。

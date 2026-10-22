@@ -136,6 +136,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // 放最前面还有个好处 —— 冷启动时界面一露脸就是用户选的那种明暗，不会先闪一下白再变黑
         MarkdownAppearance.install()
 
+        // ### 打开「冷启动恢复上次打开的 Tab」
+        // 必须在建窗口之前：右侧多 Tab 宿主是在自己的 viewDidLoad 里读这份配置的，晚一步就赶不上，表现出来就是「上次开着的 Tab 一个都没回来」，还不报错。
+        // iPhone 那边没有 Tab（导航栈一次只显示一页），开关开着也不会有任何副作用。
+        MarkdownTabRestoration.install()
+
         // ### 启动先把「文档目录」准备好
         // 第一次装完 App、Documents 里一份文档都没有时，把 App 包里的 sample.md
         // 复制进去 —— 否则左侧栏是空的，新用户打开只看到一片白，不知道该干什么。
