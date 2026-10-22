@@ -136,7 +136,10 @@ extension MarkdownTextView {
     ///
     /// ### 为什么要减 bounds.origin.y
     /// 内容坐标的原点在文档开头，减掉滚动偏移才是「离可视区顶部多远」。
-    private func visibleAreaCenterY() -> CGFloat {
+    ///
+    /// ### 谁还在读它
+    /// 目录跳转（`MarkdownTextView+Outline.swift` 的 `jumpStep`）在打字机模式下要按这个中线算目标位置，跨文件够不到私有方法，所以这里不能标 `private`。
+    func visibleAreaCenterY() -> CGFloat {
         let guide = keyboardLayoutGuide.layoutFrame
 
         // 键盘收起时 guide 缩成贴底边的一条，高度正好等于底部安全区，这时读它会把中心点抬高十几点，不如直接用整个视口。

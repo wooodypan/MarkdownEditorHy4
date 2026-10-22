@@ -4,11 +4,12 @@
 //
 //  打字机模式：输入时光标要留在屏幕中间，正文持续往上滚。
 //
-//  ### 守的四件事
+//  ### 守的五件事
 //  1. **开关本身**：开的时候给底部留半屏空白（不留的话文档最后几行永远滚不到中间）；
 //  2. **光标走到哪儿跟到哪儿**：往下打字、往上按方向键、跨行点击，三种都得把光标拉回中线；
 //  3. **有选区时不跟**：拖选由系统自己滚，我们再插一脚会打架；
-//  4. **关掉之后一次都不许滚**。
+//  4. **跳转也停在中间**：查找下一个、脚注跳转不能停在屏幕上沿，跳完光标还得在中线附近；
+//  5. **关掉之后一次都不许滚**。
 //
 
 import XCTest
@@ -26,8 +27,10 @@ final class MarkdownTypewriterModeTests: XCTestCase {
     }
 
     /// 建一台挂在真实窗口里的编辑器（不在窗口里 TextKit 不会真正排版）
-    private func makeEditor(height: CGFloat = 500) -> (editor: MarkdownTextView, window: UIWindow) {
-        let editor = MarkdownTextView(markdown: longMarkdown)
+    /// - parameter markdown: 不传就用那篇 60 行的通用长文；脚注那类要专门构造文档时才传
+    private func makeEditor(markdown: String? = nil,
+                            height: CGFloat = 500) -> (editor: MarkdownTextView, window: UIWindow) {
+        let editor = MarkdownTextView(markdown: markdown ?? longMarkdown)
         editor.frame = CGRect(x: 0, y: 0, width: 600, height: height)
         let window = UIWindow(frame: editor.frame)
         window.addSubview(editor)
@@ -45,11 +48,44 @@ final class MarkdownTypewriterModeTests: XCTestCase {
         wait(for: [done], timeout: 2)
     }
 
+    /// 等跳转收敛：连续 0.25 秒滚动位置几乎不变就算停了。
+    /// 跳转本身是「滚一轮 → 等 0.06s 重排 → 再滚」的循环（见 `jumpStep`），不能用固定时长去猜。
+    @discardableResult
+    private func waitForScrollToSettle(_ editor: MarkdownTextView,
+                                       timeout: TimeInterval = 3) -> CGFloat {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastOffset = editor.contentOffset.y
+        var stableSince = Date()
+
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            let current = editor.contentOffset.y
+            if abs(current - lastOffset) <= 0.5 {
+                if Date().timeIntervalSince(stableSince) >= 0.25 { return current }
+            } else {
+                lastOffset = current
+                stableSince = Date()
+            }
+        }
+        return editor.contentOffset.y
+    }
+
+    /// 某个**渲染偏移**处的光标在屏幕上的纵坐标（屏幕上沿为 0）。
+    /// 查找不挪光标，量不了 `selectedRange`，所以按偏移直接问 TextKit 要矩形。
+    private func screenY(ofRenderedOffset offset: Int, in editor: MarkdownTextView) -> CGFloat {
+        guard let position = editor.position(from: editor.beginningOfDocument, offset: offset) else { return .nan }
+        return editor.caretRect(for: position).midY - editor.contentOffset.y
+    }
+
     /// 光标在**屏幕上**的纵坐标（屏幕上沿为 0）
     private func caretScreenY(_ editor: MarkdownTextView) -> CGFloat {
-        guard let position = editor.position(from: editor.beginningOfDocument,
-                                             offset: editor.selectedRange.location) else { return .nan }
-        return editor.caretRect(for: position).midY - editor.contentOffset.y
+        screenY(ofRenderedOffset: editor.selectedRange.location, in: editor)
+    }
+
+    /// 一篇带脚注的长文档：定义在文末，跳过去要跨过大半篇，才看得出「停在顶部还是中间」
+    private var footnoteMarkdown: String {
+        let body = (1...40).map { "第 \($0) 行正文内容，把脚注定义顶到很下面。" }.joined(separator: "\n")
+        return body + "\n\n正文里引用了[^1]这条脚注。\n\n[^1]: 脚注定义排在文末，跳过来时该停在屏幕中间。\n"
     }
 
     private func moveCaretToEnd(_ editor: MarkdownTextView) {
@@ -197,6 +233,48 @@ final class MarkdownTypewriterModeTests: XCTestCase {
         waitOneBeat()
 
         XCTAssertEqual(editor.contentOffset.y, before, accuracy: 0.5, "有选区时不该动画面")
+    }
+
+    // MARK: - 跳转也停在中间
+
+    /// 查找下一个：命中远在屏幕外，跳完该停在屏幕中间（老行为是贴到屏幕上沿）
+    func testTypewriterModeCentersSearchJump() {
+        let (editor, _) = makeEditor(height: 500)
+        editor.isTypewriterMode = true
+        waitOneBeat()
+
+        let needle = "第 50 行"
+        XCTAssertEqual(editor.performSearch(query: needle, options: SearchOptions()), 1,
+                       "样例里这个记号应该只出现一次，不然没法确定跳到了哪一处")
+        waitForScrollToSettle(editor)
+
+        // 查找不挪光标，所以按命中的渲染偏移直接量
+        let rendered = (editor.text as NSString).range(of: needle)
+        XCTAssertNotEqual(rendered.location, NSNotFound, "渲染文本里找不到这个记号")
+        let middle = editor.bounds.height / 2
+        let y = screenY(ofRenderedOffset: rendered.location, in: editor)
+        XCTAssertEqual(y, middle, accuracy: 8,
+                       "打字机模式下「查找下一个」该把命中停在中间（y≈\(middle)），实际 y=\(y)")
+
+        editor.clearSearchHighlight()
+        editor.isTypewriterMode = false
+    }
+
+    /// 脚注跳转：点正文里的引用跳到文末定义，跳完定义那行该停在屏幕中间
+    func testTypewriterModeCentersFootnoteJump() {
+        let (editor, _) = makeEditor(markdown: footnoteMarkdown, height: 500)
+        editor.isTypewriterMode = true
+        waitOneBeat()
+
+        editor.jumpToFootnoteDefinition("1")
+        waitForScrollToSettle(editor)
+
+        let middle = editor.bounds.height / 2
+        let y = caretScreenY(editor)
+        XCTAssertEqual(y, middle, accuracy: 8,
+                       "打字机模式下脚注跳转该停在中间（y≈\(middle)），实际 y=\(y)")
+
+        editor.isTypewriterMode = false
     }
 
     /// 关着开关：什么都没发生

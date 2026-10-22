@@ -11,7 +11,25 @@
 
 import UIKit
 
+// MARK: - 跳转的停法
+
+extension MarkdownTextView {
+
+    /// 跳转收尾时把目标停在哪。
+    ///
+    /// ### 为什么要有这个参数
+    /// 目录跳转平时把标题顶到屏幕上沿（底下留 `jumpTopPadding` 那点空，免得标题上半截被裁掉），可打字机模式要求光标一直待在屏幕中间 —— 同一个跳转有两种停法。
+    /// 把「停在哪」做成参数，几何计算就只在 `jumpStep` 里写一份，调用方不用各自去算半屏高度。
+    enum JumpAlignment {
+        /// 停在屏幕上沿往下 `padding` 点
+        case top(CGFloat)
+        /// 停在可视区垂直中线（打字机模式）
+        case center
+    }
+}
+
 // MARK: - 数据源：协调者通过这些方法取数据 / 下指令
+
 
 extension MarkdownTextView: MarkdownOutlineDataSource {
 
@@ -19,7 +37,7 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
 
     /// 标题距离屏幕上沿留出的空白（点）。
     /// 留这点空是为了让标题**完整**落在屏幕上沿下方 —— 紧贴着边的话，标题上半截会被裁掉。
-    /// （「记住阅读位置」恢复时用的上边距是 0，因为记住的就是「最上面那一行」）
+    /// （「记住阅读位置」恢复时用的上边距是 0，因为记住的就是「最上面那一行」；打字机模式下改用居中，不读这个值）
     private static let jumpTopPadding: CGFloat = 16
     /// 「滚 → 量视口 → 再滚」最多跑几轮。实测 2~4 轮收敛，多留一些兜底
     private static let maxJumpRounds = 16
@@ -67,12 +85,14 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
         // 一次点击内部要滚好几轮（原因见下面的注释），期间用户可能又点了别的标题，
         // 用序号把上一轮的残余步骤作废，免得两个目标互相拉扯
         jumpToken &+= 1
+        // 打字机模式要求光标时刻待在屏幕中间，跳标题也跟着这个规矩走；平时还是把标题顶到上沿，留一点空免得被裁
+        let alignment: JumpAlignment = isTypewriterMode ? .center : .top(Self.jumpTopPadding)
         jumpStep(token: jumpToken,
                  targetRendered: caret,
                  round: 1,
                  previousGap: 0,
                  referenceSpan: 0,
-                 topPadding: Self.jumpTopPadding)
+                 alignment: alignment)
     }
 
     /// 按「源码偏移」把文档滚回那个位置（记住阅读位置用的）。
@@ -102,7 +122,7 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
                           round: 1,
                           previousGap: 0,
                           referenceSpan: 0,
-                          topPadding: 0)
+                          alignment: .top(0))
         }
     }
 
@@ -120,25 +140,31 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
         return documentStore.sourceCaret(forRenderedOffset: viewport.start)
     }
 
-    /// 把某个**渲染位置**滚进视野并停在「屏幕上沿往下 `topPadding`」处。
+    /// 把某个**渲染位置**滚进视野：平时停在「屏幕上沿往下 `topPadding`」处，打字机模式下停在可视区垂直中线。
     ///
     /// ### 谁在用它
-    /// - 大纲：`scrollToOutlineItem` 跳到某个标题；
-    /// - 查找：按「下一个」时要跳到第 n 个命中。
+    /// - 查找：按「下一个」时要跳到第 n 个命中（`MarkdownTextView+Search.swift`）；
+    /// - 脚注：⌘ 点引用跳到定义、点定义跳回引用（`MarkdownTextView+Footnote.swift`）。
     ///
     /// 两边都要同一套迭代滚动（不能一次滚到位，原因见下面 `jumpStep` 的注释），所以把这个入口单独拎出来共用 —— 复制一份必然会在某次修 bug 之后漏改其中一边。
     ///
-    /// - parameter topPadding: 目标停在屏幕上沿往下多少点；不传就用跳转标题时的那个默认值（ Swift 不允许在默认参数里写 `Self.xxx`，所以用可选值表达「没传」）
+    /// ### 为什么停法要跟着打字机模式走
+    /// 打字机模式的规矩是「光标一直待在屏幕中间」，查找和脚注跳转都会挪光标；跳完停在顶部的话，光标就贴住屏幕上沿，得等敲第一个字才被拉回中间（目录跳转踩过同一个坑，那边在 `scrollToOutlineItem` 里选停法）。
+    ///
+    /// - parameter topPadding: **顶部对齐时**目标停在屏幕上沿往下多少点；不传就用跳标题时的那个默认值（ Swift 不允许在默认参数里写 `Self.xxx`，所以用可选值表达「没传」）。打字机模式下这个值不参与计算
     func scrollToRenderedOffset(_ offset: Int, topPadding: CGFloat? = nil) {
-        let padding = topPadding ?? Self.jumpTopPadding
         let target = min(max(0, offset), totalRenderedLength())
+        // 打字机模式要求跳完光标还停在中间，其余情况维持原样：把目标顶到上沿、留一点空免得被裁
+        let alignment: JumpAlignment = isTypewriterMode
+            ? .center
+            : .top(topPadding ?? Self.jumpTopPadding)
         jumpToken &+= 1
         jumpStep(token: jumpToken,
                  targetRendered: target,
                  round: 1,
                  previousGap: 0,
                  referenceSpan: 0,
-                 topPadding: padding)
+                 alignment: alignment)
     }
 
     /// 迭代滚动：每一轮看「视口顶部现在停在哪」，算出还差多少，再滚过去。
@@ -158,8 +184,7 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
     ///
     /// **精细对齐**：一旦目标字符落在视口渲染范围**附近**（详见 `jumpNearViewportSlack`），
     ///   说明它**已经真的排过版了**，此刻 `caretRect` 才是可信的，于是直接用像素算：
-    ///   想让光标停在「屏幕上沿往下 `jumpTopPadding`」处，就把滚动位置设成
-    ///   `caretRect.minY - jumpTopPadding`。
+    ///   顶部对齐就把滚动位置设成 `caretRect.minY - padding`，居中就把滚动位置设成 `caretRect.midY - 可视区半高`（见 `JumpAlignment`）。
     ///
     /// ### 为什么必须分两段（gap == 0 死区）
     /// 只用粗调时会有个死区：当「视口顶部正好落在标题上」时 `targetRendered - viewport.start == 0`，
@@ -168,14 +193,13 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
     ///
     /// - parameter previousGap: 上一轮的 `gap`，用来识别「滚过头了」并减小步长
     /// - parameter referenceSpan: 第一轮量到的「一屏字符数」，用来识别异常读数
-    /// - parameter topPadding: 目标最后要停在「屏幕上沿往下多少点」。跳标题时留一点空，
-    ///   免得标题上半截被裁掉（`jumpTopPadding`）；恢复阅读位置时是 0，因为记住的就是最上面那一行
+    /// - parameter alignment: 目标最后停在哪。`.top` 是贴屏幕上沿往下留一点空（跳标题默认，免得上半截被裁掉）；`.center` 是停在屏幕中间（打字机模式）
     private func jumpStep(token: Int,
                           targetRendered: Int,
                           round: Int,
                           previousGap: Int,
                           referenceSpan: Int,
-                          topPadding: CGFloat) {
+                          alignment: JumpAlignment) {
         guard token == jumpToken, round <= Self.maxJumpRounds else { return }
         guard markedTextRange == nil else { return }
         // 每一轮都刷新「最近一次程序化滚动的时刻」：打字机居中据此避让，
@@ -200,16 +224,23 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
         // ===== 阶段一：精细对齐（目标已经排过版，几何数据可信）=====
         if targetIsLaidOut, let caretFrame = caretFrame(atRenderedOffset: targetRendered) {
             // caretRect 和 contentOffset 是同一套坐标系（textView 内容坐标，含 inset），
-            // 所以「光标所在行顶部 - 想要的内边距」直接就等于目标 contentOffset
-            let desired = min(max(0, caretFrame.minY - topPadding),
-                              maximumContentOffsetY)
+            // 所以「光标要停在屏幕的哪个纵坐标」直接用像素换算成目标 contentOffset 就行。
+            // 顶部对齐看行顶（标题完整露出来就够），居中看行中（差半行就不叫居中了）。
+            let anchorY: CGFloat
+            switch alignment {
+            case .top(let padding):
+                anchorY = caretFrame.minY - padding
+            case .center:
+                anchorY = caretFrame.midY - visibleAreaCenterY()
+            }
+            let desired = min(max(0, anchorY), maximumContentOffsetY)
             if abs(desired - contentOffset.y) <= Self.jumpSettleTolerance {
                 return // 停好了，收工
             }
             setContentOffset(CGPoint(x: contentOffset.x, y: desired), animated: false)
             scheduleNextJumpRound(token: token, targetRendered: targetRendered,
                                   round: round, previousGap: gap, referenceSpan: span,
-                                  topPadding: topPadding)
+                                  alignment: alignment)
             return
         }
 
@@ -223,7 +254,7 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
             setContentOffset(CGPoint(x: contentOffset.x, y: bottom), animated: false)
             scheduleNextJumpRound(token: token, targetRendered: targetRendered,
                                   round: round, previousGap: gap, referenceSpan: span,
-                                  topPadding: topPadding)
+                                  alignment: alignment)
             return
         }
 
@@ -250,7 +281,7 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
         setContentOffset(CGPoint(x: contentOffset.x, y: next), animated: false)
         scheduleNextJumpRound(token: token, targetRendered: targetRendered,
                               round: round, previousGap: gap, referenceSpan: span,
-                              topPadding: topPadding)
+                              alignment: alignment)
     }
 
     /// 某个渲染偏移处「光标那一行的矩形」（内容坐标，和 contentOffset 同一套）。
@@ -272,14 +303,14 @@ extension MarkdownTextView: MarkdownOutlineDataSource {
                                        round: Int,
                                        previousGap: Int,
                                        referenceSpan: Int,
-                                       topPadding: CGFloat) {
+                                       alignment: JumpAlignment) {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.jumpStepDelay) { [weak self] in
             self?.jumpStep(token: token,
                            targetRendered: targetRendered,
                            round: round + 1,
                            previousGap: previousGap,
                            referenceSpan: referenceSpan,
-                           topPadding: topPadding)
+                           alignment: alignment)
         }
     }
 

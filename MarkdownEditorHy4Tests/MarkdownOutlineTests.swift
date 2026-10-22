@@ -604,6 +604,25 @@ final class MarkdownOutlineTests: XCTestCase {
         }
     }
 
+    /// 打字机模式：点目录跳过去，光标要停在屏幕中间，而不是贴着屏幕上沿那 16 点
+    func testTypewriterModeCentersOutlineJump() {
+        let editor = makeEditor(scrollableSample)
+        editor.isTypewriterMode = true
+        guard let target = editor.currentOutlineItems().first(where: { $0.title == "第三节" }) else {
+            return XCTFail("样例里应该有一个叫「第三节」的标题")
+        }
+
+        editor.scrollToOutlineItem(target)
+        waitForJumpToSettle(editor)
+
+        // caretScreenY 报的是行顶，居中时行顶会落在中线往上半个行高的地方，所以留 20 点余量
+        let middle = editor.bounds.height / 2
+        let screenY = caretScreenY(editor) ?? -1
+        XCTAssertEqual(screenY, middle, accuracy: 20,
+                       "打字机模式下跳标题该停在屏幕中间（y≈\(middle)），实际 y=\(screenY)")
+        editor.isTypewriterMode = false
+    }
+
     // MARK: - 第 4 层：真实界面装配
 
     /// 起一个真的 `MarkdownDocumentViewController`，验证三个组件在真实界面里确实接上了。
