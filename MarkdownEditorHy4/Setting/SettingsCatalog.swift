@@ -17,6 +17,8 @@ import UIKit
 
 /// 设置页上的分组。侧边栏 / 列表里一行一个，点进去就是这个分组的面板。
 enum SettingsSection: Int, CaseIterable {
+    /// 外观：跟随系统 / 深色 / 浅色。放最上面 —— 它是一眼就能看出效果的一项，换设备后也常常是第一个想改的
+    case appearance
     /// 正文字体与段落排版。放最上面：这是用户最常进来改的一组
     case typography
     /// 阅读与显示（开关类）
@@ -35,6 +37,7 @@ enum SettingsSection: Int, CaseIterable {
     /// 列表行 / 面板标题上显示的名字
     var title: String {
         switch self {
+        case .appearance: return "外观设置"
         case .typography: return "正文排版"
         case .reading: return "阅读与显示"
         case .outlineSize: return "大纲面板"
@@ -50,6 +53,8 @@ enum SettingsSection: Int, CaseIterable {
     /// 挑的都是从 iOS 14 就有的符号：侧边栏那条路只有 Mac 走，但列表那条路 iPhone / iPad 也走，符号名写新了会静默画不出图（返回 nil），不如挑老的稳。
     var iconName: String {
         switch self {
+        // 挑的是 iOS 13 就有的符号（「亮 / 暗」最直观的就是月亮），新符号在旧系统上会静默画不出来
+        case .appearance: return "moon"
         case .typography: return "textformat"
         case .reading: return "book"
         case .outlineSize: return "list.bullet.indent"
@@ -65,6 +70,7 @@ enum SettingsSection: Int, CaseIterable {
     /// 从前所有分组摊在同一页里，一眼能看到有什么；拆成「目录 + 面板」之后，光看「大纲面板」四个字不知道里头能改什么，所以这里说一句。
     var summary: String {
         switch self {
+        case .appearance: return "跟随系统、深色或浅色，选完立即生效"
         case .typography: return "字号、行高、段落间距、首行缩进、行宽上限、列表圆点大小"
         case .reading: return "行号、引用底色、行内代码反引号底色、记住上次读到哪儿"
         case .outlineSize:
@@ -82,6 +88,9 @@ enum SettingsSection: Int, CaseIterable {
     /// 这一组里从上到下有哪些行
     var rows: [SettingsRow] {
         switch self {
+        case .appearance:
+            // 这一组只有一行：三个选项在菜单里选，不铺成一排（「跟随系统」四个字平铺进分段控件会被截断）
+            return [.appearanceMode]
         case .typography:
             // 顺序就是界面上从上到下的顺序：
             // 先定字号，再定行与行、段与段、段首，最后是整行的宽度
@@ -131,6 +140,9 @@ enum SettingsSection: Int, CaseIterable {
 
 /// 设置页上的行。加新设置就先在这里加一个 case，再去 `SettingsPaneViewController` 里给它配一个控件。
 enum SettingsRow: Int, CaseIterable {
+    // 外观
+    /// App 的明暗：跟随系统 / 浅色 / 深色
+    case appearanceMode
     // 正文排版
     /// 正文字号（点）
     case bodyFontSize
@@ -222,6 +234,8 @@ enum SettingsRow: Int, CaseIterable {
     /// 主标题
     var title: String {
         switch self {
+        case .appearanceMode:
+            return "外观模式"
         case .bodyFontSize:
             return "正文字号"
         case .lineHeightMultiple:
@@ -311,6 +325,12 @@ enum SettingsRow: Int, CaseIterable {
         let usesWidthRatio = settings.outlineWidthMode == .percentage
         let imageUsesRatio = settings.imageWidthMode == .percentage
         switch self {
+        case .appearanceMode:
+            return "「跟随系统」：系统开深色，App 就是深色（默认）。"
+                + "「深色模式 / 浅色模式」：不管系统怎么设，App 固定用这一种。"
+                + "选完立刻生效，下次打开还是这一档。"
+                + "ⓘ 正文的颜色平时由主题页里那套配色决定；配色选着「默认」时，"
+                + "它会跟着这里自动换成浅色 / 深色两套。"
         case .bodyFontSize:
             return "正文的字号。标题、行内代码、代码块都是从这个数推出来的"
                 + "（标题更大、代码略小），会跟着一起变。"

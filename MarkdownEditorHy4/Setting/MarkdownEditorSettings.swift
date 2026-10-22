@@ -197,6 +197,9 @@ final class MarkdownEditorSettings {
     // MARK: 默认值
 
     private enum Default {
+        /// 外观默认「跟随系统」：用户没动过这一项时，App 的明暗就该和系统一致
+        static let appearanceMode: MarkdownAppearanceMode = .system
+
         /// 「记住目录大纲滚动位置」默认打开
         static let remembersScrollPosition = true
 
@@ -406,6 +409,9 @@ final class MarkdownEditorSettings {
     /// 老的配置文件里没有那个键，可选字段会解成 nil 然后退化成默认值，
     /// 不会因为「缺字段」整份解析失败、把所有设置一起丢回默认。
     private struct Payload: Codable {
+        /// 外观模式（`system` / `light` / `dark`）。同样存字符串：文件里写了个不认识的词时，
+        /// 只有这一项退回默认，别的设置照旧
+        var appearanceMode: String?
         var remembersScrollPosition: Bool?
         /// 粘贴网页复制来的富文本时，要不要先转成 markdown 源码
         var pastesHTMLAsMarkdown: Bool?
@@ -470,6 +476,17 @@ final class MarkdownEditorSettings {
     }
 
     // MARK: 配置项
+
+    /// App 的外观模式：跟随系统 / 浅色 / 深色。默认跟随系统。
+    ///
+    /// ### 这里只存「选了哪一档」
+    /// 真正把窗口改成深色 / 浅色的是 `MarkdownAppearance`（它给窗口设 `overrideUserInterfaceStyle`）。
+    /// 分开的原因是这一层不该认识 UIKit 的窗口 —— 它只管存值、发通知，谁来用、怎么用是上层的事。
+    ///
+    /// ### 它还会影响正文配色
+    /// 深色 + 配色选着「默认」时，正文会自动换成内置的深色默认配色（见 `palette(base:merging:)`）。
+    /// 所以改完这一项必须广播：打开的文档要重渲染一遍，新颜色才铺得上去。
+    private(set) var appearanceMode: MarkdownAppearanceMode
 
     /// 是否记住目录大纲（也就是文档）的滚动位置。默认 `true`。
     ///
@@ -795,6 +812,21 @@ final class MarkdownEditorSettings {
         guard value != imageNameMode else { return }
         imageNameMode = value
         save()
+    }
+
+    /// 改「外观模式」。
+    ///
+    /// ⚠️ 别在界面上直接调它 —— 光存值不会改窗口，用户点了菜单会看到「勾打上了、界面没变」。
+    /// 要调 `MarkdownAppearance.setMode(_:)`：它先套窗口、再走到这里存盘。
+    ///
+    /// ### 为什么这一项必须广播
+    /// 深色下「默认」配色会换成深色版（见 `palette(base:merging:)`），
+    /// 那是渲染时烙进富文本的颜色 —— 不广播，打开的文档会停在旧的浅色上，非得手动再改一次设置才变。
+    func setAppearanceMode(_ value: MarkdownAppearanceMode) {
+        guard value != appearanceMode else { return }
+        appearanceMode = value
+        save()
+        postChange()
     }
 
     /// 改「是否记住滚动位置」。值没变就什么都不做（不发通知、不写盘）
@@ -1157,6 +1189,7 @@ final class MarkdownEditorSettings {
     init(fileURL: URL = MarkdownEditorSettings.defaultFileURL) {
         self.fileURL = fileURL
         // 先给一套默认值，再用盘上的内容覆盖 —— 这样「读文件失败」也能得到一份可用的配置
+        self.appearanceMode = Default.appearanceMode
         self.remembersScrollPosition = Default.remembersScrollPosition
         self.pastesHTMLAsMarkdown = Default.pastesHTMLAsMarkdown
         self.savesWebImagesLocally = Default.savesWebImagesLocally
@@ -1209,6 +1242,10 @@ final class MarkdownEditorSettings {
     private func load() {
         guard let data = try? Data(contentsOf: fileURL) else { return }
         guard let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return }
+        // 认不出来的模式名就保持默认（跟随系统），不能让它把别的设置一起带走
+        if let raw = payload.appearanceMode, let value = MarkdownAppearanceMode(rawValue: raw) {
+            appearanceMode = value
+        }
         if let value = payload.remembersScrollPosition { remembersScrollPosition = value }
         if let value = payload.pastesHTMLAsMarkdown { pastesHTMLAsMarkdown = value }
         if let value = payload.savesWebImagesLocally { savesWebImagesLocally = value }
@@ -1319,7 +1356,8 @@ final class MarkdownEditorSettings {
     }
 
     private func save() {
-        let payload = Payload(remembersScrollPosition: remembersScrollPosition,
+        let payload = Payload(appearanceMode: appearanceMode.rawValue,
+                              remembersScrollPosition: remembersScrollPosition,
                               pastesHTMLAsMarkdown: pastesHTMLAsMarkdown,
                               savesWebImagesLocally: savesWebImagesLocally,
                               showsLineNumbers: showsLineNumbers,
@@ -1546,17 +1584,27 @@ extension MarkdownEditorSettings {
     /// 主题页要给列表里每一套都画预览，`resolvedColorPalette(customPalette:)` 只能算「当前选中的」，所以真正的叠加规则写在这里，那边再包一层。
     func resolvedColorPalette(theme: MarkdownColorTheme,
                               customPalette: MarkdownColorPalette?) -> MarkdownColorPalette {
-        // 「用户指定过」这一道闸只在这儿看：叠加规则本身在下面那个方法里，只此一份
-        guard customThemeFileName != nil else { return theme.palette }
+        // 「用户指定过」这一道闸只在这儿看：叠加规则本身在下面那个方法里，只此一份。
+        // ⚠️ 没指定过也得走 `palette`（不能直接返回 `theme.palette`）：深色外观下「默认」要用深色版打底
+        guard customThemeFileName != nil else { return palette(base: theme, merging: nil) }
         return palette(base: theme, merging: customPalette)
     }
 
     /// 给列表里的某一行画预览用：指定的内置主题 + 指定的那份自定义配色，跟「当前选了谁」无关。
     ///
     /// ⚠️ 不能用 `resolvedColorPalette(customPalette:)`：那一个内部要先判「用户有没有指定过自定义配色」，没指定就直接把传进来的那份扔了 —— 给「我的主题」里那几行画预览时，配色是外面传进来的（可能正是没在用的那份），不该受当前选中影响。
+    ///
+    /// ### 「默认」这一套要看外观挑明暗
+    /// `MarkdownTheme` 自带那套颜色是照浅色底调的（正文 0.27 的中灰）。深色外观下直接用它，就是深灰字铺黑底，几乎看不见。
+    /// 所以「默认」在深色下换成 `MarkdownColorPalette.darkDefault` 打底 ——
+    /// 界面上仍然是「默认」这一项，用户不用为了深色再挨个挑主题。
+    /// Vue / Vue Dark / 自定义配色是用户显式选的，不掺这一道：选了 Vue Dark 的人在浅色外观下也应该看到深色正文。
     func palette(base: MarkdownColorTheme, merging custom: MarkdownColorPalette?) -> MarkdownColorPalette {
-        guard let custom else { return base.palette }
-        return base.palette.merging(custom)
+        let basePalette = (base == .default && MarkdownAppearance.isDark)
+            ? MarkdownColorPalette.darkDefault
+            : base.palette
+        guard let custom else { return basePalette }
+        return basePalette.merging(custom)
     }
 
     /// 把当前配色写进编辑器主题。

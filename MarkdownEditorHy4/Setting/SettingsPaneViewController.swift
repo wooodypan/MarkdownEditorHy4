@@ -208,7 +208,8 @@ final class SettingsPaneViewController: UIViewController {
             settings.setImageWidthPoints(stepped)
         case .imageMaxHeight:
             settings.setImageMaxHeight(stepped)
-        case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
+        case .appearanceMode,
+             .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
              .savesWebImagesLocally,
              .showsQuoteBackground, .outlineReservesSpace,
              .inlineCodeBacktickBackground,
@@ -303,6 +304,34 @@ final class SettingsPaneViewController: UIViewController {
         control.addTarget(self, action: #selector(imageWidthModeChanged(_:)), for: .valueChanged)
         control.accessibilityLabel = SettingsRow.imageWidthMode.accessibilityLabel
         return makeCell(row: .imageWidthMode, control: control)
+    }
+
+    /// 「外观模式」：点一下弹三档菜单（跟随系统 / 深色 / 浅色）。
+    ///
+    /// ### 为什么用菜单而不是分段控件
+    /// 「跟随系统」四个字最宽，和另外两档平铺进一行会被截成「跟随…」，用户分不出哪个是哪个。
+    /// 菜单一列摆开、当前项打勾，和系统设置里「App 外观」那类选择是一个手感。
+    private func makeAppearanceModeCell() -> UITableViewCell {
+        makeMenuCell(for: .appearanceMode,
+                     title: settings.appearanceMode.displayName,
+                     menu: makeAppearanceModeMenu())
+    }
+
+    /// 三档外观组成的菜单，当前选中的那一项打勾
+    private func makeAppearanceModeMenu() -> UIMenu {
+        let current = settings.appearanceMode
+        let actions = MarkdownAppearanceMode.allCases.map { mode in
+            UIAction(title: mode.displayName,
+                     state: mode == current ? .on : .off) { [weak self] _ in
+                guard let self else { return }
+                // 走 `MarkdownAppearance` 而不是直接写配置：它先把窗口套成新外观，
+                // 再存值并广播 —— 打开的文档收到通知立刻重渲染时，读到的已经是新明暗
+                MarkdownAppearance.setMode(mode, settings: self.settings)
+                // 按钮上的文字跟着换，整表刷新最省事（总共没几行）
+                self.tableView.reloadData()
+            }
+        }
+        return UIMenu(children: actions)
     }
 
     /// 「插入的图片存到哪儿」：一个按钮，点一下弹带对勾的菜单。
@@ -610,6 +639,8 @@ extension SettingsPaneViewController: UITableViewDataSource, UITableViewDelegate
         guard let row = row(at: indexPath) else { return UITableViewCell() }
 
         switch row {
+        case .appearanceMode:
+            return makeAppearanceModeCell()
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
              .savesWebImagesLocally,
              .showsQuoteBackground, .inlineCodeBacktickBackground, .outlineReservesSpace:

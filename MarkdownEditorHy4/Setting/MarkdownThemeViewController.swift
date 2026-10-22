@@ -493,6 +493,16 @@ extension MarkdownThemeViewController: UITableViewDelegate {
         reloadAll()
     }
 
+    /// 明暗变了就重画：预览图和那几行色卡都是按当前外观算出来的颜色，光靠动态色不会自己换。
+    ///
+    /// 这里不挑模式（手动切外观也重画一次）：这一页只有一块 190 点高的预览，多排一遍看不出来；
+    /// 反过来「该刷新却没刷」会让用户看到一套和正文对不上的颜色，更难解释。
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else { return }
+        reloadAll()
+    }
+
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
 

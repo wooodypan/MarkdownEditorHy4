@@ -42,6 +42,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         let window = UIWindow(windowScene: windowScene)
         window.rootViewController = workspace.rootViewController
+        // 套上用户在设置里选的外观（跟随系统 / 深色 / 浅色）。
+        // 必须赶在 `makeKeyAndVisible()` 前面：不然窗口会先按系统外观露一下脸，再被改成用户选的那种，冷启动能看见闪一下
+        MarkdownAppearance.apply(to: window)
         self.window = window
         window.makeKeyAndVisible()
 
@@ -74,6 +77,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         let window = UIWindow(windowScene: windowScene)
         window.rootViewController = SettingsOpener.makeRootViewController()
+        // 设置窗口是第二个场景，外观得单独套一次：`applyToAllWindows` 只在切换那一刻遍历当时的窗口，
+        // 这扇是之后才开的，不补这一下就会留在系统外观里（工作区是深色、设置窗口还是白的）
+        MarkdownAppearance.apply(to: window)
         self.window = window
         window.makeKeyAndVisible()
 

@@ -101,6 +101,33 @@ final class MarkdownEditorSettingsTests: XCTestCase {
         XCTAssertTrue(path.hasSuffix("settings.json"), "实际落盘路径：\(path)")
     }
 
+    // MARK: - 外观模式
+
+    /// 没动过这一项时是「跟随系统」：App 的明暗该和系统一致
+    func testAppearanceDefaultsToSystem() {
+        let settings = MarkdownEditorSettings(fileURL: makeTempFileURL())
+        XCTAssertEqual(settings.appearanceMode, .system, "外观模式默认该是跟随系统")
+    }
+
+    /// 选过之后要真的落盘，App 重启还是那一档
+    func testAppearanceModeIsPersistedAndReloaded() {
+        let url = makeTempFileURL()
+        MarkdownEditorSettings(fileURL: url).setAppearanceMode(.dark)
+
+        let reloaded = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(reloaded.appearanceMode, .dark, "外观模式没落盘，重启就复位了")
+    }
+
+    /// 落盘的模式名认不出来（手改坏了、或者是更早的版本写的）时，只让这一项退回默认，别的设置照旧
+    func testUnknownAppearanceModeFallsBackToSystem() throws {
+        let url = makeTempFileURL()
+        try Data(#"{"appearanceMode":"midnight","remembersScrollPosition":false}"#.utf8).write(to: url)
+
+        let settings = MarkdownEditorSettings(fileURL: url)
+        XCTAssertEqual(settings.appearanceMode, .system, "认不出来的名字该退回跟随系统")
+        XCTAssertFalse(settings.remembersScrollPosition, "一项认不出来不该把整份配置都丢掉")
+    }
+
     // MARK: - 「记住读到哪儿」
 
     /// 一份文档一个记录，互相不串

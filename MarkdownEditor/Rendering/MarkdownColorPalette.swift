@@ -583,6 +583,60 @@ extension MarkdownColorPalette {
         // 主色上用白对勾，对比度最稳
         taskCheckmark: "#ffffff"
     )
+
+    /// **深色默认配色**：`MarkdownTheme` 自带那套颜色（浅色底调的）的深色版。
+    ///
+    /// ### 它什么时候用
+    /// App 的外观切成深色、而用户没有自己指定过配色（也就是设置里选着「默认」）时，
+    /// `MarkdownEditorSettings.applyColors` 用它打底。不这么做的话，正文还是默认主题里那个深灰（0.27），
+    /// 铺在深色底上几乎看不见 —— 症状是「切了深色模式，正文像消失了」。
+    ///
+    /// ### 为什么不做成 `MarkdownColorTheme` 的一个 case
+    /// 那个枚举是**给用户看的**主题清单，多一个 case 就在主题页多一行「深色默认」，
+    /// 和设置页的「外观」重复，用户还得自己想「这俩到底谁管谁」。
+    /// 它是外观的配套，不是一套独立主题，所以只作配色表的静态值留在这里。
+    ///
+    /// ### 颜色是怎么挑的
+    /// 底色用 iOS 分组背景的深色档 `#1c1c1e`（比纯黑柔和，长时间读不刺眼）；正文用近白的中性灰，不用纯白；
+    /// 语法标记压到比底色亮一点的暗灰 —— 和浅色版「标记退到背景里」是同一个思路。
+    /// 代码高亮那五个角色照 Xcode 深色配色取，写代码的人一眼就认。
+    static let darkDefault = MarkdownColorPalette(
+        editorBackground: "#1c1c1e",
+        text: "#e6e6e8",
+        // 浅色版是 0.96 的浅灰（几乎和白底融为一体），深色版对应压到 #3f3f42
+        marker: "#3f3f42",
+        orderedListMarker: "#4fbf8a",
+        link: "#4fbf8a",
+        // 浅色版的蓝灰（0.28/0.40/0.51）提亮，深底上才读得清
+        inlineCode: "#8fb6d9",
+        inlineCodeBacktick: "#7a7a7e",
+        // ⚠️ 必须半透明（理由同浅色主题那条注释：不透明会盖住系统的选中高亮），这里是 8% 的白
+        inlineCodeBackground: "#ffffff14",
+        codeBlockBackground: "#2c2c2e",
+        quoteText: "#d6d6d9",
+        quoteBar: "#4fbf8a",
+        bullet: "#4fbf8a",
+        separator: "#3a3a3c",
+        // 深色下用系统黄 / 橙，透明度比浅色版低一档：底色本身已经很暗，太浓会盖住字
+        searchMatchBackground: "#ffd60a4d",
+        searchCurrentMatchBackground: "#ff9f0acc",
+        // 和 `.tertiaryLabel` 在深色下的取值一致
+        lineNumber: "#6e6e73",
+        collapsedPlaceholder: "#6e6e73",
+        // 下面五个照 Xcode 深色配色（关键字粉、字符串红、注释灰、数字土黄、类型青）
+        keyword: "#fc5fa3",
+        string: "#fc6a5d",
+        comment: "#7f8c98",
+        number: "#d0bf69",
+        type: "#5dd8ff",
+        tableHeaderBackground: "#2c2c2e",
+        tableBorder: "#3a3a3c",
+        tableSourceText: "#8e8e93",
+        taskChecked: "#4fbf8a",
+        taskUncheckedBorder: "#48484a",
+        // 绿底上用白勾，对比度最稳（和 vueDark 一个选择）
+        taskCheckmark: "#ffffff"
+    )
 }
 
 // MARK: - 内置主题

@@ -131,6 +131,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        // ### 先把上次选的外观读回来
+        // 要在建窗口之前：`SceneDelegate` 搭好窗口后会按这里记下的模式套一次。
+        // 放最前面还有个好处 —— 冷启动时界面一露脸就是用户选的那种明暗，不会先闪一下白再变黑
+        MarkdownAppearance.install()
+
         // ### 启动先把「文档目录」准备好
         // 第一次装完 App、Documents 里一份文档都没有时，把 App 包里的 sample.md
         // 复制进去 —— 否则左侧栏是空的，新用户打开只看到一片白，不知道该干什么。

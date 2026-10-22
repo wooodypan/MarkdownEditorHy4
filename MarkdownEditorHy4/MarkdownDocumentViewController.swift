@@ -198,6 +198,24 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         updateEditorTrailingInset()
     }
 
+    // MARK: 外观变化
+
+    /// 系统外观变了（用户在系统设置里切了深色 / 浅色）。
+    ///
+    /// ### 为什么这里要重排一遍
+    /// 编辑区底色是动态色，自己会变；但正文那些字色、代码块底色是**渲染时烙进富文本的实色**，系统切外观不会动它们。
+    /// 不重排的话，系统一开深色就是「黑底上压着一片深灰字」，看着像内容丢了。
+    ///
+    /// ### 只在「跟随系统」那一档处理
+    /// 用户手选了深色 / 浅色时窗口被 override 住，系统怎么切都不该影响 App。
+    /// 那一档的切换走的是设置通知（`settingsDidChange` → `applyEditorStyle`），在这儿再排一次等于白花一遍。
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard MarkdownAppearance.mode == .system,
+              previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else { return }
+        applyEditorStyle()
+    }
+
     // MARK: 界面搭建
 
     private func setupEditor() {
