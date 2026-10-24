@@ -72,6 +72,8 @@ extension MarkdownDocumentViewController {
         }
 
         savedSource = source
+        // 存盘是个天然的存档时机：用户按 ⌘S 就是明确说"这一版我要留住"，顺手往历史里也存一份
+        snapshotHistory(reason: .autoSave)
         // 说一声，让左侧栏重新扫一遍目录。
         // 左栏每一行上显示着文档首行的预览和修改日期，不通知的话用户按完 ⌘S 左边那几行还是旧的。Mac 上左栏一直看得见，这个陈旧会更明显。
         // 照旧走通知，别在这儿直接去刷别的视图控制器

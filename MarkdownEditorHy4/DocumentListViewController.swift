@@ -1326,11 +1326,15 @@ final class DocumentListViewController: UIViewController {
             // 文件夹里所有文档一起没了：两本按路径记的账都要整片清掉
             DocumentScrollMemory.shared.forgetAll(underPrefix: url.path)
             RecentDocumentsStore.shared.removeAll(underPrefix: url.path)
+            // 历史版本同理：这些文档的存档留在那儿只会白占地方，一起清掉
+            try? DocumentHistoryStore.shared.deleteHistory(underDirectory: url)
             // 用户正停在这个文件夹里（或它下面）时，退回文档根目录
             resetCurrentDirectoryIfDeleted(url)
         } else {
             // 顺手忘掉「这份文档上次读到哪儿」：文件名以后可能被重新用上，那时不该莫名其妙跳到文档中间
             DocumentScrollMemory.shared.forget(key: url.path)
+            // 文件都没了，它的历史版本也该清掉（只删这一份文档的文件夹，绝不碰历史根目录）
+            try? DocumentHistoryStore.shared.deleteHistory(fileAt: url)
         }
 
         // 说一声，列表自己会重新扫一遍目录（照旧走通知这一条路，别在这儿直接刷）

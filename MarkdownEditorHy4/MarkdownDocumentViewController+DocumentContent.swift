@@ -55,6 +55,8 @@ extension MarkdownDocumentViewController {
 
     @objc func appWillLeaveForeground() {
         rememberCurrentScrollPosition()
+        // 进程随时可能被系统收走，历史版本得趁这一刻补上（上次自动存档之后写的字都在这里）
+        snapshotHistory(reason: .appBackground)
     }
 
     /// 目录里的文件被改名了，我要是正开着那一份，得把「我对应哪个文件」换过来
@@ -84,6 +86,9 @@ extension MarkdownDocumentViewController {
         openedFileURL = to
         // 旧路径那条「读到哪儿」没人用了。文件名以后可能被重新用上，那时不该莫名跳到文档中间，所以要主动忘掉（和删除那份文档时做的是同一件事）
         scrollMemory.forget(key: from.path)
+        // 历史是按路径存的一个文件夹，改名等于换了一把钥匙，得把那个文件夹整个搬到新钥匙下面。
+        // 不搬的话，这份文档的历史就永远留在旧钥匙那里，界面上再也查不到
+        DocumentHistoryStore.shared.migrateHistory(fromFileAt: from, toFileAt: to)
 
         // 界面还没建好（Tab 先建、后显示）时只改路径就够了，剩下的等 viewDidLoad 走正常流程
         guard isViewLoaded else { return }
@@ -123,6 +128,8 @@ extension MarkdownDocumentViewController {
             scrollMemory.remember(sourceOffset: offset, for: moved.path)
             scrollMemory.forget(key: oldKey)
         }
+        // 历史同理：整个文件夹改了名，里面每份文档的"钥匙"全变了，一次全搬过去
+        DocumentHistoryStore.shared.migrateHistory(fromDirectory: from, toDirectory: to)
 
         // 界面还没建好（Tab 先建、后显示）时只改路径就够了，剩下的等 viewDidLoad 走正常流程
         guard isViewLoaded else { return }

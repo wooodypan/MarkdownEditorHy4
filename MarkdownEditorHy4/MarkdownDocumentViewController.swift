@@ -125,6 +125,12 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// 打字每敲一个键、拖光标每一帧都会想让状态栏重算一次，而算一次要扫全篇源码（字数）。
     /// 合并成 0.12 秒一次的尾部触发，中间那些全丢掉。
     private var statusRefreshWork: DispatchWorkItem?
+    /// 历史版本的"等会儿再存"定时任务。
+    ///
+    /// 大白话：用户打字的时候它一直在倒计时，手停下来够久才真的去存一版；中间每敲一个字就重新计时。
+    ///
+    /// ⚠️ 不能写 `private`：Swift 的 private 只在**本文件**可见，而用它的代码在 `+History` 里，写了那边就摸不到这个属性（主文件里那些 `private` 的都只在本文件用，所以没事）。
+    var historySnapshotWork: DispatchWorkItem?
 
     /// 状态栏那条高度。固定的 22 点（字号 11 加一点呼吸），不随设置变
     private static let statusBarHeight: CGFloat = 22
@@ -185,6 +191,11 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         // 代理要还回导航控制器，理由见 `giveBackPopGesture`。
         // 弹设置 / 主题面板时这个回调也会走一趟，不要紧：那些面板关掉、本页重新出现时 `viewDidAppear` 会再接管一次
         giveBackPopGesture()
+        // 离开这一页（返回、关标签、切到别的 Tab）时补存一版历史。
+        // 大白话：用户常常写完就走，等不到"停手 30 秒"那一次自动存档；走之前先帮他存一份。
+        // 尤其是选「不保存」离开时，这段被丢掉的内容只有历史能救回来。
+        // 内容和上一版相同时，存档会自己跳过，不会攒重复版本。
+        snapshotHistory(reason: .autoSave)
     }
 
     /// 窗口尺寸变了（拉窗口、转屏）之后把悬浮圆点贴回边上。
@@ -638,13 +649,23 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         menuButton.menu = makeActionMenu()
     }
 
-    /// 组装弹出菜单里的条目。
-    /// 每一项就是一行：标题 + 图标 + 点击后要执行的代码（`UIAction`），或者一个带下级菜单的入口（`UIMenu`，「导出」就是这种）。
-    private func makeActionMenu() -> UIMenu {
+    /// 组装「⋯」那个弹出菜单里的条目。
+    ///
+    /// 大白话：这个菜单里每一行就是一个功能入口，点哪行就干哪件事。
+    ///
+    /// 写法上：每一项要么是"标题 + 图标 + 点下去要执行的代码"（`UIAction`），要么是一个带下级菜单的入口（`UIMenu`，「导出」就是这种）。
+    ///
+    /// ⚠️ 不写 `private` 是为了让单测能直接问一句"菜单里有没有『历史版本』"
+    ///（和左栏 `contextMenu(for:)` 那条测试一个路子）。
+    func makeActionMenu() -> UIMenu {
         let actions: [UIMenuElement] = [
             UIAction(title: "查找", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
                 // 顶部滑出查找 / 替换横条
                 self?.showFindBar()
+            },
+            // 「历史版本」：打开"存档柜"，能翻以前存过的版本，也能挑一份恢复（见 showHistory）
+            UIAction(title: "历史版本", image: UIImage(systemName: "clock")) { [weak self] _ in
+                self?.showHistory()
             },
             // 「打字机模式」带勾开关：光标始终停在屏幕中间，正文跟着光标滚（见 toggleTypewriter）
             typewriterAction,
@@ -770,6 +791,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         refreshKeyboardBarButtons()
         // 字数变了。同样拖一下再算：每敲一个键就扫一遍全篇不值当
         scheduleStatusRefresh()
+        // 顺手把"过一会儿存一版历史"重新计时：一直敲就一直往后推，真停手了才写文件
+        scheduleHistorySnapshot()
     }
 
     /// 「我改过了」这件事只上报一次，让宿主把这一页从「预览 Tab」固定成正式 Tab。
