@@ -319,16 +319,15 @@ enum DocumentsWorkspace {
         return candidate
     }
 
-    /// 这份文档是不是**还顶着占位名** —— 也就是「新建出来、用户还没给它起过名字」。
+    /// 这个文件名是不是**占位名**（新建时自动起的名字）。
     ///
-    /// ### 为什么只看文件名，不额外记一个状态
-    /// 记状态就得多存一份数据、还得跟着文件的生命周期同步（改名、删除、
-    /// 从「文件」App 里手动改过名……），任何一处漏了就会错。
-    /// 文件名本身就是最可靠的那份状态：App 重启过、文件被重新打开，
-    /// 这个判断的结果依然是对的。
+    /// 大白话：看名字是不是「未命名」「未命名 2」这种，是的话说明它当初是新建出来的。
     ///
     /// 认这三种：`未命名`、`未命名 2`、`未命名 12`（`uniqueFileURL` 造出来的那些）；
     /// 不认 `未命名abc`、`未命名 2 副本` 这类用户自己起的名字。
+    ///
+    /// ⚠️ 它只管「名字长得像」，**不能**单独拿它决定要不要问用户名字：
+    /// 磁盘上早就存在、用户主动点开的老文件（比如一份 5 KB 的「未命名 2.md」）名字也长这样，拿它当判据会让用户每按一次 ⌘S 都被追问一遍。问不问看 `isFreshDocument`。
     static func isUntitled(_ url: URL) -> Bool {
         let name = displayName(for: url)
         if name == untitledBaseName { return true }
@@ -336,6 +335,38 @@ enum DocumentsWorkspace {
         guard name.hasPrefix(prefix),
               let sequence = Int(name.dropFirst(prefix.count)) else { return false }
         return sequence > 0
+    }
+
+    // MARK: - 刚新建、还没起名字的文档
+
+    /// 本次运行里「App 自己新建出来、用户还没给它起过名字」的文档（规范化路径）。
+    ///
+    /// 大白话：只有刚点「＋」建出来、还没起名字的那一份，按 ⌘S 时才该问你叫什么。
+    ///
+    /// ### 为什么不能只看文件名
+    /// 光看名字像不像「未命名 2」，会把**磁盘上早就存在的老文件**也算进来：
+    /// 用户从左侧栏点开一份以前留下的「未命名 3.md」按 ⌘S，照样被追问名字，而他明明只是想在原文件上存一下。
+    /// 名字只是个线索，真正的事实是「这一份是不是我刚造出来的、还没定名字」—— 那就在造的时候记一笔，定了名字就把账销掉。
+    ///
+    /// 只记在内存里：App 重启之后，这些文件对用户来说就是「磁盘上已有的文档」，打开它们不该再问名字（误弹就是这么修掉的）。
+    private static var freshDocumentPaths: Set<String> = []
+
+    /// 记下「这份文档是我刚新建的」，下次按 ⌘S 要问名字。
+    static func registerFreshDocument(_ url: URL) {
+        freshDocumentPaths.insert(ExternalDocumentAccess.shared.canonicalPath(for: url))
+    }
+
+    /// 销账：名字已经定了（或者文件没了），以后按 ⌘S 直接写回、不再追问。
+    static func unregisterFreshDocument(_ url: URL) {
+        freshDocumentPaths.remove(ExternalDocumentAccess.shared.canonicalPath(for: url))
+    }
+
+    /// 这份文档是不是「刚新建出来、还没起过名字」—— 只有这种情况才该弹框问名字。
+    ///
+    /// 两条都要满足：本次新建的登记还在，而且名字还是占位名。
+    /// 后一条是保险：万一用户绕过 App 把名字改掉了（Finder 里改名），就别再问了。
+    static func isFreshDocument(_ url: URL) -> Bool {
+        isUntitled(url) && freshDocumentPaths.contains(ExternalDocumentAccess.shared.canonicalPath(for: url))
     }
 
     /// 把用户敲进来的一串字，收拾成能当文件名用的样子。
@@ -377,8 +408,12 @@ enum DocumentsWorkspace {
 
         // 一律以 .md 结尾：这个 App 管的都是 markdown 文档
         let destination = url.deletingLastPathComponent().appendingPathComponent("\(name).md")
-        // 名字没变（用户直接点了「保存」，接受了占位名）→ 什么都不用做
-        guard destination.path != url.path else { return url }
+        // 名字没变（用户直接点了「保存」，接受了占位名）→ 什么都不用做。
+        // 但账要销掉：这个名字是他自己按「保存」认下来的，以后不该再问第二遍
+        guard destination.path != url.path else {
+            unregisterFreshDocument(url)
+            return url
+        }
 
         // ⚠️ 重名要**报错**，不能悄悄覆盖：用户以为在「另存」却把别人那份抹了，
         // 是这个功能最容易出的严重事故
@@ -387,6 +422,8 @@ enum DocumentsWorkspace {
         }
 
         try FileManager.default.moveItem(at: url, to: destination)
+        // 名字定了，销账：这一页以后再按 ⌘S 直接写回，不再问
+        unregisterFreshDocument(url)
 
         // ⚠️ 改名这件事必须报出去：右侧要是正开着这份文档，它手里记的还是**旧路径**，那一按 ⌘S 就会把旧名字的文件又写回来 —— 磁盘上凭空多出一份重复的。
         // 报出去之后由编辑页把路径换成新的（见 `MarkdownDocumentViewController.documentDidRename`）。
@@ -455,6 +492,9 @@ enum DocumentsWorkspace {
     static func createEmptyDocument(in directory: URL = folderURL) throws -> URL {
         let url = uniqueFileURL(in: directory)
         try "".write(to: url, atomically: true, encoding: .utf8)
+        // 顺手记一笔：这一份是刚造出来的、还没起名字，第一次按 ⌘S 要问名字（判据见 `isFreshDocument`）。
+        // 只有走这条路建出来的文件才会被登记 —— 用户从左侧栏点开的文件从来没登记过，所以永远不会被追问
+        registerFreshDocument(url)
         return url
     }
 
@@ -547,9 +587,12 @@ enum DocumentsWorkspace {
     static func delete(_ url: URL, putInTrashFirst: Bool = deletionGoesToTrash) throws {
         // `try?` 返回 nil 就代表「废纸篓这条路走不通」，接着往下真删
         if putInTrashFirst, (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil {
+            // 文件没了，登记也跟着销掉：以后再新建一份同名的，不该继承上一份「刚新建」这笔账
+            unregisterFreshDocument(url)
             return
         }
         try FileManager.default.removeItem(at: url)
+        unregisterFreshDocument(url)
     }
 
     /// 这个平台上「删除」到底是进废纸篓还是直接抹掉。

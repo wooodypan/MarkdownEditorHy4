@@ -172,7 +172,9 @@ final class DocumentSaveAsTests: XCTestCase {
     /// 新建出来的文档，⌘S 该走「先问名字」那条路
     func testUntitledDocumentAsksForFileNameBeforeSaving() throws {
         let directory = try makeTempDirectory()
-        let url = try writeDocument("未命名.md", in: directory)
+        // ⚠️ 必须走 `createEmptyDocument`（「＋」按钮和 ⌘N 走的就是它）：
+        // 只有它会登记「这份是刚新建的、还没起名字」。光在磁盘上写一个叫「未命名.md」的文件不算新建
+        let url = try DocumentsWorkspace.createEmptyDocument(in: directory)
         let controller = makeLoadedController(for: url, body: "")
 
         XCTAssertTrue(controller.needsFileNameBeforeSaving,
@@ -189,11 +191,41 @@ final class DocumentSaveAsTests: XCTestCase {
                        "已经有正经名字了还弹框，等于每存一次烦一次")
     }
 
+    /// 🚨 回归：磁盘上早就有的一份「未命名 2.md」，打开它按 ⌘S 不该再问名字
+    ///
+    /// 以前只看文件名像不像占位名，这类老文件每存一次就被追问一次 —— 用户明明点开的是已有文件，按「取消」就白按了。
+    func testExistingFileWithPlaceholderNameSavesDirectly() throws {
+        let directory = try makeTempDirectory()
+        let url = try writeDocument("未命名 2.md", content: "以前写的内容\n", in: directory)
+        let controller = makeLoadedController(for: url, body: "以前写的内容\n")
+
+        XCTAssertFalse(DocumentsWorkspace.isFreshDocument(url),
+                       "没经过新建登记的文件不该算「刚新建」")
+        XCTAssertFalse(controller.needsFileNameBeforeSaving,
+                       "打开的是磁盘上已有的文件，名字再像占位名也不该问")
+    }
+
+    /// 用户直接点「保存」认下占位名：销账，以后不再问第二遍
+    func testAcceptingPlaceholderNameStopsAsking() throws {
+        let directory = try makeTempDirectory()
+        let url = try DocumentsWorkspace.createEmptyDocument(in: directory)
+        let controller = makeLoadedController(for: url, body: "")
+        XCTAssertTrue(controller.needsFileNameBeforeSaving)
+
+        // 名字没变，走的正是「直接点保存」那条分支
+        let saved = controller.save(from: url, as: "未命名")
+
+        XCTAssertEqual(saved?.path, url.path)
+        XCTAssertFalse(controller.needsFileNameBeforeSaving,
+                       "名字是他自己按「保存」认下来的，下次 ⌘S 不该再追问")
+    }
+
     /// 起名保存：文件改名 + 内容写进新文件 + 这一页从此认新路径
     func testSaveAsRenamesAndWritesContent() throws {
         let directory = try makeTempDirectory()
-        let url = try writeDocument("未命名.md", in: directory)
+        let url = try DocumentsWorkspace.createEmptyDocument(in: directory)
         let controller = makeLoadedController(for: url, body: "写进去的内容")
+        XCTAssertTrue(controller.needsFileNameBeforeSaving, "前提：这是刚新建、还没起名字的一份")
         // 直接模拟「用户输入了名字，点了保存」那一步
         let newURL = controller.save(from: url, as: "我的笔记")
 
@@ -210,7 +242,7 @@ final class DocumentSaveAsTests: XCTestCase {
     /// 重名被打回来时：回 nil、不写盘、两份文件都完好（用户换个名字就能接着存）
     func testSaveAsReportsFailureOnTakenName() throws {
         let directory = try makeTempDirectory()
-        let url = try writeDocument("未命名.md", in: directory)
+        let url = try DocumentsWorkspace.createEmptyDocument(in: directory)
         try writeDocument("笔记.md", content: "别人写的", in: directory)
         let controller = makeLoadedController(for: url, body: "我的内容")
 

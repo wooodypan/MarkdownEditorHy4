@@ -23,6 +23,8 @@ extension MarkdownDocumentViewController {
     /// 在它上面第一次按 ⌘S 会弹输入框请用户起名字。这是 Mac 上「新文档第一次保存要问文件名」的老规矩，也是不让文稿目录攒下一串「未命名 7.md」的唯一机会。
     /// 起过名字之后 ⌘S 直接写回，不再问。
     ///
+    /// ⚠️ 只有**这次运行里刚新建**的才会问。磁盘上早就存在的文件（包括名字叫「未命名 2」的老文件），用户点开按 ⌘S 一律直接写回 —— 他挑的就是那份文件，再问一遍名字纯属添乱。
+    ///
     /// 这里刻意不加 private：菜单栏的「存储」项要引用它的 selector，修饰符是 private 的话，AppDelegate 里 `#selector(...)` 取不到
     @objc func saveDocument() {
         guard let url = openedFileURL else {
@@ -42,10 +44,17 @@ extension MarkdownDocumentViewController {
 
     /// 「这一页是不是还没起过名字、保存前得先问一句」。
     ///
-    /// 判断本身在 `DocumentsWorkspace.isUntitled` 里（只看文件名），这里多包一层是为了能单测：弹框那一步在单测里走不起来，但「该不该弹」这条逻辑值得单独钉住。
+    /// 大白话：只有刚刚点「＋」新建出来、还没起名字的那一份会问；从左侧栏打开的旧文件一律不问，直接存回原文件。
+    ///
+    /// ### 为什么不能只看名字像不像「未命名 2」
+    /// 磁盘上本来就躺着这种名字的老文件（新建了没起名就关掉 App，第二天再打开）。
+    /// 只看名字的话，用户点开它按 ⌘S 会被追问一遍名字 —— 他明明只是想在原文件上存一下。
+    /// 所以判据改成「本次运行里刚新建、还没定名字」（见 `DocumentsWorkspace.isFreshDocument`）。
+    ///
+    /// 多包一层是为了能单测：弹框那一步在单测里走不起来，但「该不该弹」这条逻辑值得单独钉住。
     var needsFileNameBeforeSaving: Bool {
         guard let url = openedFileURL else { return false }
-        return DocumentsWorkspace.isUntitled(url)
+        return DocumentsWorkspace.isFreshDocument(url)
     }
 
     /// 把编辑器里的内容写进指定文件。
