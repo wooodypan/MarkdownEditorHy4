@@ -72,6 +72,11 @@ final class DocumentHistoryViewController: UIViewController {
     /// 用户点了「保存当前版本」：报给编辑页去存，只有它知道编辑器里此刻是什么内容。
     /// - Returns: 这次保存的结果，由本页显示；编辑页已经关掉时回 nil
     var onSaveCurrentVersion: (() -> DocumentHistoryFeedback?)?
+    /// 问编辑页要"编辑器里现在写的是什么"。
+    ///
+    /// 点进某一版时，拿它跟那一版比，用户就能看见"点恢复会改掉哪些行"。
+    /// 用闭包而不是打开这一页时就把文字拷一份：内容一直活在编辑器里，随时要最新的一份最省心。
+    var currentContent: (() -> String?)?
     /// 清单坏掉、读不出来时，把原因记在这儿，显示在空白的列表中间
     private var loadErrorMessage: String?
     /// 最近一次操作的结果，显示成列表顶上的一条横幅。
@@ -100,7 +105,8 @@ final class DocumentHistoryViewController: UIViewController {
     /// 列表上"什么时候存的"怎么显示成一行字。
     ///
     /// 特意做成 `static`：整个列表共用这一个 —— `DateFormatter` 造一次挺贵，每行造一个会拖慢滚动。
-    private static let dateFormatter: DateFormatter = {
+    /// 预览页也要用它显示标题，所以没写 `private`。
+    static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         // short / short 是"跟着系统语言走"的格式，中文下大概是「2026/9/29 01:07」
         formatter.dateStyle = .short
@@ -224,7 +230,9 @@ final class DocumentHistoryViewController: UIViewController {
             showAlert(title: "读不出这一版", message: error.localizedDescription)
             return
         }
-        let preview = DocumentVersionPreviewController(version: version, content: text)
+        let preview = DocumentVersionPreviewController(version: version,
+                                                      content: text,
+                                                      currentContent: currentContent?() ?? "")
         preview.onRestore = { [weak self] in self?.confirmRestore(version) }
         navigationController?.pushViewController(preview, animated: true)
     }
@@ -294,65 +302,6 @@ extension DocumentHistoryViewController: UITableViewDataSource, UITableViewDeleg
         } else {
             showVersion(versions[indexPath.row])
         }
-    }
-}
-
-// MARK: - 预览某一版
-
-/// 某一版的正文，只读。
-///
-/// 大白话：先让你看看"以前那份长什么样"，确认是它了再点右上角「恢复」。
-final class DocumentVersionPreviewController: UIViewController {
-
-    /// 用户点了「恢复」。真正的确认框在上一页（列表页）弹，这里只负责把话传出去
-    var onRestore: (() -> Void)?
-
-    private let version: DocumentVersion
-    private let content: String
-
-    init(version: DocumentVersion, content: String) {
-        self.version = version
-        self.content = content
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("DocumentVersionPreviewController 不支持从 coder 解档")
-    }
-
-    /// 原因见 `MarkdownBlock` / `OutlineCoordinator` 里 `nonisolated deinit` 那段长注释。
-    nonisolated deinit {}
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        title = version.reason.displayName
-        view.backgroundColor = .systemBackground
-
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "恢复",
-                                                            style: .plain,
-                                                            target: self,
-                                                            action: #selector(restoreTapped))
-
-        let textView = UITextView()
-        textView.translatesAutoresizingMaskIntoConstraints = false
-        textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.text = content
-        // 只读：这一页是"看看以前长什么样"，顺手改两笔再恢复，容易搞混改的到底是哪一版
-        textView.isEditable = false
-        textView.alwaysBounceVertical = true
-        textView.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-        view.addSubview(textView)
-
-        NSLayoutConstraint.activate([
-            textView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            textView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            textView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            textView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-        ])
-    }
-
-    @objc private func restoreTapped() {
-        onRestore?()
     }
 }
 

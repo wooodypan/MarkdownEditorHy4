@@ -92,6 +92,8 @@ extension MarkdownDocumentViewController {
         // 存哪一版、恢复哪一版都交给编辑页决定（编辑器里此刻是什么内容，只有它知道）
         list.onSaveCurrentVersion = { [weak self] in self?.saveCurrentVersionToHistory() }
         list.onRestoreVersion = { [weak self] in self?.restoreHistoryVersion($0) }
+        // 点进某一版时要跟编辑器里现在的内容比，用户才看得见"点恢复会改掉哪些行"
+        list.currentContent = { [weak self] in self?.editor.markdownSource }
         // 包一层导航控制器：列表要能 push 进预览页，也要有「完成」能关掉
         present(UINavigationController(rootViewController: list), animated: true)
     }
