@@ -64,4 +64,36 @@ final class MarkdownEditController: NSObject, UITextViewDelegate {
     func textViewDidEndEditing(_ textView: UITextView) {
         self.textView?.reconcileFromTextChange()
     }
+
+    // MARK: 右键菜单
+
+    /// 选中文字后的菜单里加一项「清除文本格式」。
+    ///
+    /// ### 为什么写在 delegate 里，而不是照方案文档写进 textView 子类
+    /// 文档里那套示例把 `delegate` 设成 textView 自己；本项目的 delegate 是编辑控制器，文本变化、输入法补排、大纲上报全靠它，换掉等于把编辑管线拆了。
+    /// 好在 iOS 16 起「自定义编辑菜单」本来就是 delegate 的活，放这里正合适。
+    ///
+    /// ### Mac 上走的是同一条路
+    /// Catalyst 的右键菜单就是指针形态的编辑菜单（`UIEditMenuInteraction`），16 起同样会问这个方法；
+    /// 不用再往 `buildMenu` 里插一份，否则菜单里会出现两个同名项。
+    func textView(_ textView: UITextView,
+                  editMenuForTextIn range: NSRange,
+                  suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard let editor = self.textView, editor === textView else {
+            return UIMenu(children: suggestedActions)
+        }
+        // 没选中东西时不加；只读时一个字都不许改，也不摆这一项
+        guard range.length > 0, !editor.isReadOnly else {
+            return UIMenu(children: suggestedActions)
+        }
+
+        let action = UIAction(title: "清除文本格式") { [weak editor] _ in
+            editor?.clearMarkdownFormatting()
+        }
+        // 选中的这段里没有能清的标记时置灰：菜单项一直都在（用户找得到），但不会点了没反应
+        if !editor.canClearMarkdownFormatting {
+            action.attributes = .disabled
+        }
+        return UIMenu(children: suggestedActions + [action])
+    }
 }

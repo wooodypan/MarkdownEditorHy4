@@ -61,7 +61,14 @@ extension MarkdownTextView {
     ///
     /// ### 出处
     /// 「拿 `hasImages` 把 `paste:` 点亮」这一手不是自己想出来的，抄的是 MiaoYan（妙言）iOS 端编辑器 `MiaoYanMobile/Views/MarkdownEditorView.swift`，它在同一个位置覆写了 `canPerformAction`。
+    ///
+    /// ### 顺带管一下「清除文本格式」(⌘\)
+    /// 一个类只能有一处覆写 `canPerformAction`，所以菜单栏那一项的可用性判断也搭在这儿 —— 它跟剪贴板没关系，但没别的位置可放。
+    /// 判据和右键菜单里那一项完全相同（没东西可清就置灰），两边不会出现「菜单能点、右键是灰的」这种不一致。
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(clearMarkdownFormatting) {
+            return canClearMarkdownFormatting
+        }
         if action == #selector(paste(_:)), UIPasteboard.general.hasImages {
             return true
         }

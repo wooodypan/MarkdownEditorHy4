@@ -60,16 +60,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             let takenInputs: Set<String> = ["n", "s"]
 
             /// 这一项（或者它下面任意一层）有没有占用我们要用的快捷键。
-            /// `UICommand`（Move / Rename… 那种系统项）读不到快捷键，一律当没占用。
             func takesOurShortcut(_ element: UIMenuElement) -> Bool {
-                if let command = element as? UIKeyCommand {
-                    guard let input = command.input, command.modifierFlags == .command else { return false }
-                    return takenInputs.contains(input)
-                }
-                if let menu = element as? UIMenu {
-                    return menu.children.contains(where: takesOurShortcut)
-                }
-                return false
+                takenInputs.contains { occupiesShortcut(element, input: $0, modifiers: .command) }
             }
 
             // 分组里只要有一项撞上就**整组摘掉**（不去动组内其他项）：现实里这样的分组都只装着自己一项 —— 上面那条 New Window 就是独占 `com.apple.menu.new-item` 一组的。
@@ -89,6 +81,21 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             builder.insertSibling(fileMenu, afterMenu: .application)
         }
 
+        // ### 「清除文本格式」(⌘\)
+        // 和右键菜单里那一项是同一个动作（`MarkdownTextView.clearMarkdownFormatting`），快捷键沿用 Typora / Google Docs 的「清除格式」。
+        // 菜单项靠响应链找实现：光标在编辑区才亮，只读或者没选中东西时变灰（判据和右键菜单那一项完全相同，写在 `MarkdownTextView+Clipboard.swift` 的 `canPerformAction` 里）。
+        // ⚠️ 和「文件」菜单同样的坑：同一个快捷键不许出现第二条，撞上就是启动即崩。系统默认的「编辑」菜单里没有 ⌘\，仍然先查一遍再插。
+        if let editMenu = builder.menu(for: .edit),
+           !editMenu.children.contains(where: { occupiesShortcut($0, input: "\\", modifiers: .command) }) {
+            let clearFormatting = UIKeyCommand(title: "清除文本格式",
+                                               action: #selector(MarkdownTextView.clearMarkdownFormatting),
+                                               input: "\\",
+                                               modifierFlags: .command)
+            // 标题留空 + `.displayInline`：平铺在「编辑」菜单最下面，不生成二级菜单
+            let clearFormattingMenu = UIMenu(title: "", options: .displayInline, children: [clearFormatting])
+            builder.insertChild(clearFormattingMenu, atEndOfMenu: .edit)
+        }
+
         // ### 「设置…」(⌘,)
         // 这是 macOS 的固定约定：菜单项放在 App 菜单里「关于」的**正下方**，快捷键就是 ⌘+逗号。
         // 系统只在 App 自带 `Settings.bundle` 时才会自动提供这一项（本工程没有），所以得自己加 —— 也正因为没有，撞不上系统那条，不用担心快捷键重复。
@@ -100,6 +107,26 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // 标题留空 + `.displayInline`：不生成二级菜单，这一行直接平铺在 App 菜单里（和上面「存储」那个分组的写法一样）。
         let preferencesMenu = UIMenu(title: "", options: .displayInline, children: [preferences])
         builder.insertSibling(preferencesMenu, afterMenu: .about)
+    }
+
+    /// 菜单里这一项（连同它下面每一层子菜单）有没有占着某个快捷键。
+    ///
+    /// `UICommand`（Move / Rename… 那种系统项）读不到快捷键，一律当没占用。
+    ///
+    /// ### 为什么要查
+    /// UIKit 对重复快捷键是零容忍的：同一个组合键出现第二条，会在菜单构建那一刻抛 `NSInvalidArgumentException: Replacement elements contain duplicates` 直接崩。
+    /// 所以每加一条自定义菜单项之前，都先拿它过一遍这个判断。
+    private func occupiesShortcut(_ element: UIMenuElement,
+                                  input: String,
+                                  modifiers: UIKeyModifierFlags) -> Bool {
+        if let command = element as? UIKeyCommand {
+            guard let commandInput = command.input else { return false }
+            return commandInput == input && command.modifierFlags == modifiers
+        }
+        if let menu = element as? UIMenu {
+            return menu.children.contains { occupiesShortcut($0, input: input, modifiers: modifiers) }
+        }
+        return false
     }
     #endif
 

@@ -3,6 +3,7 @@
 //  MarkdownEditorHy4
 //
 //  编辑态的 markdown 快捷键：⌘B / ⌘I / ⌘U / ⌘K / ⌘1~⌘6 / ⌘0 / ⌥⌘C / ⌥⌘Q
+//  外加右键菜单里的「清除文本格式」。
 //
 //  ### 这批命令共用两条规矩（改的时候别破）
 //  1. **改的是源码，不是渲染出来的富文本。** 所有替换文本都是 markdown 记号本身
@@ -319,6 +320,98 @@ extension MarkdownTextView {
             replaceSourceRange(lines.range, with: newText)
         }
         placeCaret(atSource: lines.range.location + (newText as NSString).length)
+    }
+
+    // MARK: - 右键菜单：清除文本格式
+
+    /// 右键菜单里的「清除文本格式」现在有没有东西可清。
+    ///
+    /// 菜单里这一项一直在（选中文字就会出现），没有可清的标记时置灰，见 `MarkdownEditController` 里的 `editMenuForTextIn`。
+    var canClearMarkdownFormatting: Bool {
+        guard let target = clearFormattingTarget() else { return false }
+        return target.cleaned != target.original
+    }
+
+    /// 右键菜单的动作：脱掉选中部分的 markdown 标记符，文字一个不动。
+    ///
+    /// 走的是标准编辑管线（源码范围替换 → 局部重解析 → 局部重渲染），撤销、目录刷新、装饰重摆都会自动跟上。
+    @objc func clearMarkdownFormatting() {
+        guard let target = clearFormattingTarget(), target.cleaned != target.original else { return }
+
+        performUndoableModelEdit(actionName: "清除文本格式") {
+            replaceSourceRange(target.sourceRange, with: target.cleaned)
+        }
+        // 清完仍然选着那段文字，用户一眼能确认「格式没了、字还在」
+        selectSourceRange(NSRange(location: target.sourceRange.location,
+                                  length: (target.cleaned as NSString).length))
+    }
+
+    /// 选区 → 源码范围、原文、清完的样子；没选中东西或者只读时返回 nil。
+    ///
+    /// ### 为什么要按块切开
+    /// 代码块里的 `*`、`~~`、反引号和行首 `# 注释` 都是代码本身，不是 markdown 标记。
+    /// 整段丢给清洗器会把代码改坏（两行 shell 注释的 `#` 会被当成标题删掉），所以代码块整段原样跳过。
+    private func clearFormattingTarget() -> (sourceRange: NSRange, original: String, cleaned: String)? {
+        guard !isReadOnly, markedTextRange == nil else { return nil }
+        let selection = selectedSourceRange
+        guard selection.length > 0 else { return nil }
+
+        let source = sourceText
+        let end = NSMaxRange(selection)
+        guard end <= source.length else { return nil }
+
+        let original = source.substring(with: selection)
+        var cleaned = ""
+        var cursor = selection.location
+
+        for block in documentStore.blocks {
+            let blockStart = block.sourceRange.location
+            let blockEnd = NSMaxRange(block.sourceRange)
+            guard blockEnd > selection.location, blockStart < end else { continue }
+
+            let pieceStart = max(cursor, blockStart)
+            let pieceEnd = min(end, blockEnd)
+            guard pieceEnd > pieceStart else { continue }
+
+            // 块与块首尾相接，理论上没有缝；真要有，缝里那截当普通正文处理
+            if pieceStart > cursor {
+                cleaned += source.substring(with: NSRange(location: cursor, length: pieceStart - cursor))
+            }
+
+            let piece = source.substring(with: NSRange(location: pieceStart, length: pieceEnd - pieceStart))
+            if block.isCodeBlock {
+                cleaned += piece
+            } else {
+                cleaned += MarkdownFormattingCleaner.stripped(
+                    piece,
+                    startsAtLineStart: isLineStart(pieceStart, in: source),
+                    precededByWord: pieceStart > 0 && isWordUnit(source.character(at: pieceStart - 1)),
+                    followedByWord: pieceEnd < source.length && isWordUnit(source.character(at: pieceEnd))
+                )
+            }
+            cursor = pieceEnd
+        }
+
+        if cursor < end {
+            cleaned += source.substring(with: NSRange(location: cursor, length: end - cursor))
+        }
+        return (selection, original, cleaned)
+    }
+
+    /// 源码里的这个偏移是不是一行的开头（文档开头也算）。
+    private func isLineStart(_ offset: Int, in source: NSString) -> Bool {
+        guard offset > 0 else { return true }
+        let previous = source.character(at: offset - 1)
+        return previous == 0x0A || previous == 0x0D
+    }
+
+    /// 源码里的这个 UTF-16 单元算不算「单词里的字符」。
+    ///
+    /// 只有清除格式判断词内下划线时会问它：选区可能刚好从 `snake_case` 中间起头，段落里看不到左边那个字母，得回到整篇源码里查。
+    /// 字母（含中文）和数字算，空格 / 标点不算；代理对（emoji）拼不出合法标量，一律当分隔符。
+    private func isWordUnit(_ unit: UInt16) -> Bool {
+        guard let scalar = Unicode.Scalar(unit) else { return false }
+        return CharacterSet.alphanumerics.contains(scalar)
     }
 
     // MARK: - 整行搬家（⌥↑ / ⌥↓）
