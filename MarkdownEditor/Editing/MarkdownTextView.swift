@@ -448,6 +448,9 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
     /// 弹窗交给外面（内容页）去做。
     var onImageTapped: ((ImageAttachment) -> Void)?
 
+    /// 给外部调用方发送消息，让调用方觉得怎么显示
+    var onStatusMessage: ((String) -> Void)?
+
     /// 装一个「透明」的点击手势：认出点击位置，但不拦下这次触摸。
     ///
     /// `cancelsTouchesInView = false` 是关键 —— 编辑器还得靠这次触摸去放光标、

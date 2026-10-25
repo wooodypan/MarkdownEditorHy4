@@ -295,6 +295,12 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             self?.previewImage(attachment)
         }
 
+        // 编辑器做完一件「视觉上几乎没变化」的事（比如清掉行首的 `#`）之后只会说一声，怎么显示归这一层管。
+        // 提示挂在 window 上而不是编辑器上，否则会跟着正文一起滚走
+        editor.onStatusMessage = { [weak self] message in
+            MarkdownToast.show(message, in: self?.view.window)
+        }
+
         // 键盘上方挂一条工具条：左边撤销 / 重做，右边「收起键盘」（手机上键盘挡住半屏，得留个出口）。
         // 工具条本身不认识编辑器，所以三个动作都在这里接上。
         // 只有软键盘弹出来时它才看得见，Mac 上接着实体键盘打字的话这一条不会出现。

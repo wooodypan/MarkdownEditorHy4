@@ -344,6 +344,9 @@ extension MarkdownTextView {
         // 清完仍然选着那段文字，用户一眼能确认「格式没了、字还在」
         selectSourceRange(NSRange(location: target.sourceRange.location,
                                   length: (target.cleaned as NSString).length))
+
+        // 清完给外部使用编辑器的一方信息反馈，怎么显示是 App 的事
+        onStatusMessage?("已清除文本格式")
     }
 
     /// 选区 → 源码范围、原文、清完的样子；没选中东西或者只读时返回 nil。
