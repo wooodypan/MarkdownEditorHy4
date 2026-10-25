@@ -64,6 +64,13 @@ struct MarkdownOutlineAppearance {
     ///
     /// 值由上层按用户的设置注入 —— 这个文件不认识 App 层的配置，只认别人塞给它的值；组件这一层不做下限（用户在设置页能选到的最低是 0.2，那个范围属于配置层）
     var backgroundOpacity: CGFloat = 1
+    /// 手风琴折叠：同一时间最多展开一个二级标题（H2）。
+    ///
+    /// - 关闭（默认）：行为和以前一样，多个二级标题可以同时展开；
+    /// - 打开：展开一个新的二级标题时，其它展开着的二级标题自动收起来。
+    ///
+    /// 值由上层按用户的设置注入 —— 这个文件不认识 App 层的配置，只认别人塞给它的值
+    var accordionEnabled: Bool = false
     /// 空文档时占位文字那块的高度
     var emptyStateHeight: CGFloat = 42
 }
@@ -80,6 +87,7 @@ struct MarkdownOutlineAppearance {
 /// ### 交互
 /// - 点某一行 → 通过 `delegate` 把 `OutlineItem` 报出去（谁接、接了干什么，它不知道）；
 /// - 点一行右边的三角 → 展开 / 折叠这一节（收起来它下面的所有子标题）；
+/// - 打开手风琴模式后，展开一个二级标题会顺手把别的二级标题收起来（见 `appearance.accordionEnabled`）；
 /// - 点标题栏的「全部折叠 / 全部展开」→ 一刀切地折起或放出所有能折的节；
 /// - 点标题栏最右边的箭头 → 收起成一个小方块，再点小方块展开（长文档时把编辑区让出来）。
 ///
@@ -178,6 +186,13 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 见 `effectiveHighlightID`
     private var requestedHighlightID: UUID?
 
+    /// 手风琴模式：等下一次「点亮某一行」的时候再收拢二级标题。
+    ///
+    /// ### 为什么不在列表更新时当场收
+    /// `updateOutlineItems` 那一刻拿不到「光标在哪」，只能把所有二级标题都折起来 —— 连用户正在看的那一节也会被折掉，启动时恢复阅读位置最明显。
+    /// 协调者紧接着会发一次 `highlightOutlineItem`，那时候再收就留得住当前这一节。
+    private var wantsAccordionReset = false
+
     // MARK: 子视图
 
     /// 卡片本体。收起 / 展开都是改它的宽高约束，不换视图。
@@ -220,8 +235,11 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     /// 卡片底色的基色（不透明度另配）。
     ///
-    /// ⚠️ 用 `.secondarySystemBackground` 而不是 `.systemBackground`：编辑区自己就是 `.systemBackground`，卡片跟它同色的话那条边界就看不见了 —— 卡片「浮在正文上面」的感觉全靠这点色差
-    private static let panelBaseColor = UIColor.secondarySystemBackground
+    /// 浅色下用纯白：用户要的是白底卡片，比原来那层浅灰更干净，和编辑区同色也没关系，卡片边界靠圆角和毛玻璃。
+    /// ⚠️ 深色下不能跟着用白：标题文字用的是 `.label`，深色模式里它是白字，铺在白底上直接看不见。所以深色沿用系统那层深灰。
+    private static let panelBaseColor = UIColor { traits in
+        traits.userInterfaceStyle == .dark ? .secondarySystemBackground : .white
+    }
 
     /// 卡片用的毛玻璃效果。
     ///
@@ -276,6 +294,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     /// 整份标题列表变了，重建所有行
     func updateOutlineItems(_ items: [OutlineItem]) {
+        // 列表是不是从「一条都没有」变成有内容 —— 打开文档走的就是这条路
+        let wasEmpty = self.items.isEmpty
         // 第一步先把「用户折叠了哪几个标题」认到新列表的 id 上。
         // 必须在这之前做：下面 `self.items = items` 一执行，旧 id 就再也查不到了
         collapsedIDs = OutlineCollapseState.inherit(from: self.items,
@@ -287,6 +307,11 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         collapsibleIDs = Set(tree.collapsibleIndices.map { items[$0].id })
         // 列表换了，里面可能已经没有原来折着的那些标题了，清一遍残留标记
         collapsedIDs.formIntersection(collapsibleIDs)
+        // 手风琴模式：列表从「一条都没有」变成有内容 —— 打开文档走的就是这条路。
+        // 那一刻还不知道光标在哪，等下一次高亮再收（理由见 `wantsAccordionReset`）
+        if appearance.accordionEnabled, wasEmpty {
+            wantsAccordionReset = true
+        }
         // 编辑会让列表整份重建，位置**必须**保住 —— 否则正文里每敲一个字，右边的目录就「唰」地跳回顶部
         rebuildRows(animated: false, preserveScroll: true)
     }
@@ -296,6 +321,13 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         // 只记「要求点亮谁」。真正点亮哪一行要按当前折叠状态现算（见 effectiveHighlightID），
         // 这样行重建、折叠变化之后都不会丢高亮
         requestedHighlightID = id
+        // 「光标在哪」这次终于知道了，手风琴模式该收拢一次了（见 `wantsAccordionReset`）
+        if wantsAccordionReset {
+            wantsAccordionReset = false
+            if normalizeAccordionState() {
+                rebuildRows(animated: false, preserveScroll: true)
+            }
+        }
         refreshHighlightAppearance()
 
         // 把高亮那一行滚进可视区。这一步**无条件做**：大纲不跟着光标走的话，光标跑到文档后半段时目录还停在开头，等于没有大纲。
@@ -319,11 +351,15 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
 
     /// 切换某一行的折叠状态。
     ///
-    /// 没有子标题的行不给折 —— 折了之后没有任何东西会消失，看着像坏了
+    /// 没有子标题的行不给折 —— 折了之后没有任何东西会消失，看着像坏了。
+    /// 手风琴模式下展开一个二级标题时，顺手把其它二级标题收起来（见 `appearance.accordionEnabled`）
     func toggleCollapse(id: UUID) {
         guard let index = tree.index(of: id), tree.canCollapse(at: index) else { return }
         if collapsedIDs.contains(id) {
             collapsedIDs.remove(id)
+            if appearance.accordionEnabled, items[index].level == 2 {
+                collapseOtherLevelTwoSections(keeping: id)
+            }
         } else {
             collapsedIDs.insert(id)
         }
@@ -351,11 +387,29 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         rebuildRows(animated: true, preserveScroll: false)
     }
 
-    /// 一刀切：全部放出来（回到「默认全展开」）
+    /// 一刀切：全部放出来。
+    ///
+    /// 手风琴模式下不能真的「全放」（二级标题只允许开一个），改成**放开当前这一节** ——
+    /// 点这个按钮的人多半是想把「我正读的那节」看全，而不是把别人的章节也摊开。
+    /// 见 `expandCurrentSectionOnly`
     func expandAll() {
         guard !collapsedIDs.isEmpty else { return }
         collapsedIDs.removeAll()
+        expandCurrentSectionOnly()
         rebuildRows(animated: true, preserveScroll: true)
+    }
+
+    /// 手风琴模式下的「全部展开」：只放开光标所在的那一个二级标题，别的照旧收着。
+    ///
+    /// 光标不在任何二级标题里（在 H1 的正文里、或者在文档开头）时退回**第一个**二级标题。
+    /// 不能一个都不开：那样点完这个按钮屏幕上一点变化都没有，按钮图标还停在「全部展开」上，看着像坏了。
+    private func expandCurrentSectionOnly() {
+        guard appearance.accordionEnabled else { return }
+        let keep = levelTwoAncestorID(of: requestedHighlightID)
+            ?? items.indices.first { items[$0].level == 2 }.map { items[$0].id }
+        collapsedIDs = Set(items.indices
+            .filter { items[$0].level == 2 && items[$0].id != keep }
+            .map { items[$0].id })
     }
 
     /// 标题栏按钮的动作：现在全折着就放出来，否则全折起来
@@ -371,9 +425,72 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
     /// 正好在源码偏移 0 上 —— 按规则就会被上一份文档的折叠状态认走，
     /// 一打开新文件发现第一节是折着的。换文档时清一遍最省事，也不会认错。
     func resetFolding() {
-        guard !collapsedIDs.isEmpty else { return }
         collapsedIDs.removeAll()
+        applyInitialAccordionState()
         rebuildRows(animated: false, preserveScroll: true)
+    }
+
+    /// 换文档时手风琴模式的起点：二级标题一个都不展开。
+    ///
+    /// ### 为什么不直接用 `normalizeAccordionState()`
+    /// 它保留的是「当前高亮所属」的那个二级标题，可这一刻的高亮是**按上一份文档的光标位置**算出来的 ——
+    /// 留着它等于随手挑了一节摊开，用户刚打开新文档就看到中间某节是展开的。
+    /// 新文档的光标在开头，全折才是「刚打开」该有的样子：只看得到二级标题这一层，想看哪节自己点开。
+    ///
+    /// 没有子标题的二级标题折了也不会让任何一行消失，多记一个 id 无害（下次列表更新时会被 `collapsibleIDs` 清掉）。
+    ///
+    /// 一条标题都还没有时什么都不做：那种时候只有「打开文档」那条路会走到这里，新列表随后就到，
+    /// 它会走 `wasEmpty` 那条路再收一次（见 `wantsAccordionReset`）
+    private func applyInitialAccordionState() {
+        guard appearance.accordionEnabled, !items.isEmpty else { return }
+        collapsedIDs = Set(items.indices.filter { items[$0].level == 2 }.map { items[$0].id })
+    }
+
+    // MARK: - 手风琴折叠
+
+    /// 当前展开着的、能折的二级标题 id，按文档顺序。
+    private var expandedLevelTwoIDs: [UUID] {
+        tree.collapsibleIndices
+            .filter { items[$0].level == 2 }
+            .map { items[$0].id }
+            .filter { !collapsedIDs.contains($0) }
+    }
+
+    /// 展开一个二级标题之后，把其它展开着的二级标题收起来。
+    private func collapseOtherLevelTwoSections(keeping keepID: UUID) {
+        for id in expandedLevelTwoIDs where id != keepID {
+            collapsedIDs.insert(id)
+        }
+    }
+
+    /// 手风琴模式：把展开着的二级标题收到最多一个。
+    ///
+    /// 保留谁：光标所在的那个二级标题 —— 用户正在看这一节，不能把它折掉。
+    /// 光标不在任何二级标题里时就一个都不留，那正是刚打开文档 / 刚换文档时的默认样子：只看到二级标题这一层。
+    ///
+    /// - returns: 折叠状态有没有被改动（调用方据此决定要不要重建列表）
+    @discardableResult
+    private func normalizeAccordionState() -> Bool {
+        guard appearance.accordionEnabled else { return false }
+        let expanded = expandedLevelTwoIDs
+        guard expanded.count > 1 else { return false }
+        let keep = levelTwoAncestorID(of: requestedHighlightID)
+        var changed = false
+        for id in expanded where id != keep {
+            collapsedIDs.insert(id)
+            changed = true
+        }
+        return changed
+    }
+
+    /// 这个条目往上找最近的二级标题（含它自己）。
+    private func levelTwoAncestorID(of id: UUID?) -> UUID? {
+        guard let id, var index = tree.index(of: id) else { return nil }
+        while true {
+            if items[index].level == 2 { return items[index].id }
+            guard let parent = tree.parents[index] else { return nil }
+            index = parent
+        }
     }
 
     // MARK: - 收起 / 展开（面板整体收起成小方块，和上面那个「折叠某一行」是两码事）
@@ -403,6 +520,8 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         panel.layer.cornerRadius = appearance.cornerRadius
         // 背景不透明度也是「外观」的一部分，一起重刷（这一层不参与尺寸计算，改它不影响宽高）
         applyBackgroundOpacity()
+        // 手风琴开关可能刚被拨动：先把多出来的二级标题收掉，再统一重建一次
+        normalizeAccordionState()
         // 同上：宽高变了也把位置保住，别让用户滚到一半被甩回顶部
         rebuildRows(animated: false, preserveScroll: true)
     }
@@ -491,6 +610,16 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         // ⚠️ 这里**故意不设** panel.alpha：一旦给毛玻璃容器打上小于 1 的 alpha，「背景不透明度 = 100%」就永远只有 70%，卡片盖不严实，连标题文字都跟着发灰 —— 而设置页上写着「这一项只管背景，标题文字不会跟着变淡」。
         // 要让卡片透，请走 `appearance.backgroundOpacity`
         addSubview(panel)
+
+        // 一圈很淡的阴影。浅色下卡片是纯白、编辑区也是白的，不托一下就看不出卡片在哪儿结束 ——
+        // 屏幕上像一片直接浮在正文上的字。深色下这圈阴影看不见也没关系，深色卡片本来就比背景亮。
+        //
+        // 打在**外层**（本视图）而不是 `panel` 上：`panel` 自己 `clipsToBounds = true`，
+        // 阴影画在它自己的边界外，会被自己裁掉
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.1
+        layer.shadowRadius = 8
+        layer.shadowOffset = CGSize(width: 0, height: 2)
 
         panelWidthConstraint = panel.widthAnchor.constraint(equalToConstant: appearance.width)
         panelHeightConstraint = panel.heightAnchor.constraint(equalToConstant: appearance.headerHeight)
@@ -731,7 +860,28 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         // 尺寸改完让布局跑一次：下面要用 contentSize 夹滚动范围，也得让新的 cell 建出来
         layoutIfNeeded()
         applyScrollOffset(previousScrollOffset)
-        refreshHighlightAppearance()
+        refreshVisibleRowStates()
+    }
+
+    /// 把「折叠三角朝哪边 / 缩进 / 高亮」这些**不参与快照比较**的状态刷到屏幕上的 cell 上。
+    ///
+    /// ### 为什么必须手动刷一遍
+    /// 快照只认 id：`collapsedIDs` 变了、而那一行的 id 没变时，diffable 认为「这一行没动」，
+    /// 根本不会再问数据源要一次 cell —— 于是三角还停在上一轮的朝向。
+    /// 用户看到的就是「点完了箭头不跟着转，几行之间的箭头互相乱套」。
+    /// 只刷可见的那十几行，代价可以忽略。
+    private func refreshVisibleRowStates() {
+        let target = effectiveHighlightID
+        for indexPath in collectionView.indexPathsForVisibleItems {
+            guard let cell = collectionView.cellForItem(at: indexPath) as? OutlineRowCell,
+                  let id = cell.item?.id,
+                  let index = tree.index(of: id) else { continue }
+            cell.configure(item: items[index],
+                           appearance: appearance,
+                           collapsed: collapsedIDs.contains(id),
+                           highlighted: id == target,
+                           showsDisclosure: tree.canCollapse(at: index))
+        }
     }
 
     /// 照当前的树 + 折叠状态，生成分区快照并应用
@@ -776,11 +926,20 @@ final class MarkdownOutlineView: UIView, MarkdownOutlineDisplaying {
         collapseAllButton.tintColor = collapsibleIDs.isEmpty ? .tertiaryLabel : .secondaryLabel
     }
 
-    /// 第 index 行被点了（整行点击 = 跳转）
+    /// 第 index 行被点了。
+    ///
+    /// 平时只有一件事：跳到这一节（**整行点击 = 跳转**）。
+    ///
+    /// 手风琴模式下点**二级标题**还兼任「展开 / 收起」，和右边那个三角走同一个入口（`toggleCollapse`）——
+    /// 两条路各写一套的话早晚有一边忘了收别的节。没有子标题的二级标题点了也不会变
+    /// （`toggleCollapse` 里 `canCollapse` 就把门关上了）。
     private func handleRowTap(at index: Int) {
         guard visibleItems.indices.contains(index) else { return }
-        // 自己不知道点了之后要干嘛，交给外面
-        delegate?.outlineView(self, didSelect: visibleItems[index])
+        let tapped = visibleItems[index]
+        // 先跳转：跳完光标落位，下面重建行也不会把光标弄丢
+        delegate?.outlineView(self, didSelect: tapped)
+        guard appearance.accordionEnabled, tapped.level == 2 else { return }
+        toggleCollapse(id: tapped.id)
     }
 
     @objc private func toggleCollapsed() {
@@ -1037,6 +1196,12 @@ final class OutlineRowCell: UICollectionViewCell {
     private var accentBarLeading: NSLayoutConstraint!
     private var titleLabelLeading: NSLayoutConstraint!
 
+    /// 三角现在指哪边（`true` = 这一节折着，三角朝右）。
+    ///
+    /// 单元测试靠它断言「点完箭头真的跟着变了」—— 光看行数变少不够，
+    /// 三角不跟着转的话用户根本分不清哪节是开着的
+    private(set) var isSectionCollapsed = false
+
     /// 三角的边长。**没有子标题的行也占这么大地方**（按钮只是隐藏，不参与命中），
     /// 这样所有行的标题右边界是对齐的；不然有没有三角的行文字右边界差一截，很难看
     private static let disclosureSide: CGFloat = 24
@@ -1099,6 +1264,7 @@ final class OutlineRowCell: UICollectionViewCell {
         // `OutlineTree.canCollapse`）。叶子行折起来不会有任何变化，
         // 画个三角反而让人以为坏了
         disclosureButton.isHidden = !showsDisclosure
+        isSectionCollapsed = collapsed
         let name = collapsed ? "chevron.right" : "chevron.down"
         disclosureButton.setImage(UIImage(systemName: name, withConfiguration: Self.disclosureSymbol),
                                   for: .normal)
@@ -1191,19 +1357,23 @@ final class OutlineRowCell: UICollectionViewCell {
         }
     }
 
-    /// 层级越高字越粗；H3 以后统一用弱一点的颜色，靠缩进区分层级
+    /// 层级越高字越粗；H3 以后统一用弱一点的颜色，靠缩进区分层级。
+    ///
+    /// 字号整体比最早那版调大了一档（H1 15→17、H2 13→16、H3 及以后 13→15）：
+    /// 用户反馈目录里的字偏小，而面板最宽也就三四百点，字太小扫一眼找不到。
+    /// 行高 30 点仍然放得下 17 点的字（字体自带行高约 20 点），不用跟着改。
     private static func font(forLevel level: Int, emphasized: Bool = false) -> UIFont {
         let textStyle: UIFont.TextStyle
         let weight: UIFont.Weight
         switch level {
         case 1:
-            textStyle = .subheadline
+            textStyle = .body
             weight = emphasized ? .bold : .semibold
         case 2:
-            textStyle = .footnote
+            textStyle = .callout
             weight = emphasized ? .semibold : .medium
         default:
-            textStyle = .footnote
+            textStyle = .subheadline
             weight = emphasized ? .medium : .regular
         }
         let base = UIFont.preferredFont(forTextStyle: textStyle)

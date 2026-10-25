@@ -72,12 +72,12 @@ enum SettingsSection: Int, CaseIterable {
         switch self {
         case .appearance: return "跟随系统、深色或浅色，选完立即生效"
         case .typography: return "字号、行高、段落间距、首行缩进、行宽上限、列表圆点大小"
-        case .reading: return "行号、引用底色、行内代码反引号底色、记住上次读到哪儿"
+        case .reading: return "行号、引用底色、行内代码反引号底色、记住上次读到哪儿、历史版本保留条数"
         case .outlineSize:
             // iPhone 上「正文让位」那一行不存在，摘要里也就别提，否则点进去发现少一项
             return SettingsRow.outlineReservesSpace.isAvailableOnCurrentDevice
-                ? "展开时正文是否让出右侧空间，面板的宽度、高度、背景不透明度"
-                : "面板的宽度、高度、背景不透明度"
+                ? "展开时正文是否让出右侧空间、手风琴折叠，面板的宽度、高度、背景不透明度"
+                : "手风琴折叠，面板的宽度、高度、背景不透明度"
         case .tableLayout: return "列宽、单元格内边距、下方源码的字号与文字颜色"
         case .imageSize: return "图片画多大：宽度怎么算、最大高度"
         case .imageInsertion: return "粘贴进来的图片存到哪儿、文件叫什么名字"
@@ -97,17 +97,18 @@ enum SettingsSection: Int, CaseIterable {
             return [.bodyFontSize, .lineHeightMultiple, .paragraphSpacing,
                     .paragraphIndentCharacters, .bodyContentWidth, .bulletDiameter]
         case .reading:
-            // 行号放最上面：它是「一眼能看出开关有没有生效」的那一项
+            // 行号放最上面：它是「一眼能看出开关有没有生效」的那一项。
+            // 历史版本条数排最后：它是这一组里唯一一个「管存东西、不管看东西」的，放后面不打断前面几个显示开关
             return [.showsLineNumbers, .remembersScrollPosition, .showsQuoteBackground,
-                    .inlineCodeBacktickBackground]
+                    .inlineCodeBacktickBackground, .historyVersionLimit]
         case .outlineSize:
-            // 顺序就是界面上从上到下的顺序：先是一个开关（要不要给正文让地方），
+            // 顺序就是界面上从上到下的顺序：先是两个行为开关（正文让位、手风琴折叠），
             // 再宽度（怎么算 + 两个数值）、高度（同样三行）、最后是背景多透。
             // 两种模式的说明都要跟模式联动，所以每一组里「怎么算」放最上面
             //
             // ⚠️ iPhone 上没有「正文让位」这回事（屏幕太窄，让完只剩一条缝），
             // 所以那个开关在那边整行都不出现 —— 留一个拨了没反应的开关只会让人以为自己弄坏了
-            let items: [SettingsRow] = [.outlineReservesSpace,
+            let items: [SettingsRow] = [.outlineReservesSpace, .outlineAccordion,
                                         .outlineWidthMode, .outlineWidthRatio, .outlineWidthPoints,
                                         .outlineHeightMode, .outlineHeightRatio, .outlineMaximumHeight,
                                         .outlineBackgroundOpacity]
@@ -164,9 +165,13 @@ enum SettingsRow: Int, CaseIterable {
     case showsQuoteBackground
     /// 行内代码两侧的**反引号**要不要跟着代码正文一起铺底色（默认不加）
     case inlineCodeBacktickBackground
+    /// 同一个文件最多保留几份自动历史版本（默认 10，最多 100）
+    case historyVersionLimit
     // 大纲面板：留白
     /// 大纲展开时，正文要不要往左让出它那块宽度
     case outlineReservesSpace
+    /// 大纲手风琴折叠：同一时间只展开一个二级标题
+    case outlineAccordion
     // 大纲面板：宽度
     /// 面板宽度按什么算（百分比 / 固定点数）
     case outlineWidthMode
@@ -254,10 +259,14 @@ enum SettingsRow: Int, CaseIterable {
             return "引用内容加底色"
         case .inlineCodeBacktickBackground:
             return "行内代码反引号加底色"
+        case .historyVersionLimit:
+            return "历史版本保留条数"
         case .remembersScrollPosition:
             return "记住上次阅读位置"
         case .outlineReservesSpace:
             return "大纲展开时正文右侧留白"
+        case .outlineAccordion:
+            return "手风琴折叠"
         case .outlineWidthMode:
             return "宽度怎么算"
         case .outlineWidthRatio:
@@ -370,11 +379,22 @@ enum SettingsRow: Int, CaseIterable {
                 + "反引号本来就是语法标记，让它退到背景里，读者一眼看到的是代码本身。"
                 + "打开：整段（含反引号）连成一块完整的灰底，和以前的显示一样。"
                 + "ⓘ 这一项只管「铺不铺」，灰底的颜色仍然在主题的「行内代码底色」里调。"
+        case .historyVersionLimit:
+            return "同一个文件最多留几份自动存档，默认 10 条，最多 100 条。"
+                + "自动存档在停止输入约 30 秒、按 ⌘S、切走 App 或离开文档时各来一次，条数满了就丢最旧的那几版。"
+                + "ⓘ 调小之后多出来的旧版本不会立刻消失，要等下一次自动存档走过去才清掉 —— 手滑拖一下不至于当场丢东西。"
+                + "调大只是把上限放宽，已经清掉的版本找不回来。"
+                + "在历史页点「保存当前版本」手动存的那几份不占这个名额，也不会被自动清理。"
         case .outlineReservesSpace:
             return "打开：大纲展开时，正文右边让出和面板一样宽的一块，字不会被面板卡片压住 ——"
                 + "代价是每行能排的字变少。"
                 + "关闭：正文始终铺满整个窗口，大纲摊开时会盖住右边那部分字。"
                 + "大纲收起成右上角那个小方块时不受影响，正文照旧用满宽度。"
+        case .outlineAccordion:
+            return "打开：同一时间只展开一个二级标题，展开新的，上一个自动收起。"
+                + "标题多的文档里目录不会一路铺到底，找章节更省事。"
+                + "关闭（默认）：多个二级标题可以同时展开，和以前一样。"
+                + "它只管大纲面板里显示哪些行，不影响正文内容。"
         case .outlineWidthMode:
             return "「按百分比」：宽度跟着窗口走，窗口拉宽面板也变宽；"
                 + "「固定宽度」：永远是你指定的点数，跟窗口无关。"
@@ -495,6 +515,7 @@ enum SettingsRow: Int, CaseIterable {
         case .tableCellPaddingVertical:
             return MarkdownEditorSettings.Limits.tableCellPaddingVertical
         case .tableSourceFontSize: return MarkdownEditorSettings.Limits.tableSourceFontSize
+        case .historyVersionLimit: return MarkdownEditorSettings.Limits.historyVersionLimit
         case .imageWidthRatio: return MarkdownEditorSettings.Limits.imageWidthRatio
         case .imageWidthPoints: return MarkdownEditorSettings.Limits.imageWidthPoints
         case .imageMaxHeight: return MarkdownEditorSettings.Limits.imageMaxHeight
@@ -524,6 +545,8 @@ enum SettingsRow: Int, CaseIterable {
         case .tableCellPaddingHorizontal, .tableCellPaddingVertical: return 1
         // 字号一档 1 点：量程 9~28，一档 2 点就只能挑十个大小了
         case .tableSourceFontSize: return 1
+        // 条数一档 5：量程 10~100，一档 1 条要拖 90 下才到头，一档 10 条又只能挑十档
+        case .historyVersionLimit: return 5
         case .imageWidthRatio: return 0.05
         case .imageWidthPoints, .imageMaxHeight: return 20
         default: return 1
@@ -544,6 +567,7 @@ enum SettingsRow: Int, CaseIterable {
         case .showsQuoteBackground: return settings.showsQuoteBackground
         case .inlineCodeBacktickBackground: return settings.showsInlineCodeBacktickBackground
         case .outlineReservesSpace: return settings.reservesSpaceForOutline
+        case .outlineAccordion: return settings.outlineAccordion
         default: return false
         }
     }
@@ -568,6 +592,7 @@ enum SettingsRow: Int, CaseIterable {
         case .tableCellPaddingVertical: return settings.tableCellPaddingVertical
         // 从配置读「实际用的字号」：没单独设过时它是「正文 - 1」，滑块的起点才是对的位置
         case .tableSourceFontSize: return settings.tableSourceFontSize
+        case .historyVersionLimit: return settings.historyVersionLimit
         case .imageWidthRatio: return settings.imageWidthRatio
         case .imageWidthPoints: return settings.imageWidthPoints
         case .imageMaxHeight: return settings.imageMaxHeight
@@ -605,6 +630,8 @@ enum SettingsRow: Int, CaseIterable {
             return "\(Int(value.rounded())) pt"
         case .bulletDiameter:
             return "\(Int(value.rounded())) pt"
+        case .historyVersionLimit:
+            return "\(Int(value.rounded())) 条"
         case .imageWidthRatio:
             return "\(Int((value * 100).rounded()))%"
         case .imageWidthPoints, .imageMaxHeight:

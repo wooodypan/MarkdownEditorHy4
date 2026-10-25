@@ -236,11 +236,22 @@ final class MarkdownEditorSettings {
         /// 「底部状态栏」默认**打开**：字数、行列这些信息默认就该看得见
         static let showsStatusBar = true
 
+        /// 「同一个文件最多保留几份历史版本」默认 10 条。
+        ///
+        /// 为什么默认给这么少：自动存档每 30 秒就可能多一版，以前留 50 条时一份长文档的历史能占到几 MB。
+        /// 大多数人只在「刚才那段删错了」这种时候翻历史，10 条（大约半小时内的若干次改动）已经够用；
+        /// 需要更长的回溯窗口的人可以自己往上调，最多 100 条。
+        static let historyVersionLimit: Double = 10
+
         /// 「大纲展开时正文右侧留白」默认**打开**：
         /// 展开的大纲是一张浮在正文上面的卡片，正文让出它那块宽度，字才不会被卡片压住。
         /// ⚠️ 收起成小方块时不让（理由见 `MarkdownDocumentViewController.outlineTrailingInset`）
         /// ⚠️ iPhone 上这个默认值等于没写：那边固定不让（见 `supportsReservingSpaceForOutline`）
         static let reservesSpaceForOutline = true
+
+        /// 「大纲手风琴折叠」默认**关闭**：默认还是老样子，多个二级标题可以同时展开；
+        /// 打开之后同一时间只展开一个二级标题，展开新的会自动收起旧的
+        static let outlineAccordion = false
 
         /// 大纲面板的默认外观 —— 「宽度默认多少点」这一项**从它读**，免得同一个数字在配置层和组件层各写一份（改了一边忘了另一边）。
         /// 只构造一次，别在下面反复访问
@@ -387,6 +398,12 @@ final class MarkdownEditorSettings {
         ///
         /// ⚠️ 量程的**上下界一起**不能和 `bodyContentWidth` 的 320...1200 撞车 —— 设置页的测试是按「量程」在视图树里找滑块的，两行完全一样就分不出谁是谁。
         static let imageMaxHeight: ClosedRange<Double> = 120...1600
+
+        /// 同一个文件保留几份历史版本（条）。下限 10 就是默认值，上限 100 是给需要更长回溯的人留的余地。
+        ///
+        /// 为什么要夹范围而不是让用户随便填：每条都存一整份正文，100 条已经是「几 MB」的量级；
+        /// 再多下去，翻历史列表要滚很久，占的地方也不值当。
+        static let historyVersionLimit: ClosedRange<Double> = 10...100
     }
 
     // MARK: 落盘
@@ -429,6 +446,8 @@ final class MarkdownEditorSettings {
         var isReadOnly: Bool?
         /// 底部状态栏（字数 / 行列）要不要显示
         var showsStatusBar: Bool?
+        /// 同一个文件最多保留几份历史版本
+        var historyVersionLimit: Double?
         /// 大纲展开时，正文要不要往左让出它那块宽度
         var reservesSpaceForOutline: Bool?
         /// 大纲宽度那一组。模式同样存字符串，理由见下面 `outlineHeightMode` 的注释
@@ -443,6 +462,8 @@ final class MarkdownEditorSettings {
         var outlineMaximumHeight: Double?
         /// 大纲面板背景的不透明度
         var outlineBackgroundOpacity: Double?
+        /// 大纲手风琴折叠：同一时间只展开一个二级标题
+        var outlineAccordion: Bool?
         var tableMinColumnWidth: Double?
         var tableMaxColumnWidth: Double?
         /// 表格单元格的左右 / 上下内边距
@@ -572,6 +593,21 @@ final class MarkdownEditorSettings {
     /// 和只读模式那些开关一样存盘，下次打开还是上次的样子。
     private(set) var showsStatusBar: Bool
 
+    /// 同一个文件最多保留几份**自动**历史版本。默认 10 条，可调到 100 条。
+    ///
+    /// 只管自动存的那一档：用户在历史页点「保存当前版本」存下的那些是手动版，永远不占这个名额、也不会被清掉
+    /// （规则本身在 `DocumentHistoryRetention`）。这个数字只是「柜子有几格」，真正执行清理的是
+    /// `DocumentHistoryStore.saveSnapshot`。
+    ///
+    /// ### 改完为什么不用广播，也不用当场重算
+    /// 这一项只影响**下一次存档**时扔不扔旧的，屏幕上那篇文档一个字都不用动。
+    /// 广播出去反而会让打开着的文档整篇重渲染一遍（大文档上肉眼可见地卡一下）。
+    ///
+    /// ### 调小之后旧版本不会立刻消失
+    /// 要等下一次存档（停手 30 秒、⌘S、切走 App）走一遍清理才把多出来的旧版本删掉。
+    /// 不在这里顺手清，是因为清早了万一用户只是手滑拖了一下滑块，那些版本就白丢了。
+    private(set) var historyVersionLimit: Double
+
     /// 大纲面板**展开**时，正文要不要往左让出它那一块宽度。默认 `true`（开）。
     ///
     /// ### 为什么要有这一项
@@ -590,6 +626,16 @@ final class MarkdownEditorSettings {
     /// 它动的是编辑器右边那条约束的 constant（见 `MarkdownDocumentViewController.updateEditorTrailingInset`），
     /// 不碰任何字体 / 段落样式，所以不会重排富文本 —— 但宽度一变正文照样要重新折行，步骤在编辑器内部。
     private(set) var reservesSpaceForOutline: Bool
+
+    /// 大纲面板的手风琴折叠：同一时间最多展开一个二级标题。默认 `false`（关）。
+    ///
+    /// ### 打开之后是什么样
+    /// 展开一个新的二级标题时，其它展开着的二级标题会自动收起来；刚打开文档时二级标题全部收着，先看到整份目录的骨架。
+    /// 关着时和以前完全一样，想让哪几节开着就开哪几节。
+    ///
+    /// ### 只影响目录，不碰正文
+    /// 它改的是大纲面板里哪几行可见，不动任何文字和排版，所以切换这个开关不会重渲染文档，只是目录列表重排一次。
+    private(set) var outlineAccordion: Bool
 
     /// 大纲面板的宽度按什么算，默认「固定宽度」。
     /// 两种模式的详细解释见 `OutlineWidthMode`
@@ -918,6 +964,16 @@ final class MarkdownEditorSettings {
         postChange()
     }
 
+    /// 改「同一个文件保留几份历史版本」。超出 `Limits.historyVersionLimit`（10 ~ 100）的值会被夹到边界上。
+    ///
+    /// 不发广播的理由见上面那个属性的注释：这一项只影响下一次存档时的清理，屏幕上没有任何东西要跟着变。
+    func setHistoryVersionLimit(_ value: Double) {
+        let clamped = clamp(value, to: Limits.historyVersionLimit)
+        guard clamped != historyVersionLimit else { return }
+        historyVersionLimit = clamped
+        save()
+    }
+
     /// 改「大纲展开时正文右侧留白」。
     ///
     /// 拨完当场生效：内容页收到通知后重算一次编辑器右边距（见 `applyOutlineAppearance`），
@@ -926,6 +982,17 @@ final class MarkdownEditorSettings {
     func setReservesSpaceForOutline(_ value: Bool) {
         guard value != reservesSpaceForOutline else { return }
         reservesSpaceForOutline = value
+        save()
+        postChange()
+    }
+
+    /// 改「大纲手风琴折叠」。
+    ///
+    /// 拨完当场生效：大纲面板收到通知后把多出来的二级标题收掉（见 `MarkdownOutlineView.refreshAppearance`），
+    /// 只留光标所在的那一节。正文一个字都不用重排。
+    func setOutlineAccordion(_ value: Bool) {
+        guard value != outlineAccordion else { return }
+        outlineAccordion = value
         save()
         postChange()
     }
@@ -1199,7 +1266,9 @@ final class MarkdownEditorSettings {
         self.isTypewriterMode = Default.isTypewriterMode
         self.isReadOnly = Default.isReadOnly
         self.showsStatusBar = Default.showsStatusBar
+        self.historyVersionLimit = Default.historyVersionLimit
         self.reservesSpaceForOutline = Default.reservesSpaceForOutline
+        self.outlineAccordion = Default.outlineAccordion
         self.outlineWidthMode = Default.outlineWidthMode
         self.outlineWidthRatio = Default.outlineWidthRatio
         self.outlineWidthPoints = Default.outlineWidthPoints
@@ -1257,7 +1326,11 @@ final class MarkdownEditorSettings {
         if let value = payload.isTypewriterMode { isTypewriterMode = value }
         if let value = payload.isReadOnly { isReadOnly = value }
         if let value = payload.showsStatusBar { showsStatusBar = value }
+        if let value = payload.historyVersionLimit {
+            historyVersionLimit = clamp(value, to: Limits.historyVersionLimit)
+        }
         if let value = payload.reservesSpaceForOutline { reservesSpaceForOutline = value }
+        if let value = payload.outlineAccordion { outlineAccordion = value }
         // 宽度那一组：模式和高度一样存字符串，认不出来就只让这一项退回默认
         if let raw = payload.outlineWidthMode, let value = OutlineWidthMode(rawValue: raw) {
             outlineWidthMode = value
@@ -1366,6 +1439,7 @@ final class MarkdownEditorSettings {
                               isTypewriterMode: isTypewriterMode,
                               isReadOnly: isReadOnly,
                               showsStatusBar: showsStatusBar,
+                              historyVersionLimit: historyVersionLimit,
                               reservesSpaceForOutline: reservesSpaceForOutline,
                               outlineWidthMode: outlineWidthMode.rawValue,
                               outlineWidthRatio: outlineWidthRatio,
@@ -1374,6 +1448,7 @@ final class MarkdownEditorSettings {
                               outlineHeightRatio: outlineHeightRatio,
                               outlineMaximumHeight: outlineMaximumHeight,
                               outlineBackgroundOpacity: outlineBackgroundOpacity,
+                              outlineAccordion: outlineAccordion,
                               tableMinColumnWidth: tableMinColumnWidth,
                               tableMaxColumnWidth: tableMaxColumnWidth,
                               tableCellPaddingHorizontal: tableCellPaddingHorizontal,
@@ -1465,6 +1540,15 @@ extension MarkdownEditorSettings {
     /// ⚠️ 搬过去之后要调一次 `MarkdownOutlineView.refreshAppearance()`，否则屏幕上的卡片纹丝不动
     func applyOutlineBackground(to appearance: inout MarkdownOutlineAppearance) {
         appearance.backgroundOpacity = CGFloat(outlineBackgroundOpacity)
+    }
+
+    /// 把「手风琴折叠」写进大纲面板的外观参数。
+    ///
+    /// 这一项是行为开关、不是尺寸，但照样走 `MarkdownOutlineAppearance` 这个口子 ——
+    /// 面板不认识 App 层的配置，只认别人塞给它的值（理由同上一条）。
+    /// ⚠️ 搬过去之后要调一次 `MarkdownOutlineView.refreshAppearance()`，面板才会重新收拢一次
+    func applyOutlineAccordion(to appearance: inout MarkdownOutlineAppearance) {
+        appearance.accordionEnabled = outlineAccordion
     }
 
     /// 把表格列宽的配置写进编辑器主题的表格样式里。

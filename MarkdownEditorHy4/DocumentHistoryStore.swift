@@ -11,7 +11,7 @@
 //
 //  ## 为什么每次存一整份，而不是只存"这次改了哪几个字"
 //  存一整份，坏了一份也只是少一版，别的照样能打开；只存改动片段的话，中间丢一段，后面几版就全串不起来了。
-//  markdown 文件一般就几 KB 到几百 KB，再加上「只留最近 50 版」的清理规则，占不了多少地方。
+//  markdown 文件一般就几 KB 到几百 KB，再加上「每个文件只留最近十几版（默认 10 条，设置里最多可调到 100）」的清理规则，占不了多少地方。
 //
 //  ## 为什么不放 Caches 目录
 //  Caches 是系统"缺空间就随时清"的地方，放那儿历史会莫名其妙消失。放 Application Support 不会。
@@ -101,8 +101,8 @@ struct DocumentHistoryManifest: Codable {
 ///
 /// 大白话：柜子只有固定几格，存满了就得挑最旧的扔掉；用户特意点"保存"的那些不扔。
 struct DocumentHistoryRetention {
-    /// 自动版本最多留多少个，超了就从最旧的开始丢
-    var maxCount = 50
+    /// 自动版本最多留多少个，超了就从最旧的开始丢（数只有几份由用户在设置里定，默认 10、最多 100）
+    var maxCount = 10
     /// true：手动存的版本永久保留，而且不占上面那个名额
     var manualVersionsExempt = true
 }
@@ -154,8 +154,14 @@ enum DocumentHistoryError: LocalizedError {
 /// "同一时间只有一个人能进来改"这件事，由"默认都在主线程"这一点保证。
 final class DocumentHistoryStore {
 
-    /// App 里全局用这一个；单元测试会自己 new 一个指向临时目录的，绝不碰真数据
-    static let shared = DocumentHistoryStore()
+    /// App 里全局用这一个；单元测试会自己 new 一个指向临时目录的，绝不碰真数据。
+    ///
+    /// 「每个文件留几份」不在这儿定死：每次清理都现去设置里读（见 `retention`），用户拖完滑块不用重启 App。
+    static let shared = DocumentHistoryStore(
+        retentionProvider: {
+            DocumentHistoryRetention(maxCount: Int(MarkdownEditorSettings.shared.historyVersionLimit.rounded()))
+        }
+    )
 
     /// 历史版本的老巢（「不要备份」的标记在建目录时打上）。
     ///
@@ -169,16 +175,34 @@ final class DocumentHistoryStore {
     }
 
     private let rootURL: URL
-    private let retention: DocumentHistoryRetention
+    private let retentionProvider: () -> DocumentHistoryRetention
     private let fileManager = FileManager.default
 
+    /// 现在这一套清理规则：App 里每次现读设置，测试里就是构造时传进来的那份固定值。
+    ///
+    /// 为什么做成「现问」而不是存一份：`shared` 只构造一次，存下来的话用户在设置里改完条数得重启才生效。
+    private var retention: DocumentHistoryRetention { retentionProvider() }
+
+    /// 清理规则在构造时定死。单元测试走这条，跑起来不受用户真实设置影响。
+    ///
     /// - Parameters:
     ///   - rootURL: 历史根目录。测试传一个临时目录，绝不碰 App 自己的那一份
     ///   - retention: 清理规则
     init(rootURL: URL = DocumentHistoryStore.defaultRootURL,
          retention: DocumentHistoryRetention = DocumentHistoryRetention()) {
         self.rootURL = rootURL
-        self.retention = retention
+        self.retentionProvider = { retention }
+    }
+
+    /// 每次清理现去读「留几份」。App 里走这条（用户改完设置立刻按新条数清理）。
+    ///
+    /// - Parameters:
+    ///   - rootURL: 历史根目录
+    ///   - retentionProvider: 现读清理规则；每次存档要清理时都会调一次
+    init(rootURL: URL = DocumentHistoryStore.defaultRootURL,
+         retentionProvider: @escaping () -> DocumentHistoryRetention) {
+        self.rootURL = rootURL
+        self.retentionProvider = retentionProvider
     }
 
     /// 原因见 `MarkdownBlock` / `OutlineCoordinator` 里 `nonisolated deinit` 那段长注释。
@@ -191,7 +215,7 @@ final class DocumentHistoryStore {
     ///
     /// 大白话：动手存之前先看一眼"和最近那版一样吗"，一样就什么都不做，省得攒一堆重复的。
     ///
-    /// 内容跟最新版一模一样时直接返回 nil：不然每敲一个字就多一版，很快把 50 个名额占满，真正有用的旧版本反而被挤掉了。
+    /// 内容跟最新版一模一样时直接返回 nil：不然每敲一个字就多一版，很快把名额（默认 10 条）占满，真正有用的旧版本反而被挤掉了。
     ///
     /// - Returns: 新存下的版本；内容没变就是 nil
     /// - Parameter protecting: 这一轮清理不许动到的版本（恢复旧版本时传目标版本，见 `restore`）
@@ -382,7 +406,7 @@ final class DocumentHistoryStore {
 
     /// 清理规则：这一轮该丢掉哪些版本。
     ///
-    /// 大白话：柜子只有 50 格，满了就得先扔最旧的；但用户手动存的那些是"永久件"，不占格也不扔。
+    /// 大白话：柜子只有固定的几格（默认 10 格），满了就得先扔最旧的；但用户手动存的那些是"永久件"，不占格也不扔。
     ///
     /// 特意抽成**不碰文件系统**的纯函数，是为了能直接单测 —— 这条规则写错，症状是"用户手动存的版本莫名不见了"或者"刚恢复的那版立刻被清理掉"，很难复现。
     static func versionsToDelete(_ versions: [DocumentVersion],

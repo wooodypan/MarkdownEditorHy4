@@ -110,14 +110,15 @@ extension MarkdownDocumentViewController {
         editor.refreshTheme()
     }
 
-    /// 把大纲面板这一组的配置（宽高和背景不透明度）同步给面板本体。
+    /// 把大纲面板这一组的配置（宽高、背景不透明度、手风琴折叠）同步给面板本体。
     ///
-    /// 配置到面板参数的换算放在配置那边（`MarkdownEditorSettings.applyOutlineWidth` / `applyOutlineHeight` / `applyOutlineBackground`），这样能各自单独测；
+    /// 配置到面板参数的换算放在配置那边（`MarkdownEditorSettings.applyOutlineWidth` / `applyOutlineHeight` / `applyOutlineBackground` / `applyOutlineAccordion`），这样能各自单独测；
     /// 这里只负责把结果送过去，再让面板重算一次宽高。
     func applyOutlineAppearance() {
         settings.applyOutlineWidth(to: &outlineView.appearance)
         settings.applyOutlineHeight(to: &outlineView.appearance)
         settings.applyOutlineBackground(to: &outlineView.appearance)
+        settings.applyOutlineAccordion(to: &outlineView.appearance)
         // 宽高是算出来的，不用动画：拖滑块时不该一直有动画
         outlineView.refreshAppearance()
         // 宽度变了，正文要让出去的那块也得跟着变。
@@ -147,7 +148,7 @@ extension MarkdownDocumentViewController {
     }
 
     /// 正文左右两边的边距（点）。两边对称，贴着窗口边排字显得很挤
-    static let editorHorizontalInset: CGFloat = 20
+    static let editorHorizontalInset: CGFloat = 0
     /// 正文和面板之间再空出多少（点）。纯视觉，贴着卡片边缘排字显得很挤
     static let outlineEditorGap: CGFloat = 8
     /// 正文最多让出多少比例（0.5 = 让人一半、自己留一半）

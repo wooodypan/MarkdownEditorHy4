@@ -126,6 +126,8 @@ final class SettingsPaneViewController: UIViewController {
             settings.setShowsInlineCodeBacktickBackground(sender.isOn)
         case .outlineReservesSpace:
             settings.setReservesSpaceForOutline(sender.isOn)
+        case .outlineAccordion:
+            settings.setOutlineAccordion(sender.isOn)
         case .remembersScrollPosition:
             settings.setRemembersScrollPosition(sender.isOn)
         case .pastesHTMLAsMarkdown:
@@ -202,6 +204,8 @@ final class SettingsPaneViewController: UIViewController {
             settings.setTableCellPaddingVertical(stepped)
         case .tableSourceFontSize:
             settings.setTableSourceFontSize(stepped)
+        case .historyVersionLimit:
+            settings.setHistoryVersionLimit(stepped)
         case .imageWidthRatio:
             settings.setImageWidthRatio(stepped)
         case .imageWidthPoints:
@@ -211,7 +215,7 @@ final class SettingsPaneViewController: UIViewController {
         case .appearanceMode,
              .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
              .savesWebImagesLocally,
-             .showsQuoteBackground, .outlineReservesSpace,
+             .showsQuoteBackground, .outlineReservesSpace, .outlineAccordion,
              .inlineCodeBacktickBackground,
              .outlineWidthMode, .outlineHeightMode, .imageWidthMode,
              .imageInsertionMode, .imageCustomFolderPath, .imageNameMode,
@@ -643,7 +647,8 @@ extension SettingsPaneViewController: UITableViewDataSource, UITableViewDelegate
             return makeAppearanceModeCell()
         case .showsLineNumbers, .remembersScrollPosition, .pastesHTMLAsMarkdown,
              .savesWebImagesLocally,
-             .showsQuoteBackground, .inlineCodeBacktickBackground, .outlineReservesSpace:
+             .showsQuoteBackground, .inlineCodeBacktickBackground, .outlineReservesSpace,
+             .outlineAccordion:
             return makeToggleCell(for: row)
         case .outlineWidthMode:
             return makeOutlineWidthModeCell()
@@ -666,6 +671,7 @@ extension SettingsPaneViewController: UITableViewDataSource, UITableViewDelegate
              .tableMinColumnWidth, .tableMaxColumnWidth,
              .tableCellPaddingHorizontal, .tableCellPaddingVertical,
              .tableSourceFontSize,
+             .historyVersionLimit,
              .imageWidthRatio, .imageWidthPoints, .imageMaxHeight:
             return makeSliderCell(for: row)
         }

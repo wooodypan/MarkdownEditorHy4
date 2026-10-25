@@ -33,6 +33,22 @@ final class MarkdownOutlineFoldTests: XCTestCase {
         (1, "第二章"), (2, "第二章第一节")
     ]
 
+    /// 手风琴折叠用的一棵树：每个二级标题底下都挂着一个三级标题（能折、箭头会转）：
+    /// ```
+    /// 甲(H1)
+    ///   甲一(H2)
+    ///     甲一一(H3)
+    ///   甲二(H2)
+    ///     甲二一(H3)
+    /// 乙(H1)
+    ///   乙一(H2)
+    ///     乙一一(H3)
+    /// ```
+    private let accordionSpecs: [(level: Int, title: String)] = [
+        (1, "甲"), (2, "甲一"), (3, "甲一一"), (2, "甲二"), (3, "甲二一"),
+        (1, "乙"), (2, "乙一"), (3, "乙一一")
+    ]
+
     /// 按「层级 + 标题文字」造条目。偏移默认按 100 递增，一眼能看出有没有被顶移
     private func makeItems(_ specs: [(level: Int, title: String)],
                            offsetStep: Int = 100) -> [OutlineItem] {
@@ -455,6 +471,165 @@ final class MarkdownOutlineFoldTests: XCTestCase {
         XCTAssertFalse(button.isEnabled, "只有一层标题，没东西可折，按钮该置灰")
     }
 
+    // MARK: - 手风琴折叠（同一时间只开一个二级标题）
+
+    /// 三角的朝向必须跟着折叠状态走。
+    ///
+    /// ### 为什么要单独测「箭头」
+    /// 行是 diffable 数据源管的，它只认 id：折叠状态变了、id 没变时它认为「这一行没动」，
+    /// 不会再问数据源要 cell —— 于是箭头停在上一轮的朝向，用户看到的是一堆对不上的箭头。
+    /// 这个 bug 光看「行数变少了」是发现不了的，必须直接读三角的状态
+    func testDisclosureArrowFollowsCollapseState() {
+        let (view, host) = makeOutlineView()
+        view.updateOutlineItems(makeItems(treeSpecs))
+        host.layoutIfNeeded()
+
+        XCTAssertEqual(rowCell(titled: "第一章", in: view)?.isSectionCollapsed, false,
+                       "默认全展开，三角该朝下")
+
+        rowCell(titled: "第一章", in: view)?.tapDisclosure()
+        host.layoutIfNeeded()
+        XCTAssertEqual(rowCell(titled: "第一章", in: view)?.isSectionCollapsed, true,
+                       "折起来之后三角还朝下 —— 用户根本分不清这节是开着的还是折着的")
+
+        rowCell(titled: "第一章", in: view)?.tapDisclosure()
+        host.layoutIfNeeded()
+        XCTAssertEqual(rowCell(titled: "第一章", in: view)?.isSectionCollapsed, false,
+                       "再点一下该转回朝下")
+    }
+
+    /// 默认关着：多个二级标题可以同时展开，行为和老版本一样
+    func testAccordionIsOffByDefault() {
+        let (view, host) = makeOutlineView()
+        let items = makeItems(accordionSpecs)
+        view.updateOutlineItems(items)
+        host.layoutIfNeeded()
+
+        XCTAssertFalse(view.appearance.accordionEnabled, "这一项默认必须是关的")
+
+        // 先各自收起来，再一个个点开 —— 关着手风琴时两节应该能同时开着
+        view.toggleCollapse(id: items[1].id)
+        view.toggleCollapse(id: items[3].id)
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles, ["甲", "甲一", "甲二", "乙", "乙一", "乙一一"])
+
+        rowCell(titled: "甲一", in: view)?.tapDisclosure()
+        rowCell(titled: "甲二", in: view)?.tapDisclosure()
+        host.layoutIfNeeded()
+
+        XCTAssertFalse(view.isCollapsed(id: items[1].id), "关着手风琴时，开一节不该把别的节收起来")
+        XCTAssertFalse(view.isCollapsed(id: items[3].id))
+        XCTAssertEqual(view.visibleTitles.count, 8, "两节都该是开着的")
+    }
+
+    /// 打开开关那一刻就要收拢：只留光标所在的那一节，别的二级标题全收起来
+    func testAccordionNormalizesWhenSwitchedOn() {
+        let (view, host) = makeOutlineView()
+        let items = makeItems(accordionSpecs)
+        view.updateOutlineItems(items)
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles.count, 8, "测试前提：一开始是全部展开的")
+
+        view.highlightOutlineItem(items[4].id)      // 光标停在「甲二一」这一节
+        enableAccordion(on: view, host: host)
+
+        XCTAssertEqual(view.visibleTitles, ["甲", "甲一", "甲二", "甲二一", "乙", "乙一"],
+                       "该只留光标所在的「甲二」，别的二级标题收起来")
+        XCTAssertTrue(view.isCollapsed(id: items[1].id), "「甲一」该被收起来")
+        XCTAssertFalse(view.isCollapsed(id: items[3].id), "光标所在的那一节不能被折掉")
+    }
+
+    /// 点二级标题的三角：自己展开，别的二级标题全收起来
+    func testAccordionExpandingOneSectionCollapsesOthers() {
+        let (view, host) = makeOutlineView()
+        let items = makeItems(accordionSpecs)
+        view.updateOutlineItems(items)
+        host.layoutIfNeeded()
+        enableAccordion(on: view, host: host)
+        XCTAssertEqual(view.visibleTitles, ["甲", "甲一", "甲二", "乙", "乙一"],
+                       "打开开关后只看到二级标题这一层")
+
+        rowCell(titled: "甲二", in: view)?.tapDisclosure()
+        host.layoutIfNeeded()
+
+        XCTAssertEqual(view.visibleTitles, ["甲", "甲一", "甲二", "甲二一", "乙", "乙一"])
+        XCTAssertFalse(view.isCollapsed(id: items[3].id), "点开的那一节点开了")
+        XCTAssertTrue(view.isCollapsed(id: items[1].id), "「甲一」该被收起来")
+        XCTAssertTrue(view.isCollapsed(id: items[6].id), "「乙一」也得收起来")
+
+        // 箭头：开着的朝下、收着的朝右
+        XCTAssertEqual(rowCell(titled: "甲二", in: view)?.isSectionCollapsed, false,
+                       "刚点开的这一节，箭头该朝下")
+        XCTAssertEqual(rowCell(titled: "甲一", in: view)?.isSectionCollapsed, true,
+                       "被收起来的那一节，箭头该朝右")
+    }
+
+    /// 点二级标题**整行**：照样跳转，同时也展开它、把别的二级标题收起来
+    func testAccordionRowTapTogglesAndStillJumps() {
+        let (view, host) = makeOutlineView()
+        let delegate = SpyOutlineViewDelegate()
+        view.delegate = delegate
+        view.updateOutlineItems(makeItems(accordionSpecs))
+        host.layoutIfNeeded()
+        enableAccordion(on: view, host: host)
+
+        rowCell(titled: "甲一", in: view)?.tapDisclosure()
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles, ["甲", "甲一", "甲一一", "甲二", "乙", "乙一"],
+                       "测试前提：先把「甲一」展开")
+
+        view.simulateRowTap(at: 3)      // 第 3 行是「甲二」
+        host.layoutIfNeeded()
+
+        XCTAssertEqual(delegate.selected.map(\.title), ["甲二"], "点整行还是得跳到这一节")
+        XCTAssertEqual(view.visibleTitles, ["甲", "甲一", "甲二", "甲二一", "乙", "乙一"],
+                       "点整行也该展开它，并收起别的二级标题")
+    }
+
+    /// 二级标题底下没有三到六级标题：点了什么都不变（也没三角可转）
+    func testAccordionRowTapOnSectionWithoutChildrenDoesNothing() {
+        let (view, host) = makeOutlineView()
+        let delegate = SpyOutlineViewDelegate()
+        view.delegate = delegate
+        let items = makeItems([(1, "甲"), (2, "甲一"), (3, "甲一一"), (2, "甲二")])
+        view.updateOutlineItems(items)
+        host.layoutIfNeeded()
+        enableAccordion(on: view, host: host)
+        // 这棵树里「能折的二级标题」只有「甲一」一个，打开开关时不会收拢任何东西
+        XCTAssertEqual(view.visibleTitles, ["甲", "甲一", "甲一一", "甲二"], "测试前提")
+
+        view.simulateRowTap(at: 3)      // 「甲二」是叶子
+        host.layoutIfNeeded()
+
+        XCTAssertEqual(delegate.selected.map(\.title), ["甲二"], "跳转照旧")
+        XCTAssertEqual(view.visibleTitles, ["甲", "甲一", "甲一一", "甲二"],
+                       "没有子标题的二级标题点了不该有任何变化")
+        XCTAssertFalse(view.isCollapsed(id: items[1].id), "别的节也不该被顺手收起来")
+        XCTAssertEqual(rowCell(titled: "甲二", in: view)?.isDisclosureVisible, false,
+                       "没有子标题就不该有三角")
+    }
+
+    /// 手风琴模式下「全部展开」只放开当前这一节 —— 一个都不开的话，
+    /// 这个按钮点了屏幕上一点变化都没有，看着像坏了
+    func testAccordionExpandAllOpensCurrentSectionOnly() {
+        let (view, host) = makeOutlineView()
+        let items = makeItems(accordionSpecs)
+        view.updateOutlineItems(items)
+        host.layoutIfNeeded()
+        view.highlightOutlineItem(items[1].id)      // 光标在「甲一」这一节
+        enableAccordion(on: view, host: host)
+
+        view.collapseAll()
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles, ["甲", "乙"])
+
+        view.expandAll()
+        host.layoutIfNeeded()
+        XCTAssertEqual(view.visibleTitles, ["甲", "甲一", "甲一一", "甲二", "乙", "乙一"],
+                       "该放开「甲一」这一节，其它的二级标题仍旧收着")
+        XCTAssertTrue(view.isCollapsed(id: items[3].id), "「甲二」不该被放开")
+    }
+
     // MARK: - 第 3 层补测：列表滚动位置
 
     /// 列表被换掉之后要保持滚动位置 —— 正文里敲一下字就被甩回顶部的话，长文档根本没法用
@@ -600,6 +775,18 @@ final class MarkdownOutlineFoldTests: XCTestCase {
     /// 当前高亮的那几行（正常应该正好 0 或 1 行）的标题
     private func highlightedTitles(in view: MarkdownOutlineView) -> [String] {
         rowViews(in: view).filter(\.isRowHighlighted).compactMap { $0.item?.title }
+    }
+
+    /// 按标题文字找那一行的 cell（屏幕外的行还没建视图，返回 nil）
+    private func rowCell(titled title: String, in view: MarkdownOutlineView) -> OutlineRowCell? {
+        rowViews(in: view).first { $0.item?.title == title }
+    }
+
+    /// 打上手风琴折叠 —— 和设置页拨开关走同一条路：改外观参数，再让面板重算一次
+    private func enableAccordion(on view: MarkdownOutlineView, host: UIWindow) {
+        view.appearance.accordionEnabled = true
+        view.refreshAppearance()
+        host.layoutIfNeeded()
     }
 
     /// n 行都显示出来，卡片至少该有这么高（标题栏 + n 行 + 上下留白）。
