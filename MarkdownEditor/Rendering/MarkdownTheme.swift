@@ -533,32 +533,31 @@ struct MarkdownTheme {
         codeStyle(indent: indent, spacingBefore: 0, spacingAfter: 0)
     }
 
-    /// 代码块**开围栏行**（` ```swift `）段落：**上面**是正文（至少留 `codeBlockOuterSpacing`），**下面**是代码（只留灰底要的那点 padding）。
+    /// 代码块开围栏行（` ```swift `）段落：上面是正文（至少留 `codeBlockOuterSpacing`），下面是代码（段距 0，和代码行之间一样紧）。
     ///
     /// ### 为什么两条围栏行要分成两套（不能共用一个样式）
     /// 一个段落样式只有「段前 / 段后」两个数，而围栏行夹在「外面的正文」和「里面的代码」中间，两个方向想要的间距不一样：
-    /// 对外要留出和上下文分开的距离，对内只要灰底 padding 那么点（贴着灰底，紧凑）。
+    /// 对外要留出和上下文分开的距离，对内要贴着代码（用户要求围栏行和代码正文之间没有额外间距，像代码内部相邻两行一样紧）。
     /// 共用一个样式就只能两头一起松、或一起紧 —— 一起紧的话代码块会贴住上下文，一起松的话代码块里又空得能再塞一行。
+    ///
+    /// ### 对内为什么是 0（灰底会往上压进围栏行一点，这是已知且可接受的）
+    /// 灰底矩形 = 代码正文字形顶 ± padding，围栏行的段距一归零，灰底顶就会落进围栏行的 descender 空白区，最多压进一个 `codeBlockVerticalPadding`。
+    /// 那片区域没有字形（``` 和语言名都画在基线以上），所以看着就是围栏行贴着灰底，不会糊字。
     ///
     /// ### 对外为什么不用 `max(paragraphSpacing, codeBlockVerticalPadding)`
     /// 段距调到 0 时那个式子只剩 6pt（`codeBlockVerticalPadding`），围栏文字几乎贴住上一段。
     /// 改用独立的 `codeBlockOuterSpacing` 兜底，段距为 0 时也能和上下文分开；段距更大时仍以段距为准。
-    ///
-    /// ### 对内为什么是两个 `codeBlockVerticalPadding`（不能更小）
-    /// 灰底矩形是按「代码正文那个 fragment 的框 ± padding」算出来的（见 computeCodeBlockFrames），而 fragment 的框**不含**段前间距 —— 所以「围栏行底」到「灰底顶」的距离 = 对内间距 − padding。
-    /// 对内只留一个 padding 的话这两个值相等，``` 那几个字符正好压在灰底边缘上（实测会压进去 1pt，有测试守着）。
-    /// 留两个 padding，灰底和围栏行之间就还有一个 padding 的间隙。
     func codeFenceOpenParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
         codeStyle(indent: indent,
                   spacingBefore: max(paragraphSpacing, codeBlockOuterSpacing),
-                  spacingAfter: codeBlockVerticalPadding * 2)
+                  spacingAfter: 0)
     }
 
-    /// 代码块**闭围栏行**（` ``` `）段落：**上面**是代码（只留灰底要的 padding），**下面**是正文（至少留 `codeBlockOuterSpacing`）。
+    /// 代码块闭围栏行（` ``` `）段落：上面是代码（段距 0），下面是正文（至少留 `codeBlockOuterSpacing`）。
     /// 和开围栏行正好反过来，理由见那里。
     func codeFenceCloseParagraphStyle(indent: CGFloat) -> NSParagraphStyle {
         codeStyle(indent: indent,
-                  spacingBefore: codeBlockVerticalPadding * 2,
+                  spacingBefore: 0,
                   spacingAfter: max(paragraphSpacing, codeBlockOuterSpacing))
     }
 

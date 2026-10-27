@@ -1814,10 +1814,10 @@ final class MarkdownEditorHy4Tests: XCTestCase {
                        "滚动当帧的背景位置(\(placed.first?.origin.y ?? -1))应该等于文档坐标减滚动量(\(expectedY))，差太多说明还在用屏幕外的估算值")
     }
 
-    /// 滚动到位后，灰底不能压到 ```swift 那一行上（用户报的「swift 跟背景重合」）。
+    /// 滚动到位后，灰底只许贴到围栏行的字框边上，不许大幅罩进去（用户报的「swift 跟背景重合」）。
     ///
-    /// 这就是上面那条 bug 的视觉表现：估算值偏上 84pt，正好把开围栏那行罩进灰底里，
-    /// 于是 ```swift 这几个字看起来是写在灰底上的。
+    /// 这条真正守的是「滚动用了过期估算值」：估算值偏上 84pt 时，整个 ```swift 那行会被罩进灰底里。
+    /// 现在围栏行对内的段距是 0，灰底正常就会压进围栏行字框一个 padding 左右（那片只有 descender 空白，没有字形），所以判据放宽成「不超过一个 padding 再加点字体误差」。
     func testCodeBlockBackgroundDoesNotCoverFenceLineAfterScrolling() {
         let tv = makeEditor(makeLongDocumentWithCodeBlock())
         tv.frame = CGRect(x: 0, y: 0, width: 900, height: 800)
@@ -1834,14 +1834,15 @@ final class MarkdownEditorHy4Tests: XCTestCase {
         }
         let lines = codeBlockLines(of: range, in: tv)
         let offsetY = tv.contentOffset.y
+        let padding = tv.renderer.theme.codeBlockVerticalPadding
 
         // 开围栏那一行（```swift）的文字区域换算到屏幕坐标
         guard let openPos = tv.position(from: tv.beginningOfDocument, offset: lines[0].location) else {
             return XCTFail("拿不到开围栏行的位置")
         }
         let openCaret = tv.caretRect(for: openPos)
-        XCTAssertGreaterThan(background.minY, openCaret.maxY - offsetY,
-                             "背景顶(\(background.minY))压到了开围栏行(\(openCaret.maxY - offsetY))上")
+        XCTAssertGreaterThanOrEqual(background.minY, openCaret.maxY - offsetY - padding - 2,
+                                    "背景顶(\(background.minY))压进开围栏行太多了（围栏行框底 \(openCaret.maxY - offsetY)，最多允许再往上 \(padding)）")
 
         // 闭围栏那一行（收尾的 ```）同理
         let closing = lines[lines.count - 1]
@@ -1849,8 +1850,8 @@ final class MarkdownEditorHy4Tests: XCTestCase {
             return XCTFail("拿不到闭围栏行的位置")
         }
         let closeCaret = tv.caretRect(for: closePos)
-        XCTAssertLessThan(background.maxY, closeCaret.minY - offsetY,
-                          "背景底(\(background.maxY))压到了闭围栏行(\(closeCaret.minY - offsetY))上")
+        XCTAssertLessThanOrEqual(background.maxY, closeCaret.minY - offsetY + padding + 2,
+                                 "背景底(\(background.maxY))压进闭围栏行太多了（围栏行框顶 \(closeCaret.minY - offsetY)，最多允许再往下 \(padding)）")
     }
 
     /// 把一个代码块按行切开，返回每行在**整篇文本**里的 NSRange（含行尾换行）。

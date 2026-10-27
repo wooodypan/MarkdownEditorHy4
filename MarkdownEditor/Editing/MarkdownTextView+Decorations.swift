@@ -368,8 +368,8 @@ extension MarkdownTextView {
             // fragment 框量的是整个行盒，拿它 ± padding 铺灰底，屏幕上就是「上沿离第一行字很远、下沿贴着最后一行字」。
             // 改成首行 / 末行的字形顶底 ± 同样的 padding，文字才在灰底里垂直居中。
             //
-            // 围栏行那边照旧由 `codeFenceParagraphStyle` 留出至少两个 padding 的空档；
-            // 上沿从行盒顶缩到字形顶之后只会离围栏更远，不会压上去。
+            // 围栏行的段距在对内那一侧是 0（`codeFenceParagraphStyle`），所以灰底上沿会压进围栏行的 descender 空白区，最多一个 padding。
+            // 围栏文字画在基线以上，那片区域没有字形，灰底又在文字下面一层，不会盖住 ``` 和语言名。
             let backgroundTop = top - padding
             let backgroundBottom = bottom + padding
             // 理论上必然成立（top / bottom 都来自真实存在的 fragment）→ 真有异常就宁可不画，也不画一个翻过来的框

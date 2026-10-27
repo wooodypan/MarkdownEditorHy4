@@ -821,7 +821,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
                              in: localRange(of: codeBlock),
                              orphanAttributes: orphanAttributes)
         out.addAttributesIfAbsent([.paragraphStyle: codeStyle])
-        // 开 / 闭两条围栏行的段距是「分方向」的（对外留段距、对内只留灰底 padding），而补漏只能给一个统一样式 —— 所以这里再按「哪几行是围栏」各设一次
+        // 开 / 闭两条围栏行的段距是「分方向」的（对外留段距把代码块和上下文分开、对内段距 0 让围栏贴着代码），而补漏只能给一个统一样式 —— 所以这里再按「哪几行是围栏」各设一次
         applyFenceParagraphStyles(to: &out, indent: indent)
 
         // 打上「这是一个代码块」的标记（**含**首尾的 ``` 行，这样首尾围栏也在同一段里，
@@ -918,7 +918,7 @@ final class MarkupToAttributedRenderer: MarkupVisitor {
     /// 给代码块首尾两条围栏行补上「分方向」的段落样式（开围栏在上面、闭围栏在下面）。
     ///
     /// ### 为什么补漏之后还要再来一遍
-    /// 补漏（`reconciled`）给所有孤儿字符用的是**同一份** `orphanAttributes`，而开 / 闭围栏的段前 / 段后间距是反着的（对外留正常段距、对内只留灰底要的那点 padding，见 `MarkdownTheme.codeFenceOpenParagraphStyle`）。
+    /// 补漏（`reconciled`）给所有孤儿字符用的是**同一份** `orphanAttributes`，而开 / 闭围栏的段前 / 段后间距是反着的（对外留正常段距、对内段距 0，见 `MarkdownTheme.codeFenceOpenParagraphStyle`）。
     /// 好在代码块的渲染串就是块源码本身（`sourceSliced` + 补漏保证一字不差），所以按**源码里的行**就能定位这两行。
     private func applyFenceParagraphStyles(to out: inout RenderedFragment, indent: CGFloat) {
         let rendered = out.text.string as NSString
