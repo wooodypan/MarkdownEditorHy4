@@ -1057,7 +1057,90 @@ final class MarkdownTextView: UITextView, MarkdownAttachmentHost {
         layoutManager.invalidateLayout(for: textRange)
     }
 
-    // 导出长图已挪到 `MarkdownTextView+Export.swift`。
+    // MARK: - 选中高亮垂直居中
+
+    /// 行高倍数大于1的时候，行距全堆在文字上方，复写此方法可以让选中色块正好把文字包在中间
+    /// 把行盒想成一个高度为 34 厘米的相框，文字是相框里的一张 20 厘米高的照片，照片贴在相框底部，上方空出 14 厘米。
+    /// 系统的选中色块，相当于把整个相框涂成蓝色，于是照片上方一大片蓝、下方只贴着一点点蓝，看起来文字偏下。这段代码只把蓝色色块整体往下挪 6.58 点，让照片在色块里上下留白相等。
+    /// 位移 shift = 文字中心 y − 色块中心 y
+    override func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
+        let rects = super.selectionRects(for: range)
+        // 没有调行高就原样返回
+        guard renderer.theme.lineHeightMultiple > 1,
+              textStorage.length > 0,
+              let layoutManager = textLayoutManager,
+              let contentStorage = layoutManager.textContentManager as? NSTextContentStorage
+        else { return rects }
+
+        let documentStart = contentStorage.documentRange.location
+        // 同一行的矩形位移相同：一次调用内按行缓存，长选区不重复量
+        var shiftByRow: [Int: CGFloat] = [:]
+
+        return rects.map { item in
+            let box = item.rect
+            guard !box.isNull, !box.isInfinite, box.height > 0 else { return item }
+
+            // view 坐标 → container 坐标（扣掉 inset）
+            let point = CGPoint(x: box.midX - textContainerInset.left,
+                                y: box.midY - textContainerInset.top)
+            let row = Int((point.y * 2).rounded())
+
+            var shift: CGFloat
+            if let cached = shiftByRow[row] {
+                shift = cached
+            } else {
+                shift = glyphCenteringShift(at: point,
+                                            layoutManager: layoutManager,
+                                            contentStorage: contentStorage,
+                                            documentStart: documentStart)
+                shiftByRow[row] = shift
+            }
+
+            // 保险：位移不可能超过半个矩形高，超过说明量错了，宁可不动
+            let limit = box.height / 2
+            guard abs(shift) <= limit else { return item }
+            guard shift != 0 else { return item }
+            return ShiftedSelectionRect(base: item, rect: box.offsetBy(dx: 0, dy: shift))
+        }
+    }
+
+    /// 某个矩形中心所在那一行，字形要下移多少才在矩形里垂直居中。
+    /// 不需要挪（没排好版、没套行高倍数、量不到字形、差不到 0.5pt）一律返回 0。
+    private func glyphCenteringShift(at point: CGPoint,
+                                     layoutManager: NSTextLayoutManager,
+                                     contentStorage: NSTextContentStorage,
+                                     documentStart: NSTextLocation) -> CGFloat {
+        // 没排好版的 fragment，行信息是空的、框也只是估算值，不碰
+        guard let fragment = layoutManager.textLayoutFragment(for: point),
+              fragment.state == .layoutAvailable else { return 0 }
+
+        let start = contentStorage.offset(from: documentStart, to: fragment.rangeInElement.location)
+        guard start >= 0, start < textStorage.length,
+              // 图片 / 公式 / 表格占位故意没套行高倍数，别去挪它们
+              let style = textStorage.attribute(.paragraphStyle, at: start, effectiveRange: nil) as? NSParagraphStyle,
+              style.lineHeightMultiple > 1,
+              let glyphs = textGlyphVerticalBounds(of: fragment, fragmentStart: start, nearestToY: point.y)
+        else { return 0 }
+
+        let shift = (glyphs.top + glyphs.bottom) / 2 - point.y   // 正 = 字在矩形中线下方，色块要下移
+        return abs(shift) > 0.5 ? shift : 0
+    }
+
+    /// 一个"挪过的"选区矩形：位置换成新的，其余属性照抄原来的。
+    private final class ShiftedSelectionRect: UITextSelectionRect {
+        private let base: UITextSelectionRect
+        private let shifted: CGRect
+        init(base: UITextSelectionRect, rect: CGRect) {
+            self.base = base
+            self.shifted = rect
+            super.init()
+        }
+        override var rect: CGRect { shifted }
+        override var writingDirection: NSWritingDirection { base.writingDirection }
+        override var containsStart: Bool { base.containsStart }
+        override var containsEnd: Bool { base.containsEnd }
+        override var isVertical: Bool { base.isVertical }
+    }
 }
 
 // MARK: - 手势共存

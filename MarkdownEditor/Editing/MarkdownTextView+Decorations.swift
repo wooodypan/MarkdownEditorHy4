@@ -401,12 +401,25 @@ extension MarkdownTextView {
     ///
     /// - parameter fragmentStart: 这个 fragment 在整篇文本里的起始 UTF-16 偏移。`NSTextLineFragment.characterRange` 是相对 fragment 起点的，要加它才能查属性。
     func textGlyphVerticalBounds(of fragment: NSTextLayoutFragment,
-                                 fragmentStart: Int) -> (top: CGFloat, bottom: CGFloat)? {
+                                 fragmentStart: Int,
+                                 nearestToY y: CGFloat? = nil) -> (top: CGFloat, bottom: CGFloat)? {
         let fragmentTop = fragment.layoutFragmentFrame.minY
         var top = CGFloat.greatestFiniteMagnitude
         var bottom = -CGFloat.greatestFiniteMagnitude
 
-        for line in fragment.textLineFragments {
+        // 传了 y 就只量离它最近的那一行（容器坐标），否则量整段所有行
+        var lines = fragment.textLineFragments
+        if let y {
+            func distance(_ line: NSTextLineFragment) -> CGFloat {
+                let box = line.typographicBounds
+                let lineTop = fragmentTop + box.minY
+                let lineBottom = fragmentTop + box.maxY
+                return y < lineTop ? lineTop - y : (y > lineBottom ? y - lineBottom : 0)
+            }
+            lines = fragment.textLineFragments.min(by: { distance($0) < distance($1) }).map { [$0] } ?? []
+        }
+
+        for line in lines {
             let lineBox = line.typographicBounds
             guard !lineBox.isNull, lineBox.height > 0 else { continue }
             // glyphOrigin 是相对这一行盒顶的偏移，换行后的第二行还要再加上 lineBox.minY
