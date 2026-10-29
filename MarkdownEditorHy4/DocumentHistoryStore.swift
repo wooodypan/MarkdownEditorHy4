@@ -43,6 +43,8 @@ struct DocumentVersion: Codable, Equatable, Identifiable {
         case manual
         /// 恢复旧版本之前，先给"当时那份内容"存的保险
         case beforeRestore
+        /// 把整篇换成格式化结果之前，先给"改之前的模样"存的保险
+        case beforeFormat
 
         /// 列表上给用户看的说法（直接显示这几个中文字）
         var displayName: String {
@@ -51,6 +53,7 @@ struct DocumentVersion: Codable, Equatable, Identifiable {
             case .appBackground: return "离开时留档"
             case .manual: return "手动保存"
             case .beforeRestore: return "恢复前备份"
+            case .beforeFormat: return "格式化前备份"
             }
         }
     }

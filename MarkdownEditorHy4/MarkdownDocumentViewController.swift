@@ -684,6 +684,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
             UIAction(title: "历史版本", image: UIImage(systemName: "clock")) { [weak self] _ in
                 self?.showHistory()
             },
+            // 「格式化文档」：把标题、分隔线、列表符号、空行收拾整齐，先预览再决定要不要覆盖（见 formatDocument）
+            UIAction(title: "格式化文档", image: UIImage(systemName: "text.alignleft")) { [weak self] _ in
+                self?.formatDocument()
+            },
             // 「打字机模式」带勾开关：光标始终停在屏幕中间，正文跟着光标滚（见 toggleTypewriter）
             typewriterAction,
             // 「只读模式」带勾开关：一开，这份文档就只能看不能改了（见 toggleReadOnly）

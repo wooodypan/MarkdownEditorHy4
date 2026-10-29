@@ -17,23 +17,30 @@
 
 import UIKit
 
-/// 预览某一版历史。
+/// 预览一份「准备替换掉编辑器里现有内容」的文字。
+///
+/// 两个地方用它：翻历史版本（点「恢复」）、格式化文档（点「应用」）。
+/// 除了标题和按钮上的字，两边要做的事一模一样——所以做成同一个页面，文案当参数传进来。
 final class DocumentVersionPreviewController: UIViewController {
 
-    /// 用户点了「恢复」。真正的确认框在上一页（列表页）弹，这里只负责把话传出去
-    var onRestore: (() -> Void)?
+    /// 用户点了右上角那个按钮（恢复 / 应用）。真正的确认框在上一页弹，这里只负责把话传出去
+    var onConfirm: (() -> Void)?
 
-    /// 选中的这一版
-    private let version: DocumentVersion
-    /// 这一版的正文
+    /// 页面标题
+    private let titleText: String
+    /// 准备用的这份正文
     private let versionContent: String
-    /// 编辑器里此刻的正文，也就是恢复时会被覆盖掉的那一份
+    /// 编辑器里此刻的正文，也就是确认之后会被覆盖掉的那一份
     private let currentContent: String
+    /// 顶部左半边那个切换按钮上写什么
+    private let contentLabel: String
+    /// 右上角按钮和提示文案里用哪个动词（"恢复" / "应用"）
+    private let actionName: String
 
     /// 对比放在后台算：几千行的文档在主线程算会卡住界面
     private let diffQueue = DispatchQueue(label: "MarkdownEditorHy4.text-diff", qos: .userInitiated)
 
-    private let modeControl = UISegmentedControl(items: ["这一版内容", "和现在对比"])
+    private lazy var modeControl = UISegmentedControl(items: [contentLabel, "和现在对比"])
     private let summaryLabel = UILabel()
     private let container = UIView()
     private let textView = UITextView()
@@ -49,11 +56,26 @@ final class DocumentVersionPreviewController: UIViewController {
     /// 后台算完了没有。没算完时先显示"正在对比…"
     private var isDiffReady = false
 
-    init(version: DocumentVersion, content: String, currentContent: String) {
-        self.version = version
+    init(titleText: String,
+         content: String,
+         currentContent: String,
+         contentLabel: String = "这一版内容",
+         actionName: String = "恢复") {
+        self.titleText = titleText
         self.versionContent = content
         self.currentContent = currentContent
+        self.contentLabel = contentLabel
+        self.actionName = actionName
         super.init(nibName: nil, bundle: nil)
+    }
+
+    /// 从历史列表点进来的那条路。
+    ///
+    /// 标题用「什么时候存的」：列表页已经把原因（自动存档 / 手动保存）显示过了，进来看时间更有用。
+    convenience init(version: DocumentVersion, content: String, currentContent: String) {
+        self.init(titleText: DocumentHistoryViewController.dateFormatter.string(from: version.createdAt),
+                  content: content,
+                  currentContent: currentContent)
     }
 
     required init?(coder: NSCoder) {
@@ -65,14 +87,14 @@ final class DocumentVersionPreviewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        // 标题写"什么时候存的"：列表页已经把原因（自动存档 / 手动保存）显示过了，进来看时间更有用
-        title = DocumentHistoryViewController.dateFormatter.string(from: version.createdAt)
+        // 标题由调用方定：历史那条路是"什么时候存的"，格式化那条路是"格式化预览"
+        title = titleText
         view.backgroundColor = .systemBackground
 
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "恢复",
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: actionName,
                                                             style: .plain,
                                                             target: self,
-                                                            action: #selector(restoreTapped))
+                                                            action: #selector(confirmTapped))
 
         configureSubviews()
         updateSummary()
@@ -203,7 +225,7 @@ final class DocumentVersionPreviewController: UIViewController {
             summaryLabel.text = "和现在的内容没有差别。"
             return
         }
-        summaryLabel.text = "恢复后：绿色 \(addedCount) 行会加进来，红色 \(removedCount) 行会消失。"
+        summaryLabel.text = "\(actionName)后：绿色 \(addedCount) 行会加进来，红色 \(removedCount) 行会消失。"
     }
 
     private func makeEmptyStateLabel(_ text: String) -> UIView {
@@ -232,8 +254,8 @@ final class DocumentVersionPreviewController: UIViewController {
         summaryLabel.isHidden = !showingDiff
     }
 
-    @objc private func restoreTapped() {
-        onRestore?()
+    @objc private func confirmTapped() {
+        onConfirm?()
     }
 }
 

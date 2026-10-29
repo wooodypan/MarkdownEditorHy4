@@ -233,7 +233,7 @@ final class DocumentHistoryViewController: UIViewController {
         let preview = DocumentVersionPreviewController(version: version,
                                                       content: text,
                                                       currentContent: currentContent?() ?? "")
-        preview.onRestore = { [weak self] in self?.confirmRestore(version) }
+        preview.onConfirm = { [weak self] in self?.confirmRestore(version) }
         navigationController?.pushViewController(preview, animated: true)
     }
 
