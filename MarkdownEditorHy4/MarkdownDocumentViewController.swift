@@ -53,6 +53,11 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// 如果保存之后顺手报一个 false，用户双击开出来的正式 Tab 会被降级回预览，被下一次单击顶掉，就反了。
     var didReportEdited = false
 
+    /// 上一次告诉宿主的「有没有未保存的修改」。
+    ///
+    /// 记一份是为了别每次敲键盘都跨协议调一次：宿主收到相同状态本来也会自己跳过重刷，但那是白跑一趟，在本地先挡掉更省事。
+    var lastReportedEditingState = false
+
     /// 内容项可能在 `viewDidLoad` **之前**就送到了（宿主要先建好 Tab 才会显示它）。
     /// 先存下来，等界面搭好再套用。这也是库在 `PPContentDisplaying` 里写明的约定
     var pendingItem: PPContentItem?
@@ -182,6 +187,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         super.viewDidAppear(animated)
         // 窗口（windowScene）要等 view 挂上去才有，标题在这里补一次
         updateWindowTitle()
+        // 补报一次「脏没脏」：内容页是先 configure、后进 Tab 条的，第一次上报时宿主还找不到这个 Tab（README 里写明的坑），灰点会漏掉
+        reportEditingStateIfNeeded()
         // 接管「左边缘滑回去」手势的代理，只在 iPhone 上、真的在导航栈里时才拿得到
         takeOverPopGestureIfNeeded()
     }
@@ -220,6 +227,10 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// ### 只在「跟随系统」那一档处理
     /// 用户手选了深色 / 浅色时窗口被 override 住，系统怎么切都不该影响 App。
     /// 那一档的切换走的是设置通知（`settingsDidChange` → `applyEditorStyle`），在这儿再排一次等于白花一遍。
+    ///
+    /// ### Tab 条那几种颜色不归这里管
+    /// 它们属于整个工作区（开几个 Tab 只该重算一次），而且一个 Tab 都没开时也要对 ——
+    /// 所以由右侧宿主自己的 trait 变化统一重算，见 `WorkspaceCoordinator.observeHostAppearanceChanges()`。
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
         guard MarkdownAppearance.mode == .system,
@@ -793,6 +804,8 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     @objc private func editorContentChanged() {
         updateWindowTitle()
         reportEditedStateIfNeeded()
+        // Tab 上的灰点跟着「脏没脏」走。撤销回原样、删掉刚敲的字都会让状态变回去，所以这里每次都要报
+        reportEditingStateIfNeeded()
         // 刚敲进去的字也是一笔可以撤销的账，键盘条上那两粒按钮跟着变
         refreshKeyboardBarButtons()
         // 字数变了。同样拖一下再算：每敲一个键就扫一遍全篇不值当
@@ -808,6 +821,28 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         guard isDirty, !didReportEdited else { return }
         didReportEdited = true
         contentHost?.contentViewController(self, didChangeEditedState: true)
+    }
+
+    /// 把「现在有没有未保存的修改」告诉宿主：有的话，Tab 上那个关闭按钮 x 会换成灰色小圆点。
+    ///
+    /// ### 和上面那个不是一回事
+    /// `reportEditedStateIfNeeded` 报的是「我被编辑过了，把预览 Tab 固定成正式 Tab」——只报一次 true，之后再也不撤回。
+    /// 这个方法报的是「现在脏不脏」，可以来回变：保存完要变回 false，撤销回原样也要变回 false。
+    ///
+    /// ### 为什么状态没变就不报
+    /// 输入时每敲一个字都会走到这里。宿主收到相同状态会自己跳过重绘，但跨着协议调一次也是白花，在本地挡掉更省事。
+    ///
+    /// ### 什么时候必须补一次
+    /// 内容页是先被 `configure`、后进 Tab 条的（宿主要建好内容页才知道它多宽），那一刻上报宿主找不到对应 Tab，会直接丢掉。所以 `viewDidAppear` 里还要补报一次。
+    ///
+    /// - Parameter force: 无视「状态没变」直接报。换文档时用：本地记的账刚对齐成干净，
+    ///   宿主那边可能还挂着上一份文档的灰点，得硬推一次。
+    func reportEditingStateIfNeeded(force: Bool = false) {
+        // `isDirty` 每次都要把整篇源码和保存时那份比一遍，取一次存着比两次便宜
+        let dirty = isDirty
+        guard force || dirty != lastReportedEditingState else { return }
+        lastReportedEditingState = dirty
+        contentHost?.contentViewController(self, didChangeEditingState: dirty)
     }
 
     /// 重算底部状态栏：字数 + 光标所在的行 / 列（有没保存的改动再标一句）。

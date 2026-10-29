@@ -49,6 +49,14 @@ final class WorkspaceCoordinator {
     /// 左栏两页，下标和标签页的按钮一一对应
     private let leftTabs: [UIViewController]
 
+    /// 右侧分栏容器。只有 iPad / Mac 有，iPhone 上是 nil。
+    ///
+    /// 留成属性是为了「设置里换了主题 / 切了深浅之后，回来重刷 Tab 条的颜色」—— 那套颜色要跟着正文配色现算，不能在建界面时定死。
+    private var splitContainer: SplitContainerViewController?
+
+    /// 设置变化的监听器（换主题、换配色、切外观都算）
+    private var tabBarStyleObserver: NSObjectProtocol?
+
     /// Finder 那条路的监听器（主题 JSON 送进来时把主题页弹出来）
     private var themeFileObserver: NSObjectProtocol?
 
@@ -81,6 +89,9 @@ final class WorkspaceCoordinator {
         let makeContentViewController: PPContentViewControllerProvider = {
             MarkdownDocumentViewController()
         }
+
+        // 分栏容器是在下面的闭包里造出来的，而闭包执行时所有存储属性还没初始化完（Swift 不让在 init 里捕获 self），所以先落到这个局部变量，等 `rootViewController` 赋值完再转存进属性
+        var createdSplit: SplitContainerViewController?
 
         rootViewController = RootBuilder.makeRoot(
             iPhoneRoot: {
@@ -118,6 +129,7 @@ final class WorkspaceCoordinator {
                     list?.setHighlightedItemID(id, scrollToSelection: true)
                     recent?.setHighlightedItemID(id, scrollToSelection: true)
                 }
+                createdSplit = split
                 return split
             }
         )
@@ -129,8 +141,61 @@ final class WorkspaceCoordinator {
         // 初始那一页也要搬一次（切 Tab 的回调不会为「第一次」触发）
         syncNavigationItem(for: tabBar.selectedIndex)
 
+        // 右侧那条 Tab 条按正文配色上色（iPad / Mac 才有分栏容器）
+        splitContainer = createdSplit
+        applyTabBarStyle()
+        observeTabBarStyleChanges()
+        observeHostAppearanceChanges()
+
         // 从 Finder 送进来的主题 JSON（双击 /「打开方式」/ 拖到 Dock 图标）在这里接住
         observeThemeFileArrivals()
+    }
+
+    // MARK: Tab 条配色
+
+    /// 按当前正文配色算出 Tab 条的颜色，装到右侧宿主上。
+    ///
+    /// ### 为什么现算，不缓存一份
+    /// 正文底色可能来自内置主题，也可能来自「我的主题」里导入的 JSON，得走一遍设置里的合成流程才拿得到。
+    /// 好在只有「设置变了」「窗口建好了」这两个时机调它，一次读盘的开销可以接受。
+    ///
+    /// ### 为什么启动算一次还不够
+    /// 深浅要等窗口挂到场景上才定得下来（`MarkdownAppearance.isDark` 读的是前台窗口的 trait）。
+    /// 装配发生在窗口之前，那一次会按浅色算 —— 所以 `SceneDelegate` 在 `makeKeyAndVisible()` 之后还要补调一次，否则深色模式冷启动时 Tab 条会停在浅色那套。
+    func applyTabBarStyle() {
+        guard let split = splitContainer else { return }
+        let background = MarkdownEditorSettings.shared.currentTheme.editorBackground
+        MarkdownTabBarStyle.apply(MarkdownTabBarStyle.colors(editorBackground: background),
+                                  to: split.detailHost)
+    }
+
+    /// 设置一改就重算 Tab 条颜色：换主题、换配色、切深浅都会走到这里。
+    ///
+    /// ⚠️ 和下面 `themeFileObserver` 同一个理由，这个监听器也不移除：本类跟着场景活到 App 退出，闭包里是 `[weak self]`，本类先走了它就什么都不做。
+    private func observeTabBarStyleChanges() {
+        guard tabBarStyleObserver == nil else { return }
+        tabBarStyleObserver = NotificationCenter.default.addObserver(
+            forName: MarkdownEditorSettings.didChangeNotification,
+            object: MarkdownEditorSettings.shared,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applyTabBarStyle()
+        }
+    }
+
+    /// 系统切深色 / 浅色后，把 Tab 条的颜色按新外观重算一遍。
+    ///
+    /// ### 为什么「设置变了」那一路盖不住它
+    /// 系统外观变化不写配置，不发 `didChangeNotification`：正文靠文档页自己的 `traitCollectionDidChange` 整篇重排，
+    /// 而 Tab 条这几种颜色是**上色那一刻按当时的底色算出来的实色**，没人通知就一直停在旧外观上。
+    /// 偏偏 Tab 标题、关闭按钮用的是动态色（深色下变白）—— 于是深色正文上面压一条浅色 Tab 条，白字落在浅底上，直接看不见。
+    ///
+    /// 挂在宿主上而不是每份文档页上：Tab 条属于整个工作区，开几个 Tab 都只该重算一次；
+    /// 而且一个 Tab 都没开时宿主会把 Tab 条收起来，那时候也不用算。
+    private func observeHostAppearanceChanges() {
+        splitContainer?.detailHost.onUserInterfaceStyleChange = { [weak self] in
+            self?.applyTabBarStyle()
+        }
     }
 
     /// ⚠️ 这里**故意不移除**那个通知监听器：本类的 deinit 是 nonisolated 的（原因见类注释），从 nonisolated 的上下文里读不到被 MainActor 隔离的属性，写了就编不过。

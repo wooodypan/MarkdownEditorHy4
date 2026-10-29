@@ -190,6 +190,9 @@ extension MarkdownDocumentViewController {
 
         refreshStatus()
         updateWindowTitle()
+        // 换文档了，Tab 上的灰点必须跟着复位：上一份文档的「没保存」跟这一份没关系。
+        // 用 force 直接推一次 —— 本地记的账刚刚对齐成干净，宿主那边可能还挂着旧的灰点，走「状态没变就不报」那条路会被自己挡掉。
+        reportEditingStateIfNeeded(force: true)
         // 换文档，大纲从「全部展开」开始（上一份文档折过什么，跟这一份没关系）
         outlineView.resetFolding()
         // 查找还开着的话，按原来那个词在新文档里重查一遍。换文档时编辑器已经把自己的命中清掉了，不补这一下，计数会停在上一份文档的旧数字上

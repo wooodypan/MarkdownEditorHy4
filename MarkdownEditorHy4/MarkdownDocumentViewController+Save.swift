@@ -89,6 +89,8 @@ extension MarkdownDocumentViewController {
         NotificationCenter.default.post(name: DocumentsWorkspace.didChangeNotification, object: nil)
         // 存盘是个天然的「我读到这儿了」的时间点，顺手记一次
         rememberCurrentScrollPosition()
+        // 存完了就不再脏：Tab 上那个灰点变回关闭按钮 x
+        reportEditingStateIfNeeded()
         refreshStatus()
         updateWindowTitle()
         flashStatus("已保存 \(url.lastPathComponent)")

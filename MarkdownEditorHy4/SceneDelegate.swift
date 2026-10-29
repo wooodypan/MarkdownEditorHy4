@@ -48,6 +48,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         self.window = window
         window.makeKeyAndVisible()
 
+        // Tab 条那套颜色是按「正文底色 + 当前是深色还是浅色」算出来的，而深浅要等窗口挂到场景上才定得下来。
+        // 装配器在 init 里已经算过一次（那时还没窗口，一律按浅色算），这里补算一次 —— 不然深色模式冷启动时，Tab 条会停在浅色那一套上，跟正文对不上。
+        workspace.applyTabBarStyle()
+
         // 冷启动：App 没在跑时用户双击 md 文件，URL 从这里进来。
         // 它只把 URL 存进 MarkdownDocumentOpener，等左栏那份文件列表出现之后
         // 自己去取、在新 Tab 里打开
