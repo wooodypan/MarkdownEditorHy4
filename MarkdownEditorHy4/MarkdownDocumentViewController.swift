@@ -90,7 +90,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// 导出这条链路（图片 / HTML / PDF）。
     ///
     /// 实现整个在 `DocumentExporter` 里，左栏右键导出走的也是它那一份，两处导出来的东西才一样。
-    /// 这里只交代三件事：谁弹面板（本页）、popover 从哪儿长出来（右上角那个「⋯」）、进度往哪儿写（底部状态栏）。
+    /// 这里只交代三件事：谁弹面板（本页）、popover 从哪儿长出来（右上角那个「⋯」）、进度往哪儿写（屏幕下方那条提示）。
     private lazy var exporter = DocumentExporter(
         presenter: self,
         anchorView: menuButton,
@@ -114,6 +114,16 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     var savedSource = ""
     /// 有没有未保存的改动
     var isDirty: Bool { editor.markdownSource != savedSource }
+    /// 本次运行已经提醒过「文件夹没权限」的那些目录。
+    ///
+    /// 大白话：同一个文件夹只提醒一次，不然每切一次 Tab 就弹一个框，用户会烦。
+    /// 用户点了「以后再说」之后想反悔，还能从「⋯」菜单里的「授权所在文件夹」找回来。
+    var folderAccessNoticesShown: Set<String> = []
+    /// 正在等用户挑文件夹的那个面板。
+    ///
+    /// 要单独留一根引用：面板自己被 UIKit 持有，但它的回调闭包是 weak 引用本页的，
+    /// 不攥着的话面板可能在回调之前就被回收，用户挑完文件夹什么都没发生。
+    var folderAccessPicker: FolderAccessPicker?
     /// 「这次存完就把这一页弹回去」。
     ///
     /// ### 为什么不能存完当场弹、非得先记一笔
@@ -123,8 +133,6 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     ///
     /// 装了返回确认之后，这个手势的代理归本页管（见 `takeOverPopGestureIfNeeded`）。离开之前必须原样还回去，否则下一个页面要滑的时候没人管，会滑出半截卡在原地的动画，导航条跟着失去响应。
     weak var popGesturePreviousDelegate: UIGestureRecognizerDelegate?
-    /// 临时提示（比如「已保存」）显示完要恢复成常规状态栏
-    private var statusResetWork: DispatchWorkItem?
     /// 状态栏重算的防抖任务。
     ///
     /// 打字每敲一个键、拖光标每一帧都会想让状态栏重算一次，而算一次要扫全篇源码（字数）。
@@ -191,6 +199,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         reportEditingStateIfNeeded()
         // 接管「左边缘滑回去」手势的代理，只在 iPhone 上、真的在导航栈里时才拿得到
         takeOverPopGestureIfNeeded()
+        // 文档可能在本页还没进窗口时就被装进来了，那时候弹不出提示框。
+        // 到这里页面已经在窗口里，补一次；已经提醒过的目录会被 `folderAccessNoticesShown` 挡住
+        notifyIfFolderAccessMissing()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -545,7 +556,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         self?.toggleReadOnly(action)
     }
 
-    /// 拨一下「只读模式」：改配置、同步给编辑器、改勾，再让状态栏说一句。
+    /// 拨一下「只读模式」：改配置、同步给编辑器、改勾，再弹一条提示。
     ///
     /// ### 为什么这里手动再赋一次 `editor.isReadOnly`
     /// 配置的通知（`MarkdownEditorSettings.didChangeNotification`）走的是「写主题 + 整篇重渲染」那条路，而这只是个行为开关，一个字都不用重排，所以绕开那条重活，直接赋值。
@@ -662,7 +673,9 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// ### 为什么改完 `state` 还得重挂
     /// 按钮上挂着的 `UIMenu` 是**照着当时那份 action 状态拍下来的快照**：就地改 `UIAction.state` 不会让已经挂上去的菜单重画。
     /// 只改不重挂的症状就是「开关明明已经关了，菜单里还带着勾」。所以凡是改勾的地方，改完都得走这一趟。
-    private func refreshActionMenu() {
+    ///
+    /// ⚠️ 不写 `private`：换文档那条路（`apply`）在 `+DocumentContent` 里，装完新文档也得重挂一次，否则菜单还停在上一份文档的样子。
+    func refreshActionMenu() {
         menuButton.menu = makeActionMenu()
     }
 
@@ -675,7 +688,7 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
     /// ⚠️ 不写 `private` 是为了让单测能直接问一句"菜单里有没有『历史版本』"
     ///（和左栏 `contextMenu(for:)` 那条测试一个路子）。
     func makeActionMenu() -> UIMenu {
-        let actions: [UIMenuElement] = [
+        var actions: [UIMenuElement] = [
             UIAction(title: "查找", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
                 // 顶部滑出查找 / 替换横条
                 self?.showFindBar()
@@ -730,6 +743,29 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
                 
             }
         ]
+
+        // 文档在 App 沙盒外面、同一个文件夹又没权限时，才出现这一项。
+        // 平时藏起来，菜单不至于越拉越长；用户点了「以后再说」之后想反悔，也从这儿找回来。
+        //
+        // 判断必须推迟到「菜单真正弹出来的那一刻」：菜单是照着建它那一瞬间拍下来的照片，
+        // 而这一页是「先建好、后装文档」的（viewDidLoad 里 setupMenuButton 排在 apply(item) 前面），
+        // 建菜单时 openedFileURL 还是空的，写死在这里之后就算打开了文档，这一项也永远长不出来
+        let folderAccessElement = UIDeferredMenuElement.uncached { [weak self] completion in
+            guard let self,
+                  let url = self.openedFileURL,
+                  !DocumentFolderAccess.isAvailable(forDocumentAt: url) else {
+                // 给个空数组：这一项就不出现，菜单里也不会留一条空行
+                completion([])
+                return
+            }
+            completion([
+                UIAction(title: "授权所在文件夹",
+                         image: UIImage(systemName: "folder.badge.plus")) { [weak self] _ in
+                    self?.requestFolderAccess()
+                }
+            ])
+        }
+        actions.append(folderAccessElement)
 
         #if DEBUG
         // 调试项单独成一组：`.displayInline` 让它就地展开（不变成二级菜单），
@@ -935,13 +971,16 @@ final class MarkdownDocumentViewController: UIViewController, PPContentDisplayin
         return (lineIndex + 1, offset - starts[lineIndex] + 1)
     }
 
-    /// 状态栏上闪一句提示，1.5 秒后自动恢复成常规信息
+    /// 屏幕下方弹一条提示，1.5 秒后自己淡出。
+    ///
+    /// 大白话：这句话以前写在底部状态栏上，用户只要把状态栏一关，保存、格式化这些提示就全看不见了；
+    /// 现在改成浮在正文上的小药丸，跟那条带子开不开没关系，眼睛也不用离开正在写的地方。
+    ///
+    /// ### 为什么挂在 window 上
+    /// 跟 `editor.onStatusMessage` 那条线保持一致：挂在页面视图上的提示会跟着正文一起滚走。
+    /// `view.window` 为 nil（页面还没进窗口）时这条显示不出来，但那种时刻也不会有用户动作要回应。
     func flashStatus(_ message: String) {
-        statusResetWork?.cancel()
-        statusLabel.text = message
-        let work = DispatchWorkItem { [weak self] in self?.refreshStatus() }
-        statusResetWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+        MarkdownToast.show(message, in: view.window)
     }
 
     // MARK: 小工具

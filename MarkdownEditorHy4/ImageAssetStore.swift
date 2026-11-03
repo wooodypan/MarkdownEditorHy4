@@ -38,7 +38,7 @@ enum ImageAssetStore {
         case .currentFolder:
             // 图片和笔记并排躺在一起，正文里写文件名就行（不带任何目录）
             guard let name = MarkdownImageFileStore.store(data, in: documentDirectory, naming: naming) else {
-                return Outcome()
+                return failureOutcome(for: documentDirectory)
             }
             return Outcome(path: name)
 
@@ -56,12 +56,14 @@ enum ImageAssetStore {
                 return writeToAssets(data, documentDirectory: documentDirectory, naming: naming)
             }
             let directory = documentDirectory.appendingPathComponent(folderName, isDirectory: true)
-            guard let name = MarkdownImageFileStore.store(data, in: directory, naming: naming) else { return Outcome() }
+            guard let name = MarkdownImageFileStore.store(data, in: directory, naming: naming) else {
+                return failureOutcome(for: documentDirectory)
+            }
             return Outcome(path: "\(folderName)/\(name)")
 
         case .customFolder:
             // 用户自己挑的固定文件夹（只有 Mac 上能选）。
-            // 它多半在笔记目录之外，相对路径表达不了，所以正文里写**完整路径**
+            // 它多半在笔记目录之外，相对路径表达不了，所以正文里写完整路径
             let fallback = writeToAssets(data, documentDirectory: documentDirectory, naming: naming)
             guard let folder = settings.imageCustomFolderURL else {
                 return Outcome(path: fallback.path,
@@ -70,6 +72,10 @@ enum ImageAssetStore {
             guard let name = MarkdownImageFileStore.store(data, in: folder, naming: naming) else {
                 // 文件夹被删了 / 挪走了 / 没权限写 —— 不能就这么静默失败（粘贴会像「点了没反应」），
                 // 退到 ./assets 保证图能插进来，同时明确告诉用户发生了什么
+                guard fallback.path != nil else {
+                    // 连兜底的 ./assets 都写不进去。这时候还说「先存到了 ./assets」是在骗人，得把真实原因说出去
+                    return failureOutcome(for: documentDirectory)
+                }
                 return Outcome(path: fallback.path,
                                note: "写不进 \(folder.lastPathComponent)，这张先存到了 ./assets")
             }
@@ -104,7 +110,22 @@ enum ImageAssetStore {
                                       documentDirectory: URL,
                                       naming: MarkdownImageNaming) -> Outcome {
         let directory = documentDirectory.appendingPathComponent("assets", isDirectory: true)
-        guard let name = MarkdownImageFileStore.store(data, in: directory, naming: naming) else { return Outcome() }
+        guard let name = MarkdownImageFileStore.store(data, in: directory, naming: naming) else {
+            return failureOutcome(for: documentDirectory)
+        }
         return Outcome(path: "assets/\(name)")
+    }
+
+    /// 图片写不进去时给用户的那句话。
+    ///
+    /// ### 为什么要分出「没权限」和「别的原因」
+    /// 这两种失败对用户来说动作完全不同：没权限要去授权，别的原因得去看磁盘满没满、文件夹是不是只读。
+    /// 以前这里返回空结果、一个字都不说，粘贴图片就是「点了没反应」，最难查。
+    private static func failureOutcome(for documentDirectory: URL) -> Outcome {
+        let folderName = documentDirectory.lastPathComponent
+        guard DocumentFolderAccess.isWritable(documentDirectory) else {
+            return Outcome(note: "没权限往「\(folderName)」里存图片，用「⋯ → 授权所在文件夹」开一下权限")
+        }
+        return Outcome(note: "图片没存进「\(folderName)」，可能是磁盘满了或者文件夹设成了只读")
     }
 }

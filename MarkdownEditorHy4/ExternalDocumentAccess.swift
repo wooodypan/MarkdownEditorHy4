@@ -146,6 +146,19 @@ final class ExternalDocumentAccess {
         activeURLs[canonicalPath(for: url)] != nil
     }
 
+    /// 收下一个文件夹的通行证。
+    ///
+    /// ### 什么时候用
+    /// 用户从 Finder 双击打开一份备忘录时，系统只给了那一份文件的通行证，同文件夹里的图片一个都读不到。
+    /// 让用户用打开面板挑一次这个文件夹（他自己点选的，系统才发通行证），之后这个文件夹里的文件就都能读写。
+    ///
+    /// - Returns: 收下了返回 true；用户挑的位置还是没权限（极少数情况）返回 false
+    @discardableResult
+    func takeFolderAccess(_ directory: URL) -> Bool {
+        // 目录和文件走同一套：申请通行证、存书签、记在 activeURLs 里，退出时一起还
+        readableURL(for: directory) != nil
+    }
+
     /// 退出时把这一轮申请过的授权全还回去。
     func stopAccessingAll() {
         // 只还 `scopedURLs` 里那些真正申请过的；能读但没申请过的 URL 还了反而会少一次计数

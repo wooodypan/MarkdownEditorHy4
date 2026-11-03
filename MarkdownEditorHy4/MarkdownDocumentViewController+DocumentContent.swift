@@ -199,6 +199,12 @@ extension MarkdownDocumentViewController {
         searchCoordinator.rerunIfNeeded()
         // 同一份文档被重新配置（预览 Tab 复用回它自己）就别乱滚，免得跳走
         if !isSameDocument { restoreScrollPositionIfNeeded() }
+        // 文档在 App 沙盒外面时，同文件夹的图片一个都读不到、新图也存不进去。
+        // 这一步主动说清楚，别让用户以为图片坏了（见 `notifyIfFolderAccessMissing`）
+        notifyIfFolderAccessMissing()
+        // 换完文档要把菜单重挂一次：按钮上挂的是快照，装文档之前建的那份还对着旧文档（甚至还没有文档）。
+        // 「授权所在文件夹」那一项自己会在弹出时现算，这里管的是其余那些跟着文档变的项
+        refreshActionMenu()
     }
 }
 
