@@ -175,7 +175,11 @@ extension MarkdownDocumentViewController {
             editor.resetUndoHistory()
         }
         // md 里的图片多是相对路径，基准目录要指向文件所在目录，否则图片全裂
-        editor.imageBaseURL = url.deletingLastPathComponent()
+        let documentDirectory = url.deletingLastPathComponent()
+        // 以前授权过这个文件夹的话，先把存好的通行证找回来（App 一重启，系统就把权限收回了）。
+        // 必须赶在下面 setMarkdown 之前做：一渲染就会去读图，晚一步图就先按「读不到」变成一行源码文字，用户看到的是裂图
+        ExternalDocumentAccess.shared.restoreFolderAccess(for: documentDirectory)
+        editor.imageBaseURL = documentDirectory
         // 同一份文档被重新配置（预览 Tab 复用回它自己）时，光标要留在原处。
         // `setMarkdown` 是「整篇换内容」，按约定会把光标归零（换文档时正需要这个效果）；
         // 这里先把当前光标换成源码坐标存一笔，装完再换算回去，用户正在读的地方不会被顶走。

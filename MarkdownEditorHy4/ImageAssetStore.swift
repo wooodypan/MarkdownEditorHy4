@@ -31,6 +31,9 @@ enum ImageAssetStore {
         let settings = MarkdownEditorSettings.shared
         // 相对路径的分母：笔记在哪个目录，图片就相对于哪个目录摆
         let documentDirectory = documentURL?.deletingLastPathComponent() ?? DocumentsWorkspace.folderURL
+        // 这个文件夹可能处在「以前授过权、这次还没找回来」的状态（App 一重启，系统就把权限收回了）。
+        // 粘贴前先找回来一次，免得明明授过权，却说没权限、图也存不进去
+        ExternalDocumentAccess.shared.restoreFolderAccess(for: documentDirectory)
         // 名字规则一次算清，四条分支共用同一个 —— 免得以后加了新分支忘了带名字
         let naming = naming(for: settings.imageNameMode, originalFileName: originalFileName)
 
@@ -69,6 +72,9 @@ enum ImageAssetStore {
                 return Outcome(path: fallback.path,
                                note: "还没选过「指定路径」的文件夹，这张先存到了 ./assets")
             }
+            // 这个文件夹的权限是用户在设置页里亲手给的，但 App 一重启就被系统收回去了。
+            // 先按存过的书签把通行证找回来，不然每次重启后头一次往这儿存图都会失败、白退回 ./assets
+            ExternalDocumentAccess.shared.restoreFolderAccess(for: folder)
             guard let name = MarkdownImageFileStore.store(data, in: folder, naming: naming) else {
                 // 文件夹被删了 / 挪走了 / 没权限写 —— 不能就这么静默失败（粘贴会像「点了没反应」），
                 // 退到 ./assets 保证图能插进来，同时明确告诉用户发生了什么

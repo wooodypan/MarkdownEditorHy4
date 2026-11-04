@@ -720,6 +720,9 @@ extension SettingsPaneViewController: UIDocumentPickerDelegate {
     /// 正是我们要的行为，不用额外处理。
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
+        // 挑完当场把通行证收下来、存成书签：这个文件夹多半在 App 自己的沙盒文件夹外面，
+        // 不当场收的话，现在图就写不进去，下次启动更不行（设置里光记个路径，本身不带权限）
+        ExternalDocumentAccess.shared.takeFolderAccess(url)
         settings.setImageCustomFolderPath(url.path)
         tableView.reloadData()
     }

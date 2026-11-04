@@ -812,11 +812,9 @@ final class MarkdownEditorSettings {
 
     /// 「复制到指定路径」那一项用的文件夹的**完整路径**。`nil` = 用户还没选过。
     ///
-    /// ### 为什么这里只有路径
-    /// App 在 Mac Catalyst 上开了沙盒（见 `MarkdownEditorHy4.entitlements`），
-    /// 用户挑的文件夹在容器外时，这里只记下了路径，没有保存 security-scoped bookmark。
-    /// 结果就是往这个目录写图片会失败，`ImageAssetStore` 会退回 `./assets` 并提示用户。
-    /// 要让它跨启动可用，得在这个回调里补一次授权，再把书签存下来（参考 `ExternalDocumentAccess`）。
+    /// ### 这里为什么只记路径
+    /// 路径只是用来看、用来算图片该写到哪儿；真正让 App 重启后还能写进这个文件夹的，是 `ExternalDocumentAccess` 里存的那份security-scoped书签（用户挑文件夹那一刻收下的）。
+    /// 只有路径没有书签的话，重启后往这个文件夹存图会失败，`ImageAssetStore` 会退回 `./assets` 并提示用户。
     private(set) var imageCustomFolderPath: String?
 
     /// 粘贴 / 插入的图片**文件叫什么名字**。默认「用原始文件名」。三种规则的取舍见 `ImageNameMode`

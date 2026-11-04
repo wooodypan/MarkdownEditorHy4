@@ -159,6 +159,27 @@ final class ExternalDocumentAccess {
         readableURL(for: directory) != nil
     }
 
+    /// 20261104-1 看看这个文件夹以前有没有存过通行证（书签），存过就把它重新拿出来用。
+    ///
+    /// ### 为什么要单独留这么一步
+    /// 存书签只是留了个底，不会自动生效：App 一重启，权限就被系统收回去了。想接着用，得把书签读出来、重新申请一遍，权限才回到手里。
+    /// 而打开文档那条路只认**文档自己的**路径，拿它去查书签，永远查不到文件夹那一份 —— 不补这一步，用户每重启一次就得重新挑一次文件夹，书签等于白存。
+    ///
+    /// ### 它不弹框、也不要新权限
+    /// 只是把用户**以前亲手给过的**权限找回来，跟弹框申请新权限是两码事。以前没存过书签就安静地返回 false，调用方该怎么提示还怎么提示。
+    ///
+    /// - Returns: 现在能访问这个文件夹就返回 true（本来就有权限，或者这次找回来了）
+    @discardableResult
+    func restoreFolderAccess(for directory: URL) -> Bool {
+        #if targetEnvironment(macCatalyst)
+        // 直接走 `readableURL` 这条现成的路：App 自己文件夹里的直接放行；外面的先看这次是不是已经有权限，再查存过的书签，都没有才现场申请
+        return readableURL(for: directory) != nil
+        #else
+        // iOS 上没有 security-scoped bookmark，跨启动的权限靠「复制进 App」，这里没东西可恢复
+        return false
+        #endif
+    }
+
     /// 退出时把这一轮申请过的授权全还回去。
     func stopAccessingAll() {
         // 只还 `scopedURLs` 里那些真正申请过的；能读但没申请过的 URL 还了反而会少一次计数
