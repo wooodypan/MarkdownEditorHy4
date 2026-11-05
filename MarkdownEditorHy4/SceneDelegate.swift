@@ -52,6 +52,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // 装配器在 init 里已经算过一次（那时还没窗口，一律按浅色算），这里补算一次 —— 不然深色模式冷启动时，Tab 条会停在浅色那一套上，跟正文对不上。
         workspace.applyTabBarStyle()
 
+        // ### 把「谁来执行 x-callback」交代给回调中心
+        // 必须赶在下面 `handleURLContexts` 之前：冷启动时用户点的那个链接可能就是这个协议，晚一步请求就会先排队等一轮（虽然排队也处理了，但会白等）。窗口这时已经 `makeKeyAndVisible`，满足「弹确认框要有窗口」那个前提。
+        MarkdownCallbackCenter.shared.attach(router: workspace.documentListViewController.router,
+                                             presenter: workspace.rootViewController)
+
         // 冷启动：App 没在跑时用户双击 md 文件，URL 从这里进来。
         // 它只把 URL 存进 MarkdownDocumentOpener，等左栏那份文件列表出现之后
         // 自己去取、在新 Tab 里打开
@@ -101,7 +106,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     private func handleURLContexts(_ contexts: Set<UIOpenURLContext>) {
         for context in contexts {
-            MarkdownDocumentOpener.shared.handle(url: context.url)
+            let url = context.url
+            // 先问一句是不是 x-callback 协议。是的话由回调中心认领，别再往下当文件 URL 走 —— 下面那条路只收 file://，scheme 不对会被自己挡掉，用户看到的就是「点了链接什么都没发生」
+            if MarkdownCallbackCenter.shared.handle(url) { continue }
+            MarkdownDocumentOpener.shared.handle(url: url)
         }
     }
 

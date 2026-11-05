@@ -184,7 +184,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
         // 兜底：个别系统版本冷启动时只把文件 URL 放在 launchOptions 里，不派发给 scene
         if let url = launchOptions?[.url] as? URL {
-            MarkdownDocumentOpener.shared.handle(url: url)
+            // x-callback 的 URL 那时工作区还没建好，回调中心会先排队，等场景建完再执行
+            if !MarkdownCallbackCenter.shared.handle(url) {
+                MarkdownDocumentOpener.shared.handle(url: url)
+            }
         }
         #if DEBUG
         // DebugSwift 调试窗口：`setup()` 注册各个调试面板，`show()` 把屏幕上那个可拖动的入口显示出来。想关掉某个开销大的面板就写成 `DebugSwift().setup(disable: [.leaksDetector]).show()`。
@@ -201,6 +204,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ app: UIApplication,
                      open url: URL,
                      options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+        // 和 SceneDelegate 里那条一样：x-callback 先认领，剩下的才当文件 URL
+        if MarkdownCallbackCenter.shared.handle(url) { return true }
         MarkdownDocumentOpener.shared.handle(url: url)
         return true
     }

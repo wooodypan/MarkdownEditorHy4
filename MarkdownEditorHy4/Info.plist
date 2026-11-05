@@ -21,6 +21,19 @@
 				<string>public.plain-text</string>
 			</array>
 		</dict>
+		<!-- 打开JSON格式的主题时的配置 -->
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Markdown Theme</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.json</string>
+			</array>
+		</dict>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
@@ -49,6 +62,21 @@
 			</array>
 		</dict>
 	</dict>
+	
+	<!-- 外部 App / 快捷指令 / 网页用 xmark:// 调起本 App 干活，协议见 doc/x-callback-url方案.md -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.yijian.mirror.xcallback</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>xmark</string>
+			</array>
+		</dict>
+	</array>
 	<!-- 把 App 的 Documents 目录摆到「文件」App 里（iPhone / iPad 上的
 	     「我的 iPhone → MarkdownEditorHy4」）。
 	     开了沙盒之后，往容器里放文件 / 取文件都得有个正经入口，这就是那个入口。

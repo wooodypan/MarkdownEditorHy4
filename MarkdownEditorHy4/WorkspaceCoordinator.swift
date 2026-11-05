@@ -214,28 +214,15 @@ final class WorkspaceCoordinator {
             forName: .markdownThemeFileReceived,
             object: nil,
             queue: .main) { [weak self] _ in
-                self?.presentThemePageForFinderImport(attempt: 0)
+                self?.presentThemePageForFinderImport()
             }
     }
 
-    /// 把主题页弹出来（等窗口真的挂上之后再弹）。
+    /// 把主题页弹出来。
     ///
-    /// 冷启动时系统先把文件送进来，那一刻窗口还没 `makeKeyAndVisible`，这时候 `present` 会被系统直接丢掉（控制台一句 "view is not in a window hierarchy"）—— 所以等一拍再来，最多试十次，别无限等下去。
-    private func presentThemePageForFinderImport(attempt: Int) {
-        // 已经有东西弹着（比如用户正开着某个面板）就不抢：那一份文件在 `MarkdownThemeOpener` 里攒着，等用户自己打开主题页时会补上
-        guard rootViewController.presentedViewController == nil else { return }
-
-        guard rootViewController.view.window != nil else {
-            guard attempt < 10 else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                self?.presentThemePageForFinderImport(attempt: attempt + 1)
-            }
-            return
-        }
-
-        let controller = MarkdownThemeViewController(settings: .shared)
-        // 包一层导航栏的理由和文档页里那个一样：「完成」要挂在导航栏上
-        rootViewController.present(UINavigationController(rootViewController: controller), animated: true)
+    /// 「等窗口挂上再弹」「已经开着就只刷新」这些细节都在 `MarkdownThemeViewController.present(from:)` 里 —— x-callback 链接导入主题也要弹同一页，两处各写一份迟早会走偏。
+    private func presentThemePageForFinderImport() {
+        MarkdownThemeViewController.present(from: rootViewController)
     }
 
     // MARK: - 导航条

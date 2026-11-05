@@ -99,6 +99,8 @@ final class MarkdownCallbackCenter {
         case "read":
             performRead(request)
             completion()
+        case "import-theme":
+            performImportTheme(request, completion: completion)
         default:
             respondError(request, .invalidParam("不认识的动作「\(request.action)」"))
             completion()
@@ -369,6 +371,112 @@ final class MarkdownCallbackCenter {
         } catch {
             respondError(request, .invalidParam(error.localizedDescription))
         }
+    }
+
+    // MARK: - import-theme
+
+    /// 从网上下载一份主题 JSON、存进「我的主题」、切过去用它，然后把主题页摆出来。
+    ///
+    /// ### 这条动作为什么单独一套节奏
+    /// 别的动作都是当场就能算完的（读个文件、写个文件），只有它要等网络 —— 所以完成回调在这里分两段：先发请求，拿到响应再接着收尾。
+    /// 队列是串行的，不收尾下一条就不会动，这条路上每个分叉都必须叫一次 `completion`。
+    ///
+    /// ### 为什么导完要弹主题页
+    /// 导入的效果是「换了一整套颜色」，光靠正文悄悄变色，用户根本不知道发生了什么、也不知道去哪儿撤销。
+    /// 主题页顶上那块就是预览区，摆出来正好让人一眼看见新配色，还能就地换掉或者删掉。
+    private func performImportTheme(_ request: MarkdownCallbackURL.Parsed,
+                                    completion: @escaping () -> Void) {
+        guard let source = request.themeURL() else {
+            respondError(request, .invalidParam("没找到主题地址：写成 ?url=<编码后的网址>，或者把网址直接接在 import-theme 后面"))
+            completion()
+            return
+        }
+
+        var urlRequest = URLRequest(url: source)
+        urlRequest.timeoutInterval = 20
+        // 主题 JSON 只有几 KB，别吃缓存：作者改过一版再推一次，用户该拿到新的那份
+        urlRequest.cachePolicy = .reloadIgnoringLocalCacheData
+
+        URLSession.shared.dataTask(with: urlRequest) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else {
+                    completion()
+                    return
+                }
+                self.finishImportTheme(source: source,
+                                       data: data,
+                                       response: response,
+                                       error: error,
+                                       request: request,
+                                       completion: completion)
+            }
+        }.resume()
+    }
+
+    /// 下载回来之后的那一半：校验 → 解析 → 存盘 → 切过去 → 回回调 → 摆主题页
+    private func finishImportTheme(source: URL,
+                                   data: Data?,
+                                   response: URLResponse?,
+                                   error: Error?,
+                                   request: MarkdownCallbackURL.Parsed,
+                                   completion: @escaping () -> Void) {
+        defer { completion() }
+
+        if let error {
+            respondError(request, .importFailed("下载失败了：\(error.localizedDescription)"))
+            return
+        }
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            respondError(request, .importFailed("服务器返回 \(http.statusCode)"))
+            return
+        }
+        guard let data, !data.isEmpty else {
+            respondError(request, .importFailed("下载回来是空的"))
+            return
+        }
+        // 真正的主题只有几 KB，几 MB 的多半是链接点错了（指向图片、视频之类），别整份读进内存再慢慢解析
+        guard data.count <= Self.themeSizeLimit else {
+            respondError(request, .importFailed("这份有 \(data.count / 1024) KB，不像是主题文件"))
+            return
+        }
+
+        let palette: MarkdownColorPalette
+        do {
+            palette = try MarkdownThemeFileImport.palette(from: data)
+        } catch {
+            respondError(request, .importFailed(error.localizedDescription))
+            return
+        }
+
+        // 名字和本地导入那条路保持一致：取网址最后一段（`Atom.json`），重名自动变「Atom.json 2」
+        let name = MarkdownCustomThemeStore.shared.uniquedName(Self.themeName(for: source))
+        do {
+            try MarkdownCustomThemeStore.shared.save(palette: palette, named: name)
+        } catch {
+            respondError(request, .writeFailed(error.localizedDescription))
+            return
+        }
+        // 和主题页里点「导入」完全一样：存完就切过去用它（这一步会广播，开着的文档当场换色）
+        MarkdownEditorSettings.shared.setCustomThemeFileName(name)
+
+        respondSuccess(request, params: [
+            "name": name,
+            "colors": String(palette.definedColorCount),
+            "source": source.absoluteString
+        ])
+
+        if let presenter {
+            MarkdownThemeViewController.present(from: presenter)
+        }
+    }
+
+    /// 主题文件大小上限：一份配色表撑死几十 KB，1 MB 已经宽得离谱了
+    private static let themeSizeLimit = 1_048_576
+
+    /// 这份主题在列表里叫什么：网址最后一段（`Atom.json`），取不到就用一个通用名
+    private static func themeName(for source: URL) -> String {
+        let last = source.lastPathComponent
+        return last.isEmpty ? "网络主题.json" : last
     }
 
     // MARK: - 小工具

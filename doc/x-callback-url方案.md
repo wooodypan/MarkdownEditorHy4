@@ -1,6 +1,6 @@
 # x-callback-url 方案
 
-给「别的 App / 快捷指令 / 网页」一个入口，让它能打开、创建、追加、读取本 App 的笔记。协议照 Bear 的 x-callback-url 来，参数名尽量对齐，能少记一套。
+给「别的 App / 快捷指令 / 网页」一个入口，让它能打开、创建、追加、读取本 App 的笔记，还能把网上的主题配色拉进来。协议照 Bear 的 x-callback-url 来，参数名尽量对齐，能少记一套。
 
 ## 1. URL 格式
 
@@ -9,7 +9,7 @@ xmark://x-callback-url/<action>?<参数>&x-success=<回调 URL>&x-error=<回调 
 ```
 
 - scheme 固定 `xmark`，是 `Info.plist` 的 `CFBundleURLTypes` 里注册的。
-- `<action>` 只认四个：`open-note`、`create`、`add-text`、`read`。
+- `<action>` 只认五个：`open-note`、`create`、`add-text`、`read`、`import-theme`。
 - `x-success` / `x-error` 可选。不给就干完活悄悄结束，不回话。
 - 也接受简写 `xmark://<action>?...`，省掉 `x-callback-url` 那一段，方便手敲和调试。两种写法行为完全一样。
 
@@ -108,6 +108,40 @@ xmark://x-callback-url/<action>?<参数>&x-success=<回调 URL>&x-error=<回调 
 
 读的永远是磁盘上的内容。`unsaved=yes` 是在提醒调用方「你读到的不是用户屏幕上那一版」。
 
+### 3.5 import-theme
+
+把一个网址上的主题 JSON 下载下来、存成「我的主题」里的一行、切过去用它，然后把主题页摆到屏幕上（那一页顶上就是预览区，当场能看见新配色）。
+
+主题地址有两种写法，`url=` 参数优先：
+
+```
+xmark://x-callback-url/import-theme?url=https%3A%2F%2Fxxx.com%2Fdemo%2FAtom.json
+xmark://x-callback-url/import-theme/https://xxx.com/demo/Atom.json
+```
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `url` | 二选一 | 主题 JSON 的完整地址，percent 编码 |
+| 路径 | 二选一 | 把完整网址直接接在动作后面，`/` 不用编码（`https://` 里的双斜杠照写） |
+
+只认 `http` / `https`。`file://` 之类的一律拒掉，免得一个链接就能读出 App 里任意一个文件。
+
+`x-success` 参数：
+
+| 字段 | 说明 |
+| --- | --- |
+| `name` | 存进「我的主题」之后的名字（就是列表上那一行，重名会自动变成「Atom.json 2」） |
+| `colors` | 这份配色写了几个色 |
+| `source` | 下载用的原始地址 |
+
+成功之后一定会发生三件事：文件存进 App 自己的目录、当前配色切到这一份、主题页被弹出来（已经开着就只刷新它，不再叠一层）。
+
+几点行为约定：
+
+- 下载 20 秒超时，超过 1 MB 直接判失败（真主题只有几 KB，这么大八成是链接指错了）。
+- 不走磁盘缓存，作者改一版再推一次，拿到的就是新的那份。
+- 下载失败、服务器报错、拿回来的不是主题，一律 `-1008`，`error-message` 里写清是哪一种。
+
 ## 4. 回调约定
 
 - 动作真正做完之后才发 `x-success`。写盘是同步的，所以只有「冲突提示等用户点按钮」那一条路是异步的。
@@ -127,6 +161,7 @@ xmark://x-callback-url/<action>?<参数>&x-success=<回调 URL>&x-error=<回调 
 | -1005 | `note_busy` | 笔记有未保存修改，但当时没法弹框确认；或者用户选了保存、保存却失败了 |
 | -1006 | `write_failed` | 写盘失败 |
 | -1007 | `canceled` | 用户在冲突提示里点了取消 |
+| -1008 | `import_failed` | 主题没导进来：网址没给对、下载失败、服务器报错、拿回来的不是一份主题 |
 
 `x-error` 固定带两个参数：`error-code`（数字，字符串形式）、`error-message`（中文说明）。
 
@@ -150,7 +185,7 @@ xmark://x-callback-url/<action>?<参数>&x-success=<回调 URL>&x-error=<回调 
 | 文件 | 职责 |
 | --- | --- |
 | `MarkdownEditorHy4/x-callback-url/MarkdownCallbackURL.swift` | URL 解析、动作分发用的参数容器、错误类型、id 到路径的换算。纯逻辑，不碰界面 |
-| `MarkdownEditorHy4/x-callback-url/MarkdownCallbackCenter.swift` | 四个动作的执行、请求排队、冲突弹框、拼回调 URL 并打开 |
+| `MarkdownEditorHy4/x-callback-url/MarkdownCallbackCenter.swift` | 五个动作的执行、请求排队、冲突弹框、主题下载、拼回调 URL 并打开 |
 | `MarkdownEditorHy4/x-callback-url/MarkdownDocumentRegistry.swift` | 「打开中的编辑器」弱引用表，key 是规范化路径 |
 
 ### 改动文件
@@ -161,6 +196,8 @@ xmark://x-callback-url/<action>?<参数>&x-success=<回调 URL>&x-error=<回调 
 | `MarkdownEditorHy4/SceneDelegate.swift` | 建好工作区之后把路由和根控制器交给回调中心；URL 分流时先问回调中心认不认 |
 | `MarkdownEditorHy4/AppDelegate.swift` | 两条兜底路径（`application(_:open:options:)`、冷启动 `launchOptions[.url]`）同样先问回调中心 |
 | `MarkdownEditorHy4/MarkdownDocumentViewController+DocumentContent.swift` | 装文档、改名的三处把控制器登记进弱引用表 |
+| `MarkdownEditorHy4/Setting/MarkdownThemeFileImport.swift` | 拆出「从内存数据解析一份配色」这一层，本地导入和网络导入过同一套检查 |
+| `MarkdownEditorHy4/Setting/MarkdownThemeViewController.swift` | 加 `present(from:)`：弹主题页的唯一入口（等窗口、已经开着就只刷新）；`WorkspaceCoordinator` 那条 Finder 路径改成调它 |
 
 ### 为什么要有那张弱引用表
 
@@ -178,6 +215,10 @@ xmark://x-callback-url/<action>?<参数>&x-success=<回调 URL>&x-error=<回调 
 | iPhone 上打开是 push | 连续调 `open-note` 会叠好几页。iPad / Mac 是 Tab，没这个问题 |
 | 追加后刷新会清撤销栈 | `apply` 对同一份文档刻意不清撤销栈，所以刷新前手动清一次，避免 ⌘Z 恢复出半新半旧的内容 |
 | 参数里带 `&` `#` `%` | 只按第一个 `&` 切参数，值整体 percent 解码一次，不再解第二次 |
+| 路径形式的网址不能再带自己的 query | 解析时按第一个 `?` 切开：前面是动作和网址，后面全是本协议的参数。主题地址本身带 query 就改用 `url=` 写 |
+| `http` 能不能下取决于 App Transport Security | 现在 `Info.plist` 没给 http 开例外，公网上 `http://` 的地址会被系统拦掉（报错走 `-1008`）。自己的服务器就用 `https` |
+| 网络那条路是异步的 | 动作队列串行，下载没回来之前后面的请求都在排。每个失败分支都必须叫一次 `completion`，少一处队列就卡死 |
+| 导完立刻弹主题页 | 冷启动时窗口可能还没挂上，`present` 会被系统丢掉。`present(from:)` 里最多等十拍（每拍 0.2 秒），等不到就只导入、不弹页 |
 
 ## 9. 自测
 
@@ -191,6 +232,10 @@ open 'xmark://x-callback-url/add-text?id=%E6%B5%8B%E8%AF%95.md&text=world&mode=a
 open 'xmark://x-callback-url/open-note?id=%E6%B5%8B%E8%AF%95.md'
 
 open 'xmark://x-callback-url/read?id=%E6%B5%8B%E8%AF%95.md'
+
+open 'xmark://x-callback-url/import-theme/https://xxx.com/demo/Atom.json'
+
+open 'xmark://x-callback-url/import-theme?url=https%3A%2F%2Fxxx.com%2Fdemo%2FAtom.json'
 ```
 
 验证清单：
@@ -202,3 +247,6 @@ open 'xmark://x-callback-url/read?id=%E6%B5%8B%E8%AF%95.md'
 5. `read` 拿到的 `note` 和磁盘一致；超长文档有 `truncated=yes`。
 6. 给一个不存在的 `id` → 收到 `-1001`；给 `id=../x.md` → 收到 `-1003`。
 7. 带 `x-success=https://example.com/ok` 调 `read`，回调地址上能看到参数。
+8. `import-theme` 之后：`Application Support/MarkdownEditorHy4/Themes/` 下多一份 `Atom.json.json`，`Caches/MarkdownEditorHy4/settings.json` 里 `customThemeFileName` 变成 `Atom.json`，主题页当场弹出来且预览已经换色。
+9. 同一个地址再导一次 → 变成「Atom.json 2」，原来的那份不受影响。
+10. 换成不存在的地址 / 一个网页地址 → 收到 `-1008`，`error-message` 分别是「服务器返回 404」和「不是一份能解析的 JSON」。

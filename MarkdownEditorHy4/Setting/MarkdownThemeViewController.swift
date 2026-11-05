@@ -802,6 +802,52 @@ extension MarkdownThemeViewController: UIDropInteractionDelegate {
     }
 }
 
+// MARK: - 从外面把这一页弹出来
+
+extension MarkdownThemeViewController {
+
+    /// 把主题页弹出来的唯一入口（Finder 送文件、x-callback 链接导入，两条路共用）。
+    ///
+    /// ### 为什么要等窗口
+    /// 冷启动时请求比界面先到，那一刻窗口还没 `makeKeyAndVisible`，这时候 `present` 会被系统直接丢掉（控制台一句 "view is not in a window hierarchy"）—— 所以隔一拍再试，最多十次，别无限等下去。
+    ///
+    /// ### 已经开着就不再叠一层
+    /// 用户可能正停在主题页上（从文档「更多」菜单进来的）。这时候该做的是让它自己按新设置重画一遍，而不是在它上面再盖一张一模一样的。
+    static func present(from host: UIViewController, attempt: Int = 0) {
+        // 上面已经盖着东西就不抢：Finder 那一份在 `MarkdownThemeOpener` 里攒着，等用户自己打开主题页时会补上
+        if let top = host.presentedViewController {
+            themePage(in: top)?.reloadAfterExternalImport()
+            return
+        }
+
+        guard host.view.window != nil else {
+            guard attempt < 10 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                present(from: host, attempt: attempt + 1)
+            }
+            return
+        }
+
+        let controller = MarkdownThemeViewController(settings: .shared)
+        // 包一层导航栏的理由和文档页里那个一样：「完成」要挂在导航栏上
+        host.present(UINavigationController(rootViewController: controller), animated: true)
+    }
+
+    /// 从弹出来的那一层里认出主题页（可能是它自己，也可能是包着它的导航栏 —— 用户点进「逐色调整」时还压在栈里）
+    private static func themePage(in controller: UIViewController) -> MarkdownThemeViewController? {
+        if let page = controller as? MarkdownThemeViewController { return page }
+        return (controller as? UINavigationController)?
+            .viewControllers
+            .compactMap { $0 as? MarkdownThemeViewController }
+            .first
+    }
+
+    /// 外面换了一份主题（x-callback 导入）：行、对勾、顶上那块预览都按新设置重画一遍
+    func reloadAfterExternalImport() {
+        reloadAll()
+    }
+}
+
 // MARK: - 一行右边的色卡
 
 /// 一行预览要用的三个颜色：底色、正文色、强调色（链接那条主色）。

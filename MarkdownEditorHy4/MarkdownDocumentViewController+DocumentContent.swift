@@ -84,6 +84,8 @@ extension MarkdownDocumentViewController {
               openedFileURL == from else { return }
 
         openedFileURL = to
+        // 换了一把钥匙，登记表也得跟着改：不改的话 x-callback 按新路径找不到这一页
+        MarkdownDocumentRegistry.shared.register(self, for: to)
         // 旧路径那条「读到哪儿」没人用了。文件名以后可能被重新用上，那时不该莫名跳到文档中间，所以要主动忘掉（和删除那份文档时做的是同一件事）
         scrollMemory.forget(key: from.path)
         // 历史是按路径存的一个文件夹，改名等于换了一把钥匙，得把那个文件夹整个搬到新钥匙下面。
@@ -123,6 +125,8 @@ extension MarkdownDocumentViewController {
         let oldKey = openedPath
 
         openedFileURL = moved
+        // 整个目录改名，路径前缀全变了，登记表也要按新路径记一遍
+        MarkdownDocumentRegistry.shared.register(self, for: moved)
         // 「读到哪儿」的钥匙也是完整路径，一起搬过去。列表那边会整片迁一遍，这里只补自己这一份 —— 重复迁是幂等的，找不到旧 key 就什么都不做
         if let offset = scrollMemory.sourceOffset(for: oldKey) {
             scrollMemory.remember(sourceOffset: offset, for: moved.path)
@@ -164,6 +168,8 @@ extension MarkdownDocumentViewController {
         if !isSameDocument { rememberCurrentScrollPosition() }
 
         openedFileURL = url
+        // 登记一下「这一页现在编的是哪份文件」：x-callback 要判断这份笔记是不是开着、写完之后还要把新内容刷回这一页（见 `MarkdownDocumentRegistry`）
+        MarkdownDocumentRegistry.shared.register(self, for: url)
         savedSource = item.body
         // 换了一份文档，「我改过了」这件事重新从零算（新 Tab 该有新的机会被固定）
         didReportEdited = false

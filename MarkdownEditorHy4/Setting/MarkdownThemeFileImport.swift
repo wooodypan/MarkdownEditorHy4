@@ -5,9 +5,9 @@
 //  主题 JSON 文件的「读进来」+「从 Finder 送进来」这两件事。
 //
 //  ### 为什么要单独收一层
-//  主题文件现在有三条来的路：主题页里点「导入」挑一份、在 Finder 里双击 /「打开方式」/ 拖到 Dock 图标、以及（iPad / Mac）直接拖到主题页上。
-//  三条路要做的检查一模一样：**读得到 → 是合法 JSON → 里面至少有一个色**，差别只在「文件从哪来」。
-//  写成三份的话，迟早有一条忘了「一个色都没有要拒绝」那一关，用户就会遇到「导入了却没反应」。
+//  主题文件现在有四条来的路：主题页里点「导入」挑一份、在 Finder 里双击 /「打开方式」/ 拖到 Dock 图标、直接拖到主题页上、以及从 x-callback 链接下载（`xmark://…/import-theme/…`）。
+//  四条路要做的检查一模一样：**读得到 → 是合法 JSON → 里面至少有一个色**，差别只在「文件从哪来」。
+//  写成四份的话，迟早有一条忘了「一个色都没有要拒绝」那一关，用户就会遇到「导入了却没反应」。
 //
 //  ### 为什么「一个色都没有」要当失败
 //  配色表是一张覆盖表（`MarkdownColorPalette`），字段全是可选的：随便拿一份别的 JSON（package.json 之类）
@@ -68,7 +68,13 @@ enum MarkdownThemeFileImport {
         } catch {
             throw MarkdownThemeImportError.unreadable
         }
+        return try palette(from: data)
+    }
 
+    /// 从内存里的字节解出一份配色表。
+    ///
+    /// x-callback 那条路是「先下载、再解析」，手上只有 `Data`、没有文件 —— 抽这一层，两边过的是同一套检查（合法 JSON + 至少一个色），不会出现「本地导入要求严、网络导入什么烂 JSON 都收」。
+    static func palette(from data: Data) throws -> MarkdownColorPalette {
         let palette: MarkdownColorPalette
         do {
             palette = try JSONDecoder().decode(MarkdownColorPalette.self, from: data)
