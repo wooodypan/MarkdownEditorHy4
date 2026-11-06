@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/wooodypan/iOSDemoHub.git",
       "state" : {
-        "revision" : "14adcd42cb9ecb5b4508a5558621dc25d4648f10",
-        "version" : "1.0.3"
+        "revision" : "7231232b7169617c0b2c592b0996eaf08dad8940",
+        "version" : "1.0.5"
       }
     },
     {

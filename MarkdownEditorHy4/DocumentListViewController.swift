@@ -1057,14 +1057,18 @@ final class DocumentListViewController: UIViewController {
             if entry.isDirectory {
                 return folderMenu(for: entry)
             }
+            var children: [UIMenuElement] = [
+                renameAction(for: url),
+                // 「导出」是个子菜单（图片 / HTML / PDF），整块由 `DocumentExporter` 生成 ——编辑页那个菜单用的是同一个方法，所以两处的选项永远一致
+                exporter.exportMenu { [weak self] in self?.exportSource(for: url) }
+            ]
+            if let reveal = revealAction(for: url) {
+                children.append(reveal)
+            }
+            // 删除永远放最后：破坏性操作不该出现在手指最容易点到的位置
+            children.append(deleteAction(for: url))
             // 菜单顶上的小标题用文件名：右键的时候正好再确认一眼点的是哪一份
-            return UIMenu(title: entry.name,
-                          children: [
-                              renameAction(for: url),
-                              // 「导出」是个子菜单（图片 / HTML / PDF），整块由 `DocumentExporter` 生成 ——编辑页那个菜单用的是同一个方法，所以两处的选项永远一致
-                              exporter.exportMenu { [weak self] in self?.exportSource(for: url) },
-                              deleteAction(for: url)
-                          ])
+            return UIMenu(title: entry.name, children: children)
         case .recent:
             // 「最近」里只动记录，不动文件
             return removeMenu(for: url)
@@ -1077,12 +1081,23 @@ final class DocumentListViewController: UIViewController {
                                    image: UIImage(systemName: "square.and.pencil")) { [weak self] _ in
             self?.createDocument(in: entry.url)
         }
-        return UIMenu(title: entry.name,
-                      children: [
-                          newDocument,
-                          renameAction(for: entry.url),
-                          deleteAction(for: entry.url)
-                      ])
+        var children: [UIMenuElement] = [newDocument, renameAction(for: entry.url)]
+        if let reveal = revealAction(for: entry.url) {
+            children.append(reveal)
+        }
+        children.append(deleteAction(for: entry.url))
+        return UIMenu(title: entry.name, children: children)
+    }
+
+    /// 「在访达显示」那一项。iPhone / iPad 上没有访达，返回 nil 让这一项整个不出现。
+    ///
+    /// 文件已经不在了也不给这一项：点下去访达只会打开父目录，看着像点了个没用的按钮。
+    private func revealAction(for url: URL) -> UIAction? {
+        guard FinderReveal.isAvailable,
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return UIAction(title: "在访达显示", image: UIImage(systemName: "folder")) { _ in
+            FinderReveal.show(url)
+        }
     }
 
     // MARK: - 文档页：重命名 / 导出 / 删除
@@ -1367,8 +1382,14 @@ final class DocumentListViewController: UIViewController {
         }
         // 标题里就把「文件不会没」说清楚：这一页的删除只动记录，
         // 用户最担心的恰恰是「我是不是把文件删了」
+        var children: [UIMenuElement] = []
+        // 「最近」里的文件可能来自容器外（用「打开…」进来的），在访达定位正是最用得上的时候
+        if let reveal = revealAction(for: url) {
+            children.append(reveal)
+        }
+        children.append(remove)
         return UIMenu(title: "\(DocumentsWorkspace.displayName(for: url))\n（只从列表里去掉，文件还在）",
-                      children: [remove])
+                      children: children)
     }
 
     /// 从记录里去掉一份（**不动磁盘上的文件**，所以不用弹确认框——移错了再打开一次就回来了）
